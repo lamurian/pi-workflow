@@ -1,6 +1,6 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, rm, readdir } from "node:fs/promises";
+import { mkdir, rm, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -128,6 +128,129 @@ describe("batch_create_adrs tool", () => {
 
     assert.ok(result.isError, "Empty array should return an error");
   });
+
+  it("tracks batch-created ADRs in ARCHITECTURE.md", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_adrs");
+    assert.ok(tool);
+
+    const ctx = mockCtx();
+    const result = await tool.execute(
+      "call-arch-1",
+      {
+        adrs: [
+          {
+            title: "Arch Tracked",
+            description: "Should appear in ARCHITECTURE.md",
+            context: "Test context",
+            decision: "Test decision",
+            impact: "Test impact",
+            summary: "Test summary entry",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      ctx,
+    );
+
+    assert.ok(result, "Should return a result");
+    assert.ok(!result.isError, `Batch ADR creation should succeed, got: ${result.content?.[0]?.text}`);
+
+    // Verify ARCHITECTURE.md exists and contains the ADR entry
+    const archPath = join(tmpDir, "ARCHITECTURE.md");
+    const archContent = await readFile(archPath, "utf-8");
+    // Entry format: "- [D] @docs/ADR/NNN-arch-tracked.md Test summary entry"
+    assert.ok(
+      archContent.includes("arch-tracked"),
+      "ARCHITECTURE.md should contain the slug from ADR filename",
+    );
+    assert.ok(
+      archContent.includes("Test summary entry"),
+      "ARCHITECTURE.md should contain the ADR summary",
+    );
+  });
+
+  it("creates batch ADRs without requiring remaining field", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_adrs");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-no-rem",
+      {
+        adrs: [
+          {
+            title: "No Rem Field",
+            description: "No remaining field passed",
+            context: "Ctx",
+            decision: "Dec",
+            impact: "Imp",
+            summary: "No rem",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    assert.ok(!result.isError, `Should succeed without remaining field, got: ${result.content?.[0]?.text}`);
+
+    // Verify the ADR was created
+    const adrDir = join(tmpDir, "docs", "ADR");
+    const files = await readdir(adrDir);
+    const noRemFile = files.find(f => f.includes("no-rem"));
+    assert.ok(noRemFile, "ADR file should exist");
+  });
+
+  it("reports structured output with success count", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_adrs");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-structured-1",
+      {
+        adrs: [
+          {
+            title: "Structured One",
+            description: "First",
+            context: "Ctx",
+            decision: "Dec",
+            impact: "Imp",
+            summary: "Sum one",
+          },
+          {
+            title: "Structured Two",
+            description: "Second",
+            context: "Ctx",
+            decision: "Dec",
+            impact: "Imp",
+            summary: "Sum two",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(text.includes("Processed 2 ADR"), `Should show processed count, got: ${text}`);
+    assert.ok(text.includes("2 created"), `Should show creation count, got: ${text}`);
+  });
 });
 
 describe("batch_create_specs tool", () => {
@@ -251,5 +374,96 @@ describe("batch_create_specs tool", () => {
     );
 
     assert.ok(result.isError, "Empty array should return an error");
+  });
+
+  it("rejects spec with title exceeding 5 words", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_specs");
+    assert.ok(tool);
+
+    // Use a title with a numeric suffix to avoid slug false positives
+    const result = await tool.execute(
+      "call-guard-1",
+      {
+        adrNumber: 1,
+        specs: [
+          {
+            title: "A B C D E F G H",
+            content: "# Requirements Specification\n\n- Req\n\n# Design Principles\n\n- Design\n\n# References\n\n",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(
+      text.includes("max is 5") || text.includes("title has 8 words"),
+      `Should mention word limit violation, got: ${text}`,
+    );
+  });
+
+  it("rejects spec referencing multiple ADRs", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_specs");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-guard-2",
+      {
+        adrNumber: 1,
+        specs: [
+          {
+            title: "Multi ADR",
+            content: "# Requirements Specification\n\n- Req\n\n# Design Principles\n\n- Design\n\n# References\n\nThis spec implements @docs/ADR/001-*.md and @docs/ADR/002-*.md",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(text.includes("multiple ADRs") || text.includes("separate specs"),
+      `Should mention multiple ADR violation, got: ${text}`);
+  });
+
+  it("allows spec with correct single ADR reference", async () => {
+    const pi = mockPi();
+    const { registerBatchTools } = await import("../extensions/batch-tools.ts");
+    registerBatchTools(pi);
+
+    const tool = pi.tools.find((t) => t.name === "batch_create_specs");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-guard-3",
+      {
+        adrNumber: 1,
+        specs: [
+          {
+            title: "Valid Spec",
+            content: "# Requirements Specification\n\n- Req\n\n# Design Principles\n\n- Design\n\n# References\n\nThis spec implements @docs/ADR/001-*.md",
+          },
+        ],
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    assert.ok(!result.isError, `Valid spec should succeed, got: ${result.content?.[0]?.text}`);
   });
 });

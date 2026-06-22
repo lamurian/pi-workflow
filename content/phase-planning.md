@@ -25,14 +25,16 @@ Before writing implementation steps, **verify architectural assumptions** by che
      → Plan 003: <title> — <brief objective>
    ```
    The plan numbers (001, 002, 003...) define the implementation order. Number them sequentially in the order they should be executed.
-3. **Present the full ordered mapping** to the user, then call `workflow_transition({ phase: "implementing", outline: "<mapping>" })` to run the atomicity check. Each plan must have exactly one `DoD:`. Fix any violations and re-run until the check passes.
-4. **When the atomicity check passes**, create ALL plans using `plan_create` in the defined sequence order.
-5. **After ALL plans are created**, build a final summary:
+3. **Present the full ordered mapping** to the user for approval.
+4. **Create ALL plans** using `plan_create` in the defined sequence order.
+5. **After ALL plans are created**, run `validate_documents({ phase: "planning" })` to validate the created plans.
+6. **If violations are reported**, fix them and re-run validation.
+7. **Once validation passes**, build a final summary:
    - Read all ADR, spec, and plan files
    - Summarize everything made: ADRs (decisions), specs (specifications), plans (tasks)
    - Recommend the implementation flow based on the plan order
    - Write a condensed ARCHITECTURE.md (≤100 lines) with `write` or `edit` if one doesn't exist
-6. **Finally**, call `workflow_transition({ phase: "implementing", force: true })` to transition to the implementing phase.
+8. **Finally**, call `workflow_transition({ phase: "implementing", force: true })` to transition to the implementing phase.
 
 ## Rules
 - Tasks should be concrete and actionable (one person, one session).

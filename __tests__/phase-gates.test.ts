@@ -149,6 +149,44 @@ describe("checkToolPhaseGate", () => {
 
   // ─── Unknown tools ────────────────────────────────────────
 
+  // ─── Batch tools ─────────────────────────────────────────
+
+  it("allows batch_create_adrs during requirements phase", () => {
+    const result = checkToolPhaseGate("batch_create_adrs", "requirements");
+    assert.equal(result, null, "batch_create_adrs should be allowed in requirements phase");
+  });
+
+  it("blocks batch_create_adrs during specifying phase", () => {
+    const result = checkToolPhaseGate("batch_create_adrs", "specifying");
+    assert.ok(result, "Should block batch_create_adrs in specifying phase");
+    assert.ok(result!.block);
+    assert.ok(result!.reason.includes("requirements"), "Reason should mention requirements");
+  });
+
+  it("blocks batch_create_adrs during planning phase", () => {
+    const result = checkToolPhaseGate("batch_create_adrs", "planning");
+    assert.ok(result);
+    assert.ok(result!.block);
+  });
+
+  it("allows batch_create_specs during specifying phase", () => {
+    const result = checkToolPhaseGate("batch_create_specs", "specifying");
+    assert.equal(result, null, "batch_create_specs should be allowed in specifying phase");
+  });
+
+  it("blocks batch_create_specs during requirements phase", () => {
+    const result = checkToolPhaseGate("batch_create_specs", "requirements");
+    assert.ok(result, "Should block batch_create_specs in requirements phase");
+    assert.ok(result!.block);
+    assert.ok(result!.reason.includes("specifying"), "Reason should mention specifying");
+  });
+
+  it("blocks batch_create_specs during planning phase", () => {
+    const result = checkToolPhaseGate("batch_create_specs", "planning");
+    assert.ok(result);
+    assert.ok(result!.block);
+  });
+
   it("allows unknown tools in any brainstorm phase", () => {
     assert.equal(checkToolPhaseGate("unknown_tool", "requirements"), null);
     assert.equal(checkToolPhaseGate("another_tool", "specifying"), null);

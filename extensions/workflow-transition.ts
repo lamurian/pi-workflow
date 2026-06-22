@@ -19,12 +19,11 @@ const VALID_PHASES = [
 ] as const;
 
 /**
- * Regex patterns used by the atomicity check.
+ * Maximum age for a validation token (5 minutes).
  */
-const DECISION_LINE_RE = /^ {2}Decision:\s*/;
-const DOD_LINE_RE = /^ {2}DoD:\s*/;
-const PARENT_RE = /^(ADR|Spec|Plan) (\d{3}) — (.+)$/;
-const CONJUNCTION_RE = /\b(and|&|\+|,)\b/i;
+const TOKEN_MAX_AGE_MS = 5 * 60 * 1000;
+
+// ── Auto-heal remaining counts ─────────────────────────────────
 
 /**
  * Auto-compute remaining counts for all non-implemented specs and ADRs.
@@ -203,202 +202,109 @@ async function checkPhasePreconditions(
   return null;
 }
 
-// ── Outline parsing ────────────────────────────────────────────
+// ── Validation token checks ────────────────────────────────────
 
-interface OutlineItem {
-  kind: "adr" | "spec";
-  number: string;
-  title: string;
-  children: OutlineChild[];
-}
-
-interface OutlineChild {
-  type: "decision" | "dod";
-  text: string;
+interface ValidationToken {
+  phase: string;
+  timestamp: number;
+  phaseHash: string;
 }
 
 /**
- * Parse a structured outline text into items.
+ * Find the most recent validation token for a given phase.
  *
- * Expected format:
- * ```
- * ADR NNN — Title
- *   Decision: ...
- * Spec NNN — Title
- *   DoD: ...
- * ```
+ * Scans session entries in reverse for entries with customType=validation_token
+ * and matching phase.
  *
- * @param outline - Indented outline text.
- * @returns Parsed outline items.
+ * @param ctx   - Extension context.
+ * @param phase - Target phase to check.
+ * @returns The token if valid and current, or null if missing/expired.
  */
-function parseOutline(outline: string): OutlineItem[] {
-  const items: OutlineItem[] = [];
-  const lines = outline.split("\n");
-  let currentItem: OutlineItem | null = null;
-
-  for (const rawLine of lines) {
-    const trimmed = rawLine.trimEnd();
-    if (!trimmed) continue;
-
-    // Check for parent line (ADR/Spec/Plan NNN — Title)
-    const parentMatch = trimmed.match(PARENT_RE);
-    if (parentMatch) {
-      currentItem = {
-        kind: parentMatch[1].toLowerCase() === "adr" ? "adr" : "spec",
-        number: parentMatch[2],
-        title: parentMatch[3],
-        children: [],
-      };
-      items.push(currentItem);
-      continue;
-    }
-
-    if (!currentItem) continue;
-
-    // Check for child line (indented Decision: or DoD:)
-    const isDecision = trimmed.match(DECISION_LINE_RE);
-    const isDod = trimmed.match(DOD_LINE_RE);
-
-    if (isDecision) {
-      currentItem.children.push({
-        type: "decision",
-        text: trimmed.replace(DECISION_LINE_RE, "").trim(),
-      });
-    } else if (isDod) {
-      currentItem.children.push({
-        type: "dod",
-        text: trimmed.replace(DOD_LINE_RE, "").trim(),
-      });
+function findValidationToken(
+  ctx: { sessionManager: { getBranch: () => Array<{ type: string; customType?: string; data?: unknown }> } },
+  phase: string,
+): ValidationToken | null {
+  const entries = ctx.sessionManager.getBranch();
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (
+      entry.type === "custom" &&
+      entry.customType === "validation_token"
+    ) {
+      const data = entry.data as ValidationToken;
+      if (data && data.phase === phase) {
+        // Check age
+        if (Date.now() - data.timestamp < TOKEN_MAX_AGE_MS) {
+          return data;
+        }
+        return null; // Expired
+      }
     }
   }
-
-  return items;
+  return null; // Not found
 }
+
+// ── Common issue detection for cancellation diagnostics ────────
 
 /**
- * Check if a title contains conjunctions suggesting multiple concerns.
- */
-function hasTitleConjunction(title: string): boolean {
-  return CONJUNCTION_RE.test(title);
-}
-
-interface AtomicityReport {
-  items: Array<{
-    kind: string;
-    number: string;
-    title: string;
-    childCount: number;
-    childType: string;
-    isAtomic: boolean;
-    conjunctionWarning: boolean;
-  }>;
-  violations: number;
-  warnings: number;
-}
-
-/**
- * Run atomicity check on an outline.
+ * Scan for common issues when transitioning to a phase.
  *
- * Determines the expected child type based on phase:
- * - specifying → expect "Decision" children per ADR
- * - planning   → expect "DoD" children per spec
+ * Runs validateMappings + numbering collision check + remaining count check.
  *
- * @param outline - Structured outline text.
- * @param phase   - Target phase to determine child type.
- * @returns Atomicity report.
+ * @param cwd   - Project working directory.
+ * @param phase - Target phase.
+ * @returns Array of human-readable issue messages.
  */
-function checkAtomicity(outline: string, phase: string): AtomicityReport {
-  const items = parseOutline(outline);
-  const childType = phase === "specifying" ? "decision" : "dod";
-  const childLabel = childType === "decision" ? "Decision" : "DoD";
+async function detectCommonIssues(cwd: string, phase: string): Promise<string[]> {
+  const issues: string[] = [];
+  const config = await loadDirectoriesConfig(cwd);
 
-  const results: AtomicityReport["items"] = [];
-  let violations = 0;
-  let warnings = 0;
-
-  for (const item of items) {
-    const relevantChildren = item.children.filter((c) => c.type === childType);
-    const count = relevantChildren.length;
-    const isAtomic = count === 1;
-    const conjWarning = hasTitleConjunction(item.title);
-
-    if (!isAtomic) violations++;
-    if (conjWarning) warnings++;
-
-    results.push({
-      kind: item.kind === "adr" ? "ADR" : "Spec",
-      number: item.number,
-      title: item.title,
-      childCount: count,
-      childType: childLabel,
-      isAtomic,
-      conjunctionWarning: conjWarning,
-    });
-  }
-
-  return { items: results, violations, warnings };
-}
-
-/**
- * Build a human-readable atomicity report string.
- *
- * @param report - Atomicity check results.
- * @param phase  - Target phase for context.
- * @returns Formatted markdown report.
- */
-function formatAtomicityReport(report: AtomicityReport, phase: string): string {
-  const lines: string[] = [];
-  lines.push("╔══════════════════════════════════════════════════════════════╗");
-  lines.push("║  Atomicity Check Required                                   ║");
-  lines.push("╚══════════════════════════════════════════════════════════════╝");
-  lines.push("");
-  lines.push(`Review the ${phase} outline and verify each item is atomic.`);
-  lines.push("");
-
-  for (const item of report.items) {
-    const icon = item.isAtomic ? "✓" : "✗";
-    const conjIcon = item.conjunctionWarning ? " ⚠️" : "";
-    lines.push(
-      `${icon}${conjIcon} ${item.kind} ${item.number} — ${item.title}`,
-    );
-
-    if (item.isAtomic) {
-      lines.push(`   1 ${item.childType} — atomic`);
-    } else if (item.childCount === 0) {
-      lines.push(`   No ${item.childType} declared — add exactly one`);
-    } else {
-      lines.push(`   ${item.childCount} ${item.childType}s declared — split into separate items, one per ${item.childType}`);
+  // Check for numbering collisions in target directory
+  const dirMap: Record<string, string> = {
+    specifying: config.adr.path,
+    planning: config.specs.path,
+    implementing: config.plans.path,
+  };
+  const targetDir = join(cwd, dirMap[phase] ?? "");
+  if (existsSync(targetDir)) {
+    const files = (await readdir(targetDir))
+      .filter((f) => f.endsWith(".md") && /^\d{3}-/.test(f));
+    const seen = new Set<string>();
+    for (const f of files) {
+      const num = f.slice(0, 3);
+      if (seen.has(num)) {
+        issues.push(`Numbering collision in ${dirMap[phase]}: multiple files with number ${num}`);
+      }
+      seen.add(num);
     }
+  }
 
-    if (item.conjunctionWarning) {
-      lines.push(`   ⚠️ Title may cover multiple concerns (contains "and"/"&"/"+"/",")`);
+  // Check remaining counts
+  const specsDir = join(cwd, config.specs.path);
+  if (existsSync(specsDir)) {
+    const specFiles = (await readdir(specsDir))
+      .filter((f) => f.endsWith(".md") && /^\d{3}-/.test(f));
+    for (const f of specFiles) {
+      const content = await readFile(join(specsDir, f), "utf-8");
+      const rem = parseInt(content.match(/^remaining:\s*(\d+)/m)?.[1] ?? "0", 10);
+      if (rem > 0) {
+        issues.push(`Spec ${f.slice(0, 3)} has remaining=${rem} (expected 0)`);
+      }
     }
-    lines.push("");
   }
 
-  lines.push("## Summary");
-  lines.push(`  ${report.items.length} item(s) checked`);
-  lines.push(`  ${report.violations} violation(s) — items with != 1 ${report.items[0]?.childType ?? "child"}`);
-  lines.push(`  ${report.warnings} warning(s) — title conjunctions`);
-  lines.push("");
-
-  if (report.violations > 0) {
-    lines.push("Fix the violations above, then call this tool again with the corrected outline.");
-  } else {
-    lines.push(`All items are atomic. Call workflow_transition with force: true to confirm and proceed.`);
-  }
-
-  return lines.join("\n");
+  return issues;
 }
 
 /**
  * Register the `workflow_transition` AI tool.
  *
- * The tool now supports an atomicity check gate:
- * - `outline` param: runs atomicity check, returns report, does NOT transition
- * - `force: true` param: shows confirmation popup, transitions on confirm
- * - Neither: error — agent must provide one or the other
- * - Both: error — contradictory
+ * The tool no longer supports an outline-based atomicity check.
+ * Instead, agents must run `validate_documents` first (which stores
+ * a validation token), then call `workflow_transition` with `force: true`.
+ *
+ * If no valid validation_token is found, the tool returns an error
+ * telling the agent to run validate_documents first.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -408,8 +314,9 @@ export function registerWorkflowTransitionTool(pi: ExtensionAPI): void {
     label: "Transition Phase",
     description:
       "Progress the workflow to the next phase. " +
-      "Provide an `outline` to run the atomicity check (no transition). " +
-      "Use `force: true` to skip the check and show the confirmation popup. " +
+      "Before calling this tool, run validate_documents first " +
+      "to validate all documents and get a validation token. " +
+      "Then call with force: true to confirm the transition. " +
       "Valid transitions: requirements → specifying → planning → implementing.",
 
     parameters: Type.Object({
@@ -421,23 +328,15 @@ export function registerWorkflowTransitionTool(pi: ExtensionAPI): void {
           "planning → after all plans created. " +
           "implementing → ready to start implementing.",
       }),
-      outline: Type.Optional(Type.String({
-        description:
-          "Structured outline of items for the next phase. " +
-          "Each ADR must have exactly one `Decision:` line. " +
-          "Each spec must have exactly one `DoD:` line. " +
-          "Provide this to run the atomicity check. " +
-          "The check runs but does NOT transition.",
-      })),
       force: Type.Optional(Type.Boolean({
         description:
-          "Skip atomicity check and show confirmation popup. " +
-          "Use this after the outline has been verified by a prior call.",
+          "Confirm the transition. Requires a valid validation_token " +
+          "from a prior validate_documents call.",
       })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const { phase, outline, force } = params;
+      const { phase, force } = params;
 
       // Validate phase first
       if (!VALID_PHASES.includes(phase as typeof VALID_PHASES[number])) {
@@ -454,97 +353,67 @@ export function registerWorkflowTransitionTool(pi: ExtensionAPI): void {
         };
       }
 
-      // Validate outline/force mutual exclusivity
-      if (outline && force) {
+      if (!force) {
         return {
           content: [
             {
               type: "text",
               text:
-                "Error: Cannot provide both `outline` and `force: true`. " +
-                "Provide `outline` to run the atomicity check, or `force: true` " +
-                "to skip the check and show the confirmation popup.",
+                "Error: Pass `force: true` to proceed. " +
+                "Run `validate_documents` first to validate all documents " +
+                "and obtain a validation token, then call " +
+                `\`workflow_transition({ phase: "${phase}", force: true })\`.`,
             },
           ],
           isError: true,
         };
       }
 
-      if (!outline && !force) {
+      // ── Check for valid validation token ──
+      const token = findValidationToken(ctx, phase);
+      if (!token) {
+        // Check if there's a token for a different phase
+        const allEntries = ctx.sessionManager.getBranch();
+        const anyToken = allEntries
+          .filter((e) => e.type === "custom" && e.customType === "validation_token")
+          .pop();
+
+        const hint = anyToken
+          ? ` Found a validation token for phase "${(anyToken.data as ValidationToken).phase}" ` +
+            "— you may need to re-run validate_documents for the target phase."
+          : " No validation token found. Run `validate_documents` first, then retry.";
+
         return {
           content: [
             {
               type: "text",
               text:
-                "Error: Provide either `outline` (to run atomicity check) " +
-                "or `force: true` (to skip check and show confirmation). " +
-                "Call with `outline` first to verify atomicity, then with `force: true` to proceed.",
+                `Error: No valid validation token found for phase "${phase}".` +
+                hint +
+                `\n\nRun: validate_documents({ phase: "${phase}" })`,
             },
           ],
           isError: true,
         };
       }
 
-      // ── Atomicity check path (outline provided) ──
-      if (outline) {
-        // Determine the expected child type based on target phase
-        const expectedChildType = phase === "specifying" ? "decision" : "dod";
-
-        const report = checkAtomicity(outline, phase);
-
-        // Reject outlines that cannot be parsed into valid items
-        if (report.items.length === 0) {
-          return {
-            content: [
-              {
-                type: "text",
-                text:
-                  "## Atomicity Check Failed\n\n" +
-                  "0 items could be parsed from the outline — found no ADR, Spec, or Plan entries. " +
-                  "Provide a structured outline with each item on its own line:\n\n" +
-                  "```\n" +
-                  "ADR NNN — Title\n" +
-                  "  Decision: ...\n" +
-                  "```\n\n" +
-                  "Or for spec→plan check:\n\n" +
-                  "```\n" +
-                  "Spec NNN — Title\n" +
-                  "  DoD: ...\n" +
-                  "```",
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const formatted = formatAtomicityReport(report, phase);
-
-        if (report.violations > 0) {
-          return {
-            content: [{ type: "text", text: formatted }],
-            isError: true,
-          };
-        }
-
-        return {
-          content: [{ type: "text", text: formatted }],
-        };
-      }
-
-      // ── Force confirmation path ──
-      // Prompt user for confirmation via UI dialog (non-bypassable)
+      // ── Prompt user for confirmation ──
       const ok = await ctx.ui.confirm(
         "Phase Transition",
         `Transition to "${phase}" phase?`,
       );
       if (!ok) {
+        const issues = await detectCommonIssues(ctx.cwd, phase);
+        const diagMsg = issues.length > 0
+          ? `\n\nPotential issues detected:\n${issues.map((i) => `  \u26A0\uFE0F ${i}`).join("\n")}`
+          : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `Transition to "${phase}" was cancelled. No changes were made. ` +
-                `Use /status to check the current phase, or call workflow_transition ` +
-                `with force: true when ready.`,
+              text: `Transition to "${phase}" was cancelled.${diagMsg}\n\n` +
+                `Fix the issues above, then retry.`,
             },
           ],
         };

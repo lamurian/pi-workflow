@@ -267,4 +267,58 @@ describe("spec_create tool", () => {
       `Error should mention multiple ADRs, got: ${text}`,
     );
   });
+
+  it("rejects spec referencing a different ADR than the target", async () => {
+    const pi = mockPi();
+    const { registerSpecTool } = await import("../extensions/spec-tool.ts");
+    registerSpecTool(pi);
+
+    const tool = pi.tools.find((t) => t.name === "spec_create");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-5",
+      {
+        adrNumber: 1,
+        title: "Wrong ADR",
+        content:
+          "# Requirements Specification\n\n- Req\n\n# Design Principles\n\n- Design\n\n# References\n\nThis spec implements @docs/ADR/002-different.md",
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result.isError, "Wrong ADR ref should return an error");
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(
+      text.includes("ADR 002") && text.includes("ADR 001"),
+      `Error should mention both ADRs, got: ${text}`,
+    );
+  });
+
+  it("allows spec referencing the correct ADR", async () => {
+    const pi = mockPi();
+    const { registerSpecTool } = await import("../extensions/spec-tool.ts");
+    registerSpecTool(pi);
+
+    const tool = pi.tools.find((t) => t.name === "spec_create");
+    assert.ok(tool);
+
+    const result = await tool.execute(
+      "call-6",
+      {
+        adrNumber: 1,
+        title: "Correct ADR",
+        content:
+          "# Requirements Specification\n\n- Req\n\n# Design Principles\n\n- Design\n\n# References\n\nThis spec implements @docs/ADR/001-correct.md",
+      },
+      new AbortController().signal,
+      () => {},
+      mockCtx(),
+    );
+
+    assert.ok(result, "Should return a result");
+    assert.ok(!result.isError, `Correct ADR ref should succeed, got: ${result.content?.[0]?.text}`);
+  });
 });

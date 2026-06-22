@@ -41,43 +41,57 @@ export async function ensurePlansDir(cwd: string): Promise<void> {
  * Compute the next plan number by scanning existing files.
  *
  * Scans existing plan files and returns the next sequential number
- * (3-digit padded).
+ * (3-digit padded). Accepts an optional `planNumSeed` parameter —
+ * when provided, the seed is returned directly without scanning,
+ * eliminating the race condition when creating plans in rapid succession.
  *
- * @param _specNumber - Kept for backward compatibility (ignored).
- * @param cwd         - Project working directory.
+ * When no seed is provided, a retry loop (up to 3 attempts with 50ms delay)
+ * ensures newly written files are visible before returning.
+ *
+ * @param _specNumber  - Kept for backward compatibility (ignored).
+ * @param cwd          - Project working directory.
+ * @param planNumSeed  - Optional pre-computed seed (injected by batch caller).
  * @returns The next plan number (e.g. 1, 2, 3...).
  */
 export async function nextPlanNumber(
   _specNumber: string,
   cwd: string,
+  planNumSeed?: number,
 ): Promise<number> {
+  if (planNumSeed !== undefined) return planNumSeed;
+
   const dir = await plansDirPath(cwd);
   if (!existsSync(dir)) return 1;
 
-  let max = 0;
+  // Retry loop: scan up to 3 times with 50ms delay
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let max = 0;
 
-  // Scan main plans directory
-  for (const f of await readdir(dir)) {
-    const match = f.match(/^(\d{3})-/);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (num > max) max = num;
-    }
-  }
-
-  // Also scan archive directory for used numbers
-  const archiveDir = join(dir, ARCHIVE_SUBDIR);
-  if (existsSync(archiveDir)) {
-    for (const f of await readdir(archiveDir)) {
+    // Scan main plans directory
+    for (const f of await readdir(dir)) {
       const match = f.match(/^(\d{3})-/);
       if (match) {
         const num = parseInt(match[1], 10);
         if (num > max) max = num;
       }
     }
-  }
 
-  return max + 1;
+    // Also scan archive directory for used numbers
+    const archiveDir = join(dir, ARCHIVE_SUBDIR);
+    if (existsSync(archiveDir)) {
+      for (const f of await readdir(archiveDir)) {
+        const match = f.match(/^(\d{3})-/);
+        if (match) {
+          const num = parseInt(match[1], 10);
+          if (num > max) max = num;
+        }
+      }
+    }
+
+    if (max > 0 || attempt === 2) return max + 1;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  return 1;
 }
 
 /**

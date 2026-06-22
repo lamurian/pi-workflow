@@ -39,31 +39,44 @@ export async function ensureSpecsDir(cwd: string): Promise<void> {
  * Compute the next spec number by scanning existing files.
  *
  * Scans existing spec files and returns the next sequential number
- * (3-digit padded).
+ * (3-digit padded). Accepts an optional `specNumSeed` parameter —
+ * when provided, the seed is returned directly without scanning,
+ * eliminating the race condition when creating specs in rapid succession
+ * (e.g., via `batch_create_specs`).
  *
- * @param _adrNumber - Kept for backward compatibility (ignored).
- * @param cwd        - Project working directory.
+ * When no seed is provided, a retry loop (up to 3 attempts with 50ms delay)
+ * ensures newly written files are visible before returning.
+ *
+ * @param _adrNumber  - Kept for backward compatibility (ignored).
+ * @param cwd         - Project working directory.
+ * @param specNumSeed - Optional pre-computed seed (injected by batch caller).
  * @returns The next spec number (e.g. 1, 2, 3...).
  */
 export async function nextSpecNumber(
   _adrNumber: number,
   cwd: string,
+  specNumSeed?: number,
 ): Promise<number> {
+  if (specNumSeed !== undefined) return specNumSeed;
+
   const dir = await specsDirPath(cwd);
   if (!existsSync(dir)) return 1;
 
-  const files = await readdir(dir);
-  let max = 0;
-
-  for (const f of files) {
-    const match = f.match(/^(\d{3})-/);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (num > max) max = num;
+  // Retry loop: scan up to 3 times with 50ms delay
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const files = await readdir(dir);
+    let max = 0;
+    for (const f of files) {
+      const match = f.match(/^(\d{3})-/);
+      if (match) {
+        const num = parseInt(match[1], 10);
+        if (num > max) max = num;
+      }
     }
+    if (max > 0 || attempt === 2) return max + 1;
+    await new Promise(r => setTimeout(r, 50));
   }
-
-  return max + 1;
+  return 1;
 }
 
 /**
@@ -94,11 +107,27 @@ export async function createSpec(
   const filename = `${String(specNum).padStart(3, "0")}-${slug}.md`;
   const filePath = join(await specsDirPath(cwd), filename);
 
+  // Validate ADR cross-references
+  const expectedRef = `@docs/ADR/${String(adrNumber).padStart(3, "0")}`;
+  const hasAdrRefs = content.match(/@docs\/ADR\/\d{3}/g);
+
+  // If there are ADR refs but none match the expected one, reject
+  if (hasAdrRefs && hasAdrRefs.length > 0) {
+    const hasCorrectRef = hasAdrRefs.some((r: string) => r.startsWith(expectedRef));
+    if (!hasCorrectRef) {
+      throw new Error(
+        `Spec references ADR ${hasAdrRefs[0].replace(/@docs\/ADR\//, "").slice(0, 3)} ` +
+        `but was created for ADR ${String(adrNumber).padStart(3, "0")}. ` +
+        "Remove the incorrect ADR reference or create this spec under the correct ADR."
+      );
+    }
+  }
+
   // Auto-append @ cross-reference to the ADR if not present
-  const hasRef = /@docs\/ADR\//i.test(content);
+  const hasRef = hasAdrRefs !== null && hasAdrRefs.length > 0;
   const body = hasRef
     ? content
-    : `${content}\n\nThis spec implements @docs/ADR/${String(adrNumber).padStart(3, "0")}-*.md`;
+    : `${content}\n\nThis spec implements ${expectedRef}-*.md`;
 
   const template = await loadContent("spec-template.md");
   const fullContent = renderTemplate(template, {

@@ -13,6 +13,8 @@ import { registerSpecTool } from "./spec-tool.ts";
 import { registerPlanTool } from "./plan-tool.ts";
 import { registerWorkflowTransitionTool } from "./workflow-transition.ts";
 import { registerValidateTool } from "./validate-tool.ts";
+import { registerValidateDocsTool } from "./validate-docs.ts";
+import { registerChainTool } from "./chain-tool.ts";
 import { registerBatchTools } from "./batch-tools.ts";
 import { checkToolPhaseGate } from "./phase-gates.ts";
 import { parseArgs, getSkillsDir, detectDocType, stripFileRefs } from "./utils.ts";
@@ -96,6 +98,8 @@ export default function (pi: ExtensionAPI): void {
   registerPlanTool(pi);
   registerWorkflowTransitionTool(pi);
   registerValidateTool(pi);
+  registerValidateDocsTool(pi);
+  registerChainTool(pi);
   registerBatchTools(pi);
   registerCompleteImplementationTool(pi);
 

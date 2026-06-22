@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createAdr, computeAndUpdateAdrRemaining } from "./adr.ts";
+import { computeAndUpdateAdrRemaining } from "./adr.ts";
+import { createAdrFromBrainstorm } from "./brainstorm.ts";
 import { createSpec } from "./spec.ts";
 import { relative } from "node:path";
 
@@ -57,14 +58,15 @@ export function registerBatchTools(pi: ExtensionAPI): void {
 
       for (const adr of adrs) {
         try {
-          const path = await createAdr(
+          const path = await createAdrFromBrainstorm(
             {
               title: adr.title,
               description: adr.description,
-              status: (adr.status as "proposed" | "accepted") || "proposed",
               context: adr.context,
               decision: adr.decision,
               impact: adr.impact,
+              summary: adr.summary,
+              status: (adr.status as "proposed" | "accepted") || "proposed",
             },
             ctx.cwd,
           );
@@ -75,12 +77,16 @@ export function registerBatchTools(pi: ExtensionAPI): void {
       }
 
       const lines: string[] = [];
-      lines.push(`Created ${created.length} ADR(s):`);
-      for (const p of created) lines.push(`- ${p}`);
+      lines.push(`Processed ${adrs.length} ADR(s):`);
+      lines.push(`  \u2713 ${created.length} created`);
+      if (created.length > 0) {
+        for (const p of created) lines.push(`    ${p}`);
+      }
       if (errors.length > 0) {
+        lines.push(`  \u2717 ${errors.length} failed:`);
+        for (const e of errors) lines.push(`    ${e}`);
         lines.push("");
-        lines.push(`Failed to create ${errors.length} ADR(s):`);
-        for (const e of errors) lines.push(`- ${e}`);
+        lines.push("Fix failed items individually with adr_create, then re-run batch_create_adrs for remaining.");
       }
 
       return {
@@ -133,10 +139,39 @@ export function registerBatchTools(pi: ExtensionAPI): void {
         };
       }
 
+      /** Maximum words allowed in a spec title for atomicity. */
+      const MAX_TITLE_WORDS = 5;
+
       const created: string[] = [];
       const errors: string[] = [];
 
       for (const spec of specs) {
+        // ── Atomicity guardrails ─────────────────────────────────
+
+        // Title word count check
+        const wordCount = spec.title.trim().split(/\s+/).length;
+        if (wordCount > MAX_TITLE_WORDS) {
+          errors.push(
+            `"${spec.title}": title has ${wordCount} words, max is ${MAX_TITLE_WORDS}. ` +
+            "Keep titles focused on one architectural concern.",
+          );
+          continue;
+        }
+
+        // Single ADR reference check
+        const adrRefs = spec.content.match(/@docs\/ADR\/(\d{3})/gi) ?? [];
+        if (adrRefs.length > 0) {
+          const uniqueAdrs = new Set(adrRefs.map((r: string) => r.toLowerCase()));
+          if (uniqueAdrs.size > 1) {
+            errors.push(
+              `"${spec.title}": references ${uniqueAdrs.size} different ADRs ` +
+              `([${[...uniqueAdrs].join(", ")}]). ` +
+              "Each spec must reference only one ADR. Create separate specs.",
+            );
+            continue;
+          }
+        }
+
         try {
           const path = await createSpec(adrNumber, spec.title, spec.content, ctx.cwd, spec.description);
           created.push(relative(ctx.cwd, path));
@@ -149,13 +184,17 @@ export function registerBatchTools(pi: ExtensionAPI): void {
       const { remaining } = await computeAndUpdateAdrRemaining(adrNumber, ctx.cwd);
 
       const lines: string[] = [];
-      lines.push(`Created ${created.length} spec(s) for ADR ${String(adrNumber).padStart(3, "0")}:`);
-      for (const p of created) lines.push(`- ${p}`);
-      lines.push(`ADR remaining: ${remaining}`);
+      lines.push(`Processed ${specs.length} spec(s) for ADR ${String(adrNumber).padStart(3, "0")}:`);
+      lines.push(`  \u2713 ${created.length} created`);
+      if (created.length > 0) {
+        for (const p of created) lines.push(`    ${p}`);
+      }
+      lines.push(`  ADR remaining: ${remaining}`);
       if (errors.length > 0) {
+        lines.push(`  \u2717 ${errors.length} failed:`);
+        for (const e of errors) lines.push(`    ${e}`);
         lines.push("");
-        lines.push(`Failed to create ${errors.length} spec(s):`);
-        for (const e of errors) lines.push(`- ${e}`);
+        lines.push("Fix failed items individually with spec_create, then re-run batch_create_specs for remaining.");
       }
 
       return {

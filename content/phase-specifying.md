@@ -15,9 +15,11 @@ All ADRs are drafted. Now you need to map them to specs and create them.
    ADR 002 — <title>
      → Spec 003: <title> — <brief objective>
    ```
-3. **Present the full mapping** to the user, then call `workflow_transition({ phase: "planning", outline: "<mapping>" })` to run the atomicity check. Each spec must have exactly one `DoD:`. Fix any violations and re-run until the check passes.
-4. **When the atomicity check passes**, create ALL specs using `spec_create`. Create them one by one.
-5. **After ALL specs are created**, call `workflow_transition({ phase: "planning", force: true })` to transition to the planning phase.
+3. **Present the full mapping** to the user for approval.
+4. **Create ALL specs** using `spec_create`. Create them one by one.
+5. **After ALL specs are created**, run `validate_documents({ phase: "specifying" })` to validate the created specs.
+6. **If violations are reported**, fix them and re-run validation.
+7. **Once validation passes**, call `workflow_transition({ phase: "planning", force: true })` to transition to the planning phase.
 
 ## Atomic Spec Definition
 

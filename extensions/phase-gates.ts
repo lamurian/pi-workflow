@@ -4,7 +4,13 @@ import type { WorkflowPhase } from "./state.ts";
  * Tools that are subject to phase gating.
  * Only creation tools are gated — list/update tools are always allowed.
  */
-const GATED_TOOLS = new Set(["adr_create", "spec_create", "plan_create"]);
+const GATED_TOOLS = new Set([
+  "adr_create",
+  "spec_create",
+  "plan_create",
+  "batch_create_adrs",
+  "batch_create_specs",
+]);
 
 /**
  * Brainstorm phases where gating is active.
@@ -22,6 +28,8 @@ const TOOL_ALLOWED_PHASE: Record<string, WorkflowPhase> = {
   adr_create: "requirements",
   spec_create: "specifying",
   plan_create: "planning",
+  batch_create_adrs: "requirements",
+  batch_create_specs: "specifying",
 };
 
 /**

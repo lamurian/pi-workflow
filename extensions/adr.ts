@@ -15,7 +15,7 @@ export interface Adr {
   /** Decision status. */
   status: "proposed" | "progressed" | "implemented" | "accepted" | "deprecated" | "superseded";
   /** Remaining cross-references (specs) to implement. */
-  remaining: number;
+  remaining?: number;
   /** Date in YYYY-MM-DD format (defaults to today). */
   date?: string;
   /** Problem statement or user story. */
