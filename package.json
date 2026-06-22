@@ -1,0 +1,19 @@
+{
+  "name": "pi-workflow",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "keywords": ["pi-package"],
+  "description": "Guided brainstorming and TDD implementation workflow for pi",
+  "pi": {
+    "extensions": ["./extensions/index.ts"],
+    "skills": ["./skills"]
+  },
+  "dependencies": {
+    "fast-glob": "^3.3.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
