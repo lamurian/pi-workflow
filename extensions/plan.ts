@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile, rename } from "node:fs/promises";
 import { join, basename } from "node:path";
 import { existsSync } from "node:fs";
 import { loadContent, renderTemplate, formatDate, shortSlug } from "./utils.ts";
@@ -182,12 +182,9 @@ export async function archivePlan(
   cwd: string,
 ): Promise<string> {
   await ensurePlansDir(cwd);
-  const archivePath = join(await archiveDirPath(cwd), basename(planPath));
-
-  const content = await readFile(planPath, "utf-8");
-  await writeFile(archivePath, content, "utf-8");
-  await rm(planPath);
-
+  const archiveDir = await archiveDirPath(cwd);
+  const archivePath = join(archiveDir, basename(planPath));
+  await rename(planPath, archivePath);
   return archivePath;
 }
 
