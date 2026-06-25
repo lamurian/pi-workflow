@@ -3,6 +3,7 @@ import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { loadState, updateUi, type WorkflowState } from "./state.ts";
 import { runBrainstorming, buildPhasePrompt, isDocumentDir, checkLineLimit } from "./brainstorm.ts";
 import { runDiscussion } from "./discuss.ts";
+import { runYolo } from "./yolo.ts";
 import { startTdd, NO_INPUT_WARNING, registerCompleteImplementationTool, resolveImplementSpec } from "./implement.ts";
 import { getAdrContext } from "./adr-detect.ts";
 import { readArchitecture } from "./architecture.ts";
@@ -383,6 +384,17 @@ export default function (pi: ExtensionAPI): void {
       }
 
       ctx.ui.notify(lines.join("\n"), "info");
+    },
+  });
+
+  // ── /yolo ─────────────────────────────────────────────────
+  pi.registerCommand("yolo", {
+    description:
+      "Snap back to the default pi session from any workflow phase. " +
+      "Resets all phase state (discussing, brainstorming, implementing, etc.). " +
+      "Usage: /yolo",
+    handler: async (_args, ctx) => {
+      await runYolo(pi, ctx);
     },
   });
 }
