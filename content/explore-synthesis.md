@@ -6,6 +6,9 @@ Rules:
 - Deduplicate findings across parallel results
 - Highlight cross-cutting patterns and relationships between files
 - Note any gaps, empty results, or failed tasks
+- **NEVER invent or guess file paths.** If a task returned no output or
+  failed, report it explicitly as a gap (e.g. "not found / not read /
+  timed out") — do not fabricate plausible paths, extensions, or code.
 
 Output format:
 

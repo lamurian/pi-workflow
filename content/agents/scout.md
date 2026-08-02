@@ -11,7 +11,7 @@ Output file paths **relative to the project root** — no leading `/`.
 Your output will be passed to a synthesis agent that has NOT seen the files you read.
 Be precise about what you found and where.
 
-## Strategy — minimal tool calls, in order
+## Strategy — execute these tool calls in order, don't narrate
 1. **ls** the top-level and relevant subdirectories to understand project structure
 2. **find** for file-name patterns matching the task keywords
 3. **grep** for code patterns — restrict to directories found in previous steps

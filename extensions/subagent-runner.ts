@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
-import { readFileSync, readdirSync, unlinkSync, rmdirSync, existsSync } from "node:fs";
-import { readFile, writeFile, mkdtemp } from "node:fs/promises";
-import { join, resolve, basename, dirname } from "node:path";
-import { tmpdir } from "node:os";
-import { parseFrontmatter, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { join, resolve, basename } from "node:path";
+import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -140,6 +138,13 @@ export function createTimeoutSignal(
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
+  // Explicit override — lets tests (and embedders) pin a specific pi binary
+  // instead of relying on script-detection heuristics.
+  const piBin = process.env.PI_BIN;
+  if (piBin) {
+    return { command: piBin, args };
+  }
+
   const currentScript = process.argv[1];
   const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
   if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
@@ -171,6 +176,9 @@ export function buildScoutArgs(agent: AgentConfig, task: string): string[] {
   const args: string[] = [
     "--mode", "json", "-p", "--no-session",
     "--no-extensions", "--no-skills", "--no-context-files", "--offline",
+    // Pin thinking low: the subprocess inherits the user's default thinking
+    // level (often "high"), which is the dominant scout latency driver.
+    "--thinking", "minimal",
   ];
 
   // Intentionally omit --model: use user's default model for speed and simplicity
@@ -181,11 +189,9 @@ export function buildScoutArgs(agent: AgentConfig, task: string): string[] {
   }
 
   if (agent.systemPrompt.trim()) {
-    // System prompt is passed via --append-system-prompt with a temp file path
-    // (the caller must resolve the path before calling this function)
-    args.push("--append-system-prompt");
-    // The prompt file path is appended separately by runScoutSubprocess after
-    // writing the temp file
+    // --append-system-prompt takes literal TEXT (verified in pi's CLI arg
+    // parser) — pass the prompt directly, no temp file indirection.
+    args.push("--append-system-prompt", agent.systemPrompt);
   }
 
   args.push(`Task: ${task}`);
@@ -195,27 +201,29 @@ export function buildScoutArgs(agent: AgentConfig, task: string): string[] {
 // ─── Scout subprocess execution ────────────────────────────────────────────────
 
 /**
- * Write the agent's system prompt to a temporary file.
- *
- * @param agentName - Name of the agent (for safe filename).
- * @param prompt    - The system prompt content.
- * @returns The temp dir and file path.
+ * Default per-scout timeout in milliseconds. Scouts that exceed this are
+ * killed and reported as failed (never as silent success).
  */
-async function writePromptToTempFile(
-  agentName: string,
-  prompt: string,
-): Promise<{ dir: string; filePath: string }> {
-  const tmpDir = await mkdtemp(join(tmpdir(), "pi-explore-"));
-  const safeName = agentName.replace(/[^\w.-]+/g, "_");
-  const filePath = join(tmpDir, `prompt-${safeName}.md`);
-  await withFileMutationQueue(filePath, async () => {
-    await writeFile(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
-  });
-  return { dir: tmpDir, filePath };
-}
+const DEFAULT_SCOUT_TIMEOUT_MS = 120_000;
 
-/** Default timeout for a single scout subprocess, in milliseconds. */
-const DEFAULT_SCOUT_TIMEOUT_MS = 60_000;
+/**
+ * Resolve the per-scout timeout budget, honoring the `PI_EXPLORE_TIMEOUT_MS`
+ * environment variable override (milliseconds). Invalid or missing values fall
+ * back to {@link DEFAULT_SCOUT_TIMEOUT_MS}.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns The timeout in milliseconds (&gt; 0).
+ */
+export function getScoutTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PI_EXPLORE_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_SCOUT_TIMEOUT_MS;
+}
 
 /**
  * Run a single scout subprocess and return the text output.
@@ -229,7 +237,7 @@ const DEFAULT_SCOUT_TIMEOUT_MS = 60_000;
  * @param task     - The exploration task to execute.
  * @param cwd      - Working directory for the subprocess.
  * @param signal   - Optional abort signal to kill the subprocess.
- * @param timeoutMs- Per-process timeout in ms (default 60s). 0 = no timeout.
+ * @param timeoutMs- Per-process timeout in ms. 0 = no timeout.
  * @returns The final text output from the scout.
  */
 export async function runScoutSubprocess(
@@ -237,23 +245,12 @@ export async function runScoutSubprocess(
   task: string,
   cwd: string,
   signal?: AbortSignal,
-  timeoutMs: number = DEFAULT_SCOUT_TIMEOUT_MS,
+  timeoutMs: number = getScoutTimeoutMs(),
 ): Promise<string> {
   const args: string[] = buildScoutArgs(agent, task);
-
-  let tmpPromptDir: string | null = null;
-  let tmpPromptPath: string | null = null;
   let timeoutClear: (() => void) | null = null;
 
   try {
-    if (agent.systemPrompt.trim()) {
-      const tmp = await writePromptToTempFile(agent.name, agent.systemPrompt);
-      tmpPromptDir = tmp.dir;
-      tmpPromptPath = tmp.filePath;
-      // Insert --append-system-prompt before the Task positional arg at the end
-      args.splice(args.length - 1, 0, "--append-system-prompt", tmpPromptPath);
-    }
-
     // Create combined timeout + parent signal
     let killSignal: AbortSignal | undefined = signal;
     if (timeoutMs > 0) {
@@ -302,9 +299,12 @@ export async function runScoutSubprocess(
         stderr += data.toString();
       });
 
-      proc.on("close", (code) => {
+      proc.on("close", (code, signal) => {
         if (buffer.trim()) processLine(buffer);
-        resolvePromise(code ?? 0);
+        // A signal kill (timeout/abort) yields code=null. Masking it as 0
+        // turns killed scouts into silent "success" with no output —
+        // report it as a failure instead.
+        resolvePromise(code ?? (signal ? 1 : 0));
       });
 
       proc.on("error", () => {
@@ -335,7 +335,14 @@ export async function runScoutSubprocess(
     });
 
     if (exitCode !== 0 && messages.length === 0) {
-      throw new Error(stderr || `Process exited with code ${exitCode}`);
+      // Prefer the timeout/abort reason so the error message is descriptive
+      // (e.g. "Operation timed out after 120000ms") instead of a bare exit code.
+      const reason = killSignal?.reason;
+      throw new Error(
+        reason instanceof Error
+          ? reason.message
+          : stderr || `Process exited with code ${exitCode}`,
+      );
     }
 
     // Extract final text from the last assistant message
@@ -354,12 +361,6 @@ export async function runScoutSubprocess(
     return stderr || "(no output)";
   } finally {
     timeoutClear?.();
-    if (tmpPromptPath) {
-      try { unlinkSync(tmpPromptPath); } catch { /* ignore */ }
-    }
-    if (tmpPromptDir) {
-      try { rmdirSync(tmpPromptDir); } catch { /* ignore */ }
-    }
   }
 }
 

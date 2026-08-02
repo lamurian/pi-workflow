@@ -197,6 +197,16 @@ export async function synthesizeResults(
 ): Promise<string> {
   const systemPrompt = await loadContent("explore-synthesis.md");
 
+  // If no scout produced usable output, skip the LLM call entirely — an
+  // unconstrained synthesizer tends to fabricate plausible file paths from
+  // the instruction alone (observed: cited .ts files that are really .tsx).
+  const hasAnyOutput = results.some(
+    (r) => r.exitCode === 0 && r.output.trim().length > 0,
+  );
+  if (!hasAnyOutput) {
+    return formatNoOutputSummary(instruction, results);
+  }
+
   if (!ctx.model) {
     return formatFallbackSummary(instruction, results);
   }
@@ -241,6 +251,31 @@ export async function synthesizeResults(
     .trim();
 
   return text || formatFallbackSummary(instruction, results);
+}
+
+/**
+ * Summary returned when every scout returned empty or failed results.
+ *
+ * States the gap explicitly instead of letting the synthesis model
+ * fabricate plausible findings from the instruction alone.
+ */
+function formatNoOutputSummary(instruction: string, results: ScoutResult[]): string {
+  const lines: string[] = [
+    `## Summary`,
+    `No scout produced output for: ${instruction}.`,
+    "Every parallel task returned empty or failed, so no file paths, code, or findings were gathered.",
+    ``,
+    `## Key Files`,
+    `- **None** — no scout produced usable output.`,
+  ];
+  for (const r of results) {
+    if (r.exitCode !== 0) {
+      lines.push(
+        `\n*Task "${r.task}" failed: ${r.errorMessage || `exit code ${r.exitCode}`}*`,
+      );
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Fallback summary when LLM is unavailable. */

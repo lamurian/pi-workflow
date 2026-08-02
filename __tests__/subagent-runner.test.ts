@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import type { AgentConfig } from "../extensions/subagent-runner.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -95,6 +96,25 @@ describe("buildScoutArgs", () => {
     assert.ok(!args.includes("--model"), "should not force a model — use user default");
   });
 
+  it("includes --thinking minimal to cap scout latency", async () => {
+    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+
+    const agent: AgentConfig = {
+      name: "test-agent",
+      description: "Test",
+      tools: [],
+      systemPrompt: "",
+      source: "embedded",
+      filePath: "/fake/path.md",
+    };
+
+    const args = buildScoutArgs(agent, "find auth code");
+
+    const thinkingIdx = args.indexOf("--thinking");
+    assert.notEqual(thinkingIdx, -1, "--thinking should be present");
+    assert.equal(args[thinkingIdx + 1], "minimal", "scouts inherit the user's high thinking level — pin it low");
+  });
+
   it("preserves required flags: --mode json -p --no-session", async () => {
     const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
 
@@ -134,14 +154,14 @@ describe("buildScoutArgs", () => {
     assert.equal(args[toolsIdx + 1], "read,grep,find", "tools should be comma-joined");
   });
 
-  it("includes --append-system-prompt with a file path when agent has systemPrompt", async () => {
+  it("includes --append-system-prompt followed by the system prompt TEXT (not a file path)", async () => {
     const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
       description: "Test",
       tools: [],
-      systemPrompt: "You are a test agent.",
+      systemPrompt: "You are a test agent.\n\n### Files Examined\n- list files here",
       source: "embedded",
       filePath: "/fake/path.md",
     };
@@ -150,10 +170,10 @@ describe("buildScoutArgs", () => {
 
     const promptIdx = args.indexOf("--append-system-prompt");
     assert.notEqual(promptIdx, -1, "--append-system-prompt should be present");
-    const promptArg = args[promptIdx + 1];
-    assert.ok(
-      typeof promptArg === "string" && promptArg.length > 0,
-      "should have a prompt file path",
+    assert.equal(
+      args[promptIdx + 1],
+      agent.systemPrompt,
+      "value must be the literal system prompt text — the CLI flag takes text, not a file path",
     );
   });
 
@@ -172,5 +192,108 @@ describe("buildScoutArgs", () => {
     const args = buildScoutArgs(agent, "find auth code");
 
     assert.equal(args[args.length - 1], "Task: find auth code");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// getScoutTimeoutMs — per-scout timeout resolution
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("getScoutTimeoutMs", () => {
+  it("defaults to 120000 when no env var is set", async () => {
+    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(getScoutTimeoutMs({}), 120_000, "default budget should be 120s");
+  });
+
+  it("honors PI_EXPLORE_TIMEOUT_MS when set", async () => {
+    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(
+      getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "30000" }),
+      30_000,
+      "env override should win",
+    );
+  });
+
+  it("falls back to the default for invalid values", async () => {
+    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "abc" }), 120_000);
+    assert.equal(getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "-5" }), 120_000);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// runScoutSubprocess — integration against a real pi binary
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** True when a real `pi` binary is reachable on PATH. */
+function hasPiOnPath(): boolean {
+  try {
+    const r = spawnSync("pi", ["--version"], { stdio: "ignore", timeout: 8_000 });
+    return r.error === undefined && r.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+describe("runScoutSubprocess integration (real pi)", () => {
+  it(
+    "extracts non-empty assistant text from a real pi subprocess",
+    { skip: !hasPiOnPath() && "pi not on PATH" },
+    async () => {
+      const { runScoutSubprocess } = await import("../extensions/subagent-runner.ts");
+
+      const agent: AgentConfig = {
+        name: "scout",
+        description: "Test",
+        tools: [],
+        systemPrompt: "Reply with only the single word OK and nothing else.",
+        source: "embedded",
+        filePath: "/fake/path.md",
+      };
+
+      // Under `node --test` getPiInvocation would spawn the test file itself;
+      // force the real pi binary so the subprocess path is exercised end-to-end.
+      const prev = process.env.PI_BIN;
+      process.env.PI_BIN = "pi";
+      try {
+        const output = await runScoutSubprocess(
+          agent,
+          "Ignore this task",
+          process.cwd(),
+          undefined,
+          30_000,
+        );
+        assert.ok(output.trim().length > 0, "expected non-empty assistant text");
+      } finally {
+        if (prev === undefined) delete process.env.PI_BIN;
+        else process.env.PI_BIN = prev;
+      }
+    },
+  );
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// runScoutSubprocess — kill signal handling
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runScoutSubprocess kill handling", () => {
+  it("rejects with the abort reason when killed by signal", async () => {
+    const { runScoutSubprocess } = await import("../extensions/subagent-runner.ts");
+
+    const agent: AgentConfig = {
+      name: "test-agent",
+      description: "Test",
+      tools: [],
+      systemPrompt: "",
+      source: "embedded",
+      filePath: "/fake/path.md",
+    };
+
+    await assert.rejects(
+      runScoutSubprocess(agent, "test task", "/tmp", AbortSignal.abort()),
+      /abort/i,
+      "a signal-killed scout should reject with the abort reason, " +
+        "not resolve with (no output)",
+    );
   });
 });

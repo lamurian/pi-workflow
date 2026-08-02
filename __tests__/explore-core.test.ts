@@ -87,6 +87,16 @@ describe("explore content files", () => {
     assert.ok(content.length > 100, "synthesis prompt should be substantial");
     assert.match(content, /summary|synthesis/i, "should instruct to produce a summary");
   });
+
+  it("explore-synthesis.md forbids fabricating file paths", async () => {
+    const filePath = resolve(PACKAGE_ROOT, "content", "explore-synthesis.md");
+    const content = await readFile(filePath, "utf-8");
+    assert.match(
+      content,
+      /never\s+invent|do not fabricate|fabricat/i,
+      "synthesis prompt must forbid inventing file paths",
+    );
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -231,6 +241,27 @@ describe("runParallelExploration", () => {
     assert.ok(results[0].exitCode !== undefined, "result should have an exitCode");
   });
 
+  it("records exitCode 1 and a descriptive errorMessage for killed scouts", async () => {
+    const { runParallelExploration } = await import("../extensions/explore-core.ts");
+
+    const tasks = [
+      { agent: "scout", task: "find auth handlers" },
+    ];
+
+    // An already-aborted signal kills the scout immediately (no real pi run).
+    const results = await runParallelExploration(
+      tasks,
+      process.cwd(),
+      AbortSignal.abort(),
+    );
+
+    assert.equal(results[0].exitCode, 1, "killed scout should not be reported as success");
+    assert.ok(
+      results[0].errorMessage && results[0].errorMessage.length > 0,
+      "killed scout should carry a descriptive errorMessage",
+    );
+  });
+
   it("returns empty array for empty tasks", async () => {
     const { runParallelExploration } = await import("../extensions/explore-core.ts");
     const results = await runParallelExploration(
@@ -263,8 +294,14 @@ describe("runScoutSubprocess backup timer", () => {
     const before = process.getActiveResourcesInfo()
       .filter((h) => h === "Timeout").length;
 
-    // Trigger killProc by passing an already-aborted signal
-    await runScoutSubprocess(scout, "test task", "/tmp", AbortSignal.abort());
+    // Trigger killProc by passing an already-aborted signal. The killed
+    // scout must REJECT (not resolve with "(no output)") — a signal kill
+    // is a failure, never a silent success.
+    await assert.rejects(
+      runScoutSubprocess(scout, "test task", "/tmp", AbortSignal.abort()),
+      /abort/i,
+      "signal-killed scout should reject with the abort reason",
+    );
 
     // Wait a microtask for any scheduled event-loop cleanup
     await new Promise((r) => setTimeout(r, 0));
@@ -448,6 +485,58 @@ describe("synthesizeResults", () => {
     const summary = await synthesizeResults("find auth", results, ctx);
     assert.match(summary, /src\/handlers\/auth\.ts/);
     assert.match(summary, /src\/middleware\/auth\.ts/);
+  });
+
+  it("returns an explicit no-output summary when ALL scouts produced nothing (skips LLM)", async () => {
+    const { synthesizeResults } = await import("../extensions/explore-core.ts");
+
+    const ctx = mockCtx("/tmp/test", {
+      modelRegistry: {
+        // If the LLM is (wrongly) called, this throws and fails the test.
+        getApiKeyAndHeaders: async () => {
+          throw new Error("LLM should not be called when every scout is empty/failed");
+        },
+      },
+    });
+
+    const results = [
+      {
+        agent: "scout",
+        task: "read page.tsx",
+        output: "",
+        usage: { input: 100, output: 0, cost: 0, turns: 1 },
+        exitCode: 0,
+      },
+      {
+        agent: "scout",
+        task: "list fab/",
+        output: "   \n  ",
+        usage: { input: 50, output: 0, cost: 0, turns: 1 },
+        exitCode: 0,
+      },
+      {
+        agent: "scout",
+        task: "read api",
+        output: "",
+        usage: { input: 50, output: 0, cost: 0, turns: 1 },
+        exitCode: 1,
+        errorMessage: "Operation timed out after 120000ms",
+      },
+    ];
+
+    const summary = await synthesizeResults("read the files", results, ctx);
+
+    assert.match(
+      summary,
+      /no scout produced output/i,
+      "summary must state explicitly that no scout produced output",
+    );
+    assert.doesNotMatch(
+      summary,
+      /`[^`]+`/,
+      "summary must not fabricate backtick file paths",
+    );
+    assert.match(summary, /timed out/i, "failed tasks should still be surfaced");
   });
 });
 
