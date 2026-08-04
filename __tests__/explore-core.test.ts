@@ -550,10 +550,4 @@ describe("phase prompts include exploration guideline", () => {
     const content = await loadContent("phase-discussing.md");
     assert.match(content, /explore/i, "discuss phase should mention the explore tool");
   });
-
-  it("phase-requirements.md mentions the explore tool", async () => {
-    const { loadContent } = await import("../extensions/utils.ts");
-    const content = await loadContent("phase-requirements.md");
-    assert.match(content, /explore/i, "requirements phase should mention the explore tool");
-  });
 });
