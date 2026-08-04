@@ -159,10 +159,10 @@ describe("NO_INPUT_WARNING", () => {
     );
   });
 
-  it("mentions /brainstorm as the primary workflow", () => {
+  it("does not mention /brainstorm (removed workflow)", () => {
     assert.ok(
-      NO_INPUT_WARNING.includes("/brainstorm"),
-      "warning should mention /brainstorm as the full workflow entry point",
+      !NO_INPUT_WARNING.includes("/brainstorm"),
+      "warning should not reference the removed /brainstorm workflow",
     );
   });
 });

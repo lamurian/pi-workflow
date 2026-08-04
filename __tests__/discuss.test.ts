@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { runDiscussion, detectDiscussionTopic, getLatestAssistantMessage } from "../extensions/discuss.ts";
-import { buildPhasePrompt } from "../extensions/brainstorm.ts";
+import { buildPhasePrompt } from "../extensions/prompt.ts";
 import { loadContent, getPackageRoot } from "../extensions/utils.ts";
 import {
   type WorkflowState,
@@ -107,9 +107,6 @@ function discussionState(topic = "test topic"): WorkflowState {
   return {
     phase: "discussing",
     specText: topic,
-    adrFiles: [],
-    specFiles: [],
-    planFiles: [],
   };
 }
 
@@ -119,9 +116,6 @@ function discussionState(topic = "test topic"): WorkflowState {
 function assertIsDiscussionState(s: WorkflowState, topic: string): void {
   assert.equal(s.phase, "discussing");
   assert.equal(s.specText, topic);
-  assert.deepEqual(s.adrFiles, []);
-  assert.deepEqual(s.specFiles, []);
-  assert.deepEqual(s.planFiles, []);
   assert.equal(s.lastTestResults, undefined);
 }
 
@@ -153,6 +147,13 @@ describe("phase-discuss prompt", () => {
     const p1 = await buildPhasePrompt("discussing", true);
     const p2 = await buildPhasePrompt("discussing", false);
     assert.equal(p1, p2);
+  });
+
+  it("buildPhasePrompt returns an empty string for non-discussing phases", async () => {
+    const implementing = await buildPhasePrompt("implementing");
+    const idle = await buildPhasePrompt("idle");
+    assert.equal(implementing, "");
+    assert.equal(idle, "");
   });
 });
 
@@ -400,9 +401,6 @@ describe("implement integration with discussion state", () => {
     const ctx = mockCtx("/tmp/test", {
       phase: "idle",
       specText: "",
-      adrFiles: [],
-      specFiles: [],
-      planFiles: [],
     });
 
     const loaded = loadState(ctx);

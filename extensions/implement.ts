@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import { loadContent, renderTemplate } from "./utils.ts";
-import { readLatestAdr } from "./adr.ts";
 import { detectDiscussionTopic, getLatestAssistantMessage } from "./discuss.ts";
 import {
   type WorkflowState,
@@ -11,7 +10,6 @@ import {
   transitionTo,
   updateUi,
 } from "./state.ts";
-import { onPlanImplemented, archivePlan } from "./plan.ts";
 
 /**
  * Resolve the specification source when /implement is called without
@@ -19,9 +17,8 @@ import { onPlanImplemented, archivePlan } from "./plan.ts";
  *
  * Priority:
  * 1. Latest assistant (AI) message — the finalized plan from a discussion
- * 2. Discussion topic (from /discuss state or /discuss message) 
- * 3. Latest ADR content
- * 4. null — nothing to implement
+ * 2. Discussion topic (from /discuss state or /discuss message)
+ * 3. null — nothing to implement
  *
  * @param ctx - Extension context with session manager access.
  * @returns The resolved spec content, or null if nothing found.
@@ -39,18 +36,6 @@ export async function resolveImplementSpec(ctx: ExtensionContext): Promise<strin
     return discussionTopic;
   }
 
-  // Priority 3: latest ADR
-  const latestAdr = await readLatestAdr(ctx.cwd);
-  if (latestAdr) {
-    return [
-      `Title: ${latestAdr.title}`,
-      `Description: ${latestAdr.description}`,
-      `Context: ${latestAdr.context}`,
-      `Decision: ${latestAdr.decision}`,
-      `Impact: ${latestAdr.impact}`,
-    ].join("\n");
-  }
-
   return null;
 }
 
@@ -61,46 +46,33 @@ export async function resolveImplementSpec(ctx: ExtensionContext): Promise<strin
  * Guides the user to the right starting point.
  */
 export const NO_INPUT_WARNING =
-  "No spec provided and no ADR found. Run /brainstorm <topic> " +
-  "to start the full workflow, or /discuss <topic> for a " +
-  "lightweight discussion-then-implement flow.";
+  "No spec provided. Run /discuss <topic> to discuss first, " +
+  "then /implement executes the agreed plan.";
 
 /**
  * Start the TDD implementation phase.
  *
  * 1. Builds a TDD system prompt from the specification
  * 2. Transitions state to "implementing"
- * 3. Saves pending plan path (if any) for later finalization
- * 4. Injects the TDD context into the next agent turn
+ * 3. Injects the TDD context into the next agent turn
  *   via pi.sendUserMessage
  *
  * The actual TDD enforcement (test-first, run tests) is driven
  * by the system prompt injected in before_agent_start.
- * The plan is NOT archived here — it stays in place until the
- * agent calls complete_implementation after all tasks are done.
  *
- * @param spec     - Full specification text (usually from an ADR).
- * @param pi       - ExtensionAPI reference.
- * @param ctx      - Current extension context.
- * @param planPath - Optional path to a plan file to finalize later.
+ * @param spec - Full specification text (usually from a discussion).
+ * @param pi   - ExtensionAPI reference.
+ * @param ctx  - Current extension context.
  */
 export async function startTdd(
   spec: string,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  planPath?: string,
 ): Promise<void> {
   const state: WorkflowState = {
     phase: "implementing",
     specText: spec,
-    adrFiles: [],
-    pendingPlanPath: planPath,
   };
-
-  const latestAdr = await readLatestAdr(ctx.cwd);
-  if (latestAdr) {
-    state.adrFiles = [latestAdr.title];
-  }
 
   transitionTo(pi, state, "implementing");
   updateUi(state, ctx);
@@ -141,17 +113,13 @@ export async function generateReport(
   const template = await loadContent("report-template.md");
   const results = state.lastTestResults;
 
-  const coverageRows = state.adrFiles
-    .map((f) => `| ${f} | Implemented |`)
-    .join("\n");
-
   return renderTemplate(template, {
     summary: "Implementation complete. See details below.",
-    coverageRows: coverageRows || "| (no ADR reference) | Implemented |",
+    coverageRows: "| (no ADR reference) | Implemented |",
     passed: String(results?.passed ?? 0),
     failed: String(results?.failed ?? 0),
     coveragePercent: String(results?.coveragePercent ?? 0),
-    gaps: "Review the ADR for any unimplemented edge cases.",
+    gaps: "Review the specification for any unimplemented edge cases.",
   });
 }
 
@@ -215,7 +183,7 @@ export async function runTests(
 export async function getGaps(
   _ctx: ExtensionContext,
 ): Promise<string[]> {
-  // TODO: scan session for unimplemented items vs ADR
+  // TODO: scan session for unimplemented items vs the specification
   return [];
 }
 
@@ -223,9 +191,7 @@ export async function getGaps(
  * Register the `complete_implementation` AI tool.
  *
  * Called by the agent after all TDD tasks are done and all tests pass.
- * Reads the pending plan path from workflow state (or accepts one directly),
- * updates spec/ADR status via onPlanImplemented, archives the plan file,
- * and transitions out of the implementing phase.
+ * Ends the implementing phase and returns the workflow to idle.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -234,20 +200,13 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
     name: "complete_implementation",
     label: "Complete Implementation",
     description:
-      "Finalize implementation of the current plan. Archives the plan file, " +
-      "updates the related spec's remaining count and status, and cascades " +
-      "to the parent ADR. Call this ONLY after all plan tasks are complete " +
-      "and all tests pass.",
+      "Finalize implementation. Ends the implementing phase and returns " +
+      "the workflow to idle. Call this ONLY after all implementation tasks " +
+      "are complete and all tests pass.",
 
-    parameters: Type.Object({
-      planFile: Type.Optional(Type.String({
-        description:
-          "Path to the plan file to finalize. If omitted, reads from " +
-          "workflow state (set by /implement @docs/plans/<file>).",
-      })),
-    }),
+    parameters: Type.Object({}),
 
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);
       if (!state || state.phase !== "implementing") {
         return {
@@ -258,65 +217,6 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
         };
       }
 
-      // Determine plan path: explicit param > state > nothing
-      let planPath: string | undefined = params.planFile;
-      if (!planPath) {
-        planPath = state.pendingPlanPath;
-      }
-
-      if (!planPath) {
-        // No plan to archive — free-form TDD session, just clean up
-        transitionTo(pi, state, "idle");
-        updateUi(null, ctx);
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                "## Implementation Complete\n\n" +
-                "No plan file to finalize. The implementation phase is now " +
-                "complete and the workflow has returned to idle.",
-            },
-          ],
-        };
-      }
-
-      const resolvedPath = isAbsolute(planPath)
-        ? planPath
-        : resolve(ctx.cwd, planPath);
-
-      // Verify the plan file still exists
-      if (!existsSync(resolvedPath)) {
-        ctx.ui.notify(
-          `Plan file not found: ${resolvedPath}. Already archived?`,
-          "warning",
-        );
-        state.pendingPlanPath = undefined;
-        transitionTo(pi, state, "idle");
-        updateUi(null, ctx);
-        return {
-          content: [
-            {
-              type: "text",
-              text:
-                `Plan file ${resolvedPath} no longer exists (already archived?). ` +
-                "Cleaning up state and returning to idle.",
-            },
-          ],
-        };
-      }
-
-      // 1. Update spec/ADR status (decrements remaining, cascades)
-      ctx.ui.notify("Updating spec and ADR status...", "info");
-      await onPlanImplemented(resolvedPath, ctx.cwd);
-
-      // 2. Archive the plan file
-      ctx.ui.notify("Archiving plan...", "info");
-      const archived = await archivePlan(resolvedPath, ctx.cwd);
-      ctx.ui.notify(`Plan archived: ${archived}`, "info");
-
-      // 3. Clean up state and transition to idle
-      state.pendingPlanPath = undefined;
       transitionTo(pi, state, "idle");
       updateUi(null, ctx);
 
@@ -326,9 +226,8 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
             type: "text",
             text:
               "## Implementation Complete\n\n" +
-              "- Plan archived\n" +
-              "- Spec and ADR status updated\n\n" +
-              "The implementation is finalized. The workflow has returned to idle.",
+              "The implementation phase is now complete and the workflow " +
+              "has returned to idle.",
           },
         ],
       };

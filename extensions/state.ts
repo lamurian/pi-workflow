@@ -4,30 +4,14 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 export type WorkflowPhase =
   | "idle"
   | "discussing"
-  | "requirements"
-  | "specifying"
-  | "planning"
-  | "implementing"
-  | "testing"
-  | "reporting";
+  | "implementing";
 
 /** Serializable workflow state persisted via pi.appendEntry(). */
 export interface WorkflowState {
   /** Current workflow phase. */
   phase: WorkflowPhase;
-  /** The agreed-upon specification text (ADR content or summary). */
+  /** The agreed-upon specification text (from discussion or implement). */
   specText: string;
-  /** Paths to ADR files created during brainstorming. */
-  adrFiles: string[];
-  /** Paths to spec files for the current ADR. */
-  specFiles: string[];
-  /** Paths to plan files for the current spec. */
-  planFiles: string[];
-  /**
-   * Path to a plan file being implemented but not yet archived.
-   * Set by /implement @docs/plans/<file>, consumed by complete_implementation.
-   */
-  pendingPlanPath?: string;
   /** Results from the latest test run, if any. */
   lastTestResults?: TestResults;
 }
@@ -113,11 +97,8 @@ export function updateUi(state: WorkflowState | null, ctx: ExtensionContext): vo
     ctx.ui.theme.fg("accent", `◉ ${phaseLabel}`),
   );
 
-  if (state.phase === "implementing" || state.phase === "testing") {
+  if (state.phase === "implementing") {
     const lines: string[] = [];
-    if (state.adrFiles.length > 0) {
-      lines.push(ctx.ui.theme.fg("muted", `ADR: ${state.adrFiles[0]}`));
-    }
     if (state.lastTestResults) {
       const r = state.lastTestResults;
       const color = r.failed > 0 ? "error" : "success";

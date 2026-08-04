@@ -18,9 +18,6 @@ export async function runYolo(
   const state: WorkflowState = {
     phase: "idle",
     specText: "",
-    adrFiles: [],
-    specFiles: [],
-    planFiles: [],
   };
   saveState(pi, state);
   updateUi(state, ctx);

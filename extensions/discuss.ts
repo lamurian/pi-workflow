@@ -39,9 +39,6 @@ export async function runDiscussion(
   const state: WorkflowState = {
     phase: "discussing",
     specText: topic,
-    adrFiles: [],
-    specFiles: [],
-    planFiles: [],
   };
 
   transitionTo(pi, state, "discussing");

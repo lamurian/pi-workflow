@@ -40,15 +40,10 @@ export async function handlePreCompact(
     ? `\n\n## Specification\n${state.specText}`
     : "";
 
-  const adrSection =
-    state.adrFiles.length > 0
-      ? `\n\n## Key Decisions\nReferenced in ADR: ${state.adrFiles.join(", ")}`
-      : "";
-
   const nextSteps = `\n\n## Next Steps\nContinue ${state.phase.replace(/_/g, " ")} phase.`;
 
   const customSummary =
-    `Workflow phase: ${state.phase}.${specSection}${adrSection}${nextSteps}`;
+    `Workflow phase: ${state.phase}.${specSection}${nextSteps}`;
 
   return {
     compaction: {
@@ -57,11 +52,7 @@ export async function handlePreCompact(
       tokensBefore: preparation.tokensBefore,
       details: {
         workflowPhase: state.phase,
-        adrFiles: state.adrFiles,
-        readFiles: [
-          ...(preparation.fileOps?.readFiles ?? []),
-          ...state.adrFiles,
-        ],
+        readFiles: preparation.fileOps?.readFiles ?? [],
         modifiedFiles: preparation.fileOps?.modifiedFiles ?? [],
       },
     },

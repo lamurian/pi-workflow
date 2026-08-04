@@ -64,9 +64,6 @@ describe("runYolo", () => {
     ];
     assert.equal(saved.phase, "idle");
     assert.equal(saved.specText, "");
-    assert.deepEqual(saved.adrFiles, []);
-    assert.deepEqual(saved.specFiles, []);
-    assert.deepEqual(saved.planFiles, []);
   });
 
   it("sends a steer message to the agent to reset context", async () => {
