@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState } from "./state.ts";
+import { restoreTools } from "./tools.ts";
 
 /**
  * Snap back to the default pi session from any workflow phase.
@@ -20,6 +21,8 @@ export async function runYolo(
     specText: "",
   };
   saveState(pi, state);
+  // Back to the default session: restore the full toolset.
+  restoreTools(pi);
   updateUi(state, ctx);
   ctx.ui.notify("Workflow reset. Back to default session.", "info");
   pi.sendUserMessage("/yolo — session reset to default", { deliverAs: "steer" });

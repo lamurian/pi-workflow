@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { loadState, updateUi } from "./state.ts";
+import { applyDiscussTools, restoreTools } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
 import { runYolo } from "./yolo.ts";
@@ -29,6 +30,16 @@ export default function (pi: ExtensionAPI): void {
     const state = loadState(ctx);
     updateUi(state, ctx);
     setupAutocomplete(ctx, ctx.cwd);
+
+    // Re-apply or restore the toolset to match the resumed phase.
+    // A fresh RPC subprocess starts with default tools; a resume in the
+    // discussing phase re-filters, any other phase restores the saved set
+    // (no-op when no snapshot exists).
+    if (state && state.phase === "discussing") {
+      applyDiscussTools(pi);
+    } else {
+      restoreTools(pi);
+    }
   });
 
   // ─── Compaction Preservation ─────────────────────────────────

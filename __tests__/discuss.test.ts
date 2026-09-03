@@ -12,6 +12,7 @@ import {
   updateUi,
 } from "../extensions/state.ts";
 import { handlePreCompact } from "../extensions/compaction.ts";
+import { resetToolsState } from "../extensions/tools.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -21,13 +22,33 @@ import type {
 // ── Mock factories ───────────────────────────────────────────────────────────
 
 /**
+ * Simulated default toolset with a mix of read-only and write-capable tools.
+ */
+const DEFAULT_ACTIVE_TOOLS = [
+  "read",
+  "bash",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "edit",
+  "create_para_doc",
+  "commit_changes",
+];
+
+/**
  * Create a mock ExtensionAPI with call-recording spies.
  *
  * All methods are no-ops by default. Key methods (`appendEntry`,
- * `sendUserMessage`) record their arguments to the returned `.calls` object
- * for assertion.
+ * `sendUserMessage`, `setActiveTools`) record their arguments to the
+ * returned `.calls` object for assertion.
+ *
+ * @param activeTools - Initial active tool list returned by getActiveTools.
+ * @returns Mock ExtensionAPI with recorded calls.
  */
-function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
+function mockPi(
+  activeTools: string[] = DEFAULT_ACTIVE_TOOLS,
+): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};
   const record = (name: string) => {
     calls[name] = [];
@@ -41,6 +62,8 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
     registerCommand: record("registerCommand") as ExtensionAPI["registerCommand"],
     appendEntry: record("appendEntry") as ExtensionAPI["appendEntry"],
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
+    getActiveTools: () => [...activeTools],
+    setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
@@ -231,6 +254,25 @@ describe("runDiscussion", () => {
       setStatusCalls.some((c) => (c as { key: string }).key === "workflow"),
       "should set workflow status",
     );
+  });
+
+  it("filters write-capable tools from the active set", async () => {
+    resetToolsState();
+    const pi = mockPi();
+    const ctx = mockCtx("/tmp/test");
+
+    await runDiscussion("fix login button", pi, ctx);
+
+    const setCalls = pi.calls["setActiveTools"] ?? [];
+    assert.equal(setCalls.length, 1, "setActiveTools should be called once");
+
+    const [filtered] = setCalls[0] as [string[]];
+    assert.ok(!filtered.includes("write"), "write should be removed");
+    assert.ok(!filtered.includes("edit"), "edit should be removed");
+    assert.ok(!filtered.includes("create_para_doc"), "create_para_doc should be removed");
+    assert.ok(!filtered.includes("commit_changes"), "commit_changes should be removed");
+    assert.ok(filtered.includes("read"), "read should remain");
+    assert.ok(filtered.includes("bash"), "bash should remain");
   });
 
   it("does not write any files (no ADR/spec/plan created)", async () => {

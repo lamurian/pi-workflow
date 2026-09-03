@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState } from "./state.ts";
 import { transitionTo, updateUi, loadState } from "./state.ts";
+import { applyDiscussTools } from "./tools.ts";
 
 /**
  * Type guard for assistant message content which can be either a plain string
@@ -42,6 +43,10 @@ export async function runDiscussion(
   };
 
   transitionTo(pi, state, "discussing");
+  // Restrict the active toolset to read-only tools before the steer,
+  // so the model physically cannot call write/edit/PARA/commit tools
+  // during the discussion turn.
+  applyDiscussTools(pi);
   updateUi(state, ctx);
 
   ctx.ui.notify(

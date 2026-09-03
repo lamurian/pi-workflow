@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { Type } from "typebox";
 import { loadContent, renderTemplate } from "./utils.ts";
 import { detectDiscussionTopic, getLatestAssistantMessage } from "./discuss.ts";
+import { restoreTools } from "./tools.ts";
 import {
   type WorkflowState,
   loadState,
@@ -75,6 +76,8 @@ export async function startTdd(
   };
 
   transitionTo(pi, state, "implementing");
+  // Bring the full toolset back: write/edit are needed for TDD.
+  restoreTools(pi);
   updateUi(state, ctx);
 
   const tddPrompt = await buildTddPrompt(spec);
@@ -218,6 +221,8 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
       }
 
       transitionTo(pi, state, "idle");
+      // The workflow leaves the discussing phase: restore the full toolset.
+      restoreTools(pi);
       updateUi(null, ctx);
 
       return {

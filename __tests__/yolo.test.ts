@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { runYolo } from "../extensions/yolo.ts";
+import { applyDiscussTools, resetToolsState } from "../extensions/tools.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -9,7 +10,23 @@ import type { WorkflowState } from "../extensions/state.ts";
 
 // ── Mock factories ───────────────────────────────────────────────────────────
 
-function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
+/**
+ * Simulated default toolset with a mix of read-only and write-capable tools.
+ */
+const DEFAULT_ACTIVE_TOOLS = [
+  "read",
+  "bash",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "edit",
+  "commit_changes",
+];
+
+function mockPi(
+  activeTools: string[] = DEFAULT_ACTIVE_TOOLS,
+): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};
   const record = (name: string) => {
     calls[name] = [];
@@ -23,6 +40,8 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
     registerCommand: record("registerCommand") as ExtensionAPI["registerCommand"],
     appendEntry: record("appendEntry") as ExtensionAPI["appendEntry"],
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
+    getActiveTools: () => [...activeTools],
+    setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
@@ -113,6 +132,27 @@ describe("runYolo", () => {
           c.key === "workflow" && c.value === undefined,
       ),
       "should clear workflow status to undefined",
+    );
+  });
+
+  it("restores the full toolset when resetting to idle", async () => {
+    resetToolsState();
+    const pi = mockPi();
+    const ctx = mockCtx("/tmp/test");
+
+    applyDiscussTools(pi); // simulate a discussion in progress
+    await runYolo(pi, ctx);
+
+    const setCalls = pi.calls["setActiveTools"] ?? [];
+    assert.equal(setCalls.length, 2, "should filter on discuss, then restore");
+
+    const [filtered] = setCalls[0] as [string[]];
+    const [restored] = setCalls[1] as [string[]];
+    assert.ok(!filtered.includes("write"), "discussion set should exclude write");
+    assert.deepEqual(
+      restored,
+      DEFAULT_ACTIVE_TOOLS,
+      "after /yolo the toolset should be the original full set",
     );
   });
 });
