@@ -1,0 +1,307 @@
+import { describe, it } from "vitest";
+import assert from "node:assert/strict";
+import {
+  validateTask,
+  validateBackToFinalize,
+  parseTestOutput,
+  evaluateCompletionGate,
+  renderTaskContract,
+} from "../extensions/task-contract.ts";
+import { handlePreCompact } from "../extensions/compaction.ts";
+import type { WorkflowState } from "../extensions/state.ts";
+import type { ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+
+const exists = (p: string) => p === "src/a.ts" || p === "src/b.ts";
+
+function implementingState(overrides: Partial<WorkflowState> = {}): WorkflowState {
+  return {
+    phase: "implementing",
+    specText: "topic",
+    returnCount: 0,
+    task: {
+      title: "T",
+      instruction: "do it",
+      files: ["src/a.ts"],
+      done: "tests pass",
+      behaviors: [
+        {
+          id: "T1",
+          description: "handler returns list",
+          expectedOutput: "200 + array",
+          kind: "test",
+          status: "active",
+          sourceFile: "src/a.ts",
+        },
+      ],
+    },
+    ...overrides,
+  };
+}
+
+// ═══ validateTask ═══
+describe("validateTask", () => {
+  it("accepts a well-formed contract and defaults status", () => {
+    const r = validateTask({
+      title: "T",
+      instruction: "i",
+      files: ["a"],
+      done: "d",
+      behaviors: [
+        { id: "T1", description: "x", expectedOutput: "y", kind: "test" },
+      ],
+    });
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.task.behaviors[0].status, "active");
+      assert.equal(r.task.behaviors[0].kind, "test");
+    }
+  });
+
+  it("rejects a missing title", () => {
+    const r = validateTask({ title: "  ", instruction: "i", files: [], done: "d", behaviors: [] });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /title/);
+  });
+
+  it("rejects a behavior with a bad kind", () => {
+    const r = validateTask({
+      title: "T", instruction: "i", files: [], done: "d",
+      behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "maybe" }],
+    });
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /kind/);
+  });
+
+  it("rejects a non-array behaviors field", () => {
+    const r = validateTask({ title: "T", instruction: "i", files: [], done: "d", behaviors: "nope" });
+    assert.equal(r.ok, false);
+  });
+});
+
+// ═══ validateBackToFinalize ═══
+describe("validateBackToFinalize", () => {
+  it("rejects outside the implementing phase", () => {
+    const s = implementingState({ phase: "finalized" });
+    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /implementing/);
+  });
+
+  it("rejects an unknown reason", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(s, { reason: "because" }, exists);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /reason/);
+  });
+
+  it("enforces the returnCount cap of 2", () => {
+    const s = implementingState({ returnCount: 2 });
+    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /cap/);
+  });
+
+  it("rejects a duplicate new-testable-surface description", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(
+      s,
+      {
+        reason: "new-testable-surface",
+        behaviors: [{ description: "handler returns list", expectedOutput: "z", sourceFile: "src/a.ts" }],
+      },
+      exists,
+    );
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /already in contract/);
+  });
+
+  it("rejects a sourceFile that does not exist", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(
+      s,
+      {
+        reason: "new-testable-surface",
+        behaviors: [{ description: "new behavior", expectedOutput: "z", sourceFile: "src/missing.ts" }],
+      },
+      exists,
+    );
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /sourceFile does not exist/);
+  });
+
+  it("adds a new testable behavior and increments returnCount", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(
+      s,
+      {
+        reason: "new-testable-surface",
+        behaviors: [{ description: "b new", expectedOutput: "z", sourceFile: "src/b.ts" }],
+      },
+      exists,
+    );
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.returnCount, 1);
+      assert.equal(r.task.behaviors.length, 2);
+      assert.equal(r.task.behaviors[1].status, "active");
+      assert.equal(r.task.behaviors[1].kind, "test");
+    }
+  });
+
+  it("marks a behavior removed for out-of-scope", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
+    assert.equal(r.ok, true);
+    if (r.ok) {
+      assert.equal(r.task.behaviors[0].status, "removed");
+      assert.equal(r.returnCount, 1);
+    }
+  });
+
+  it("rejects removing a behavior that is not in the contract", () => {
+    const s = implementingState();
+    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T99"] }, exists);
+    assert.equal(r.ok, false);
+    if (!r.ok) assert.match(r.reason, /not in contract/);
+  });
+});
+
+// ═══ parseTestOutput ═══
+describe("parseTestOutput", () => {
+  it("treats exit code 0 as passing and parses counts", () => {
+    const r = parseTestOutput(0, "Tests: 3 passed, 1 failed");
+    assert.equal(r.failed, 1);
+    assert.equal(r.passed, 3);
+  });
+
+  it("counts a non-zero exit with no 'failed' text as a failure", () => {
+    const r = parseTestOutput(1, "all good");
+    assert.equal(r.failed, 1);
+    assert.equal(r.passed, 0);
+  });
+
+  it("parses mocha 'passing'/'failing' wording", () => {
+    const r = parseTestOutput(0, "5 passing\n1 failing");
+    assert.equal(r.passed, 5);
+    assert.equal(r.failed, 1);
+  });
+
+  it("parses coverage percent when present", () => {
+    const r = parseTestOutput(0, "All files | 90.5 |");
+    assert.equal(r.coveragePercent, 90.5);
+  });
+});
+
+// ═══ evaluateCompletionGate ═══
+describe("evaluateCompletionGate", () => {
+  it("passes when all behaviors done and tests green", () => {
+    const s = implementingState({
+      task: {
+        title: "T", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }],
+      },
+      lastTestResults: { passed: 3, failed: 0 },
+    });
+    assert.equal(evaluateCompletionGate(s), null);
+  });
+
+  it("refuses while a behavior is still active", () => {
+    const s = implementingState();
+    const r = evaluateCompletionGate(s);
+    assert.ok(r !== null);
+    assert.match(r!, /active/);
+  });
+
+  it("refuses when a test behavior exists but no run is recorded", () => {
+    const s = implementingState({
+      task: {
+        title: "T", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }],
+      },
+    });
+    const r = evaluateCompletionGate(s);
+    assert.ok(r !== null);
+    assert.match(r!, /no test run/);
+  });
+
+  it("refuses when the last run had failures", () => {
+    const s = implementingState({
+      task: {
+        title: "T", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }],
+      },
+      lastTestResults: { passed: 1, failed: 2 },
+    });
+    const r = evaluateCompletionGate(s);
+    assert.ok(r !== null);
+    assert.match(r!, /failing/);
+  });
+
+  it("passes with manual behaviors and no test run", () => {
+    const s = implementingState({
+      task: {
+        title: "T", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "manual", status: "done" }],
+      },
+    });
+    assert.equal(evaluateCompletionGate(s), null);
+  });
+});
+
+// ═══ renderTaskContract ═══
+describe("renderTaskContract", () => {
+  it("lists behaviors and flags removed ones", () => {
+    const s = implementingState({
+      task: {
+        title: "My Task", instruction: "i", files: ["a.ts"], done: "d",
+        behaviors: [
+          { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+          { id: "T2", description: "z", expectedOutput: "w", kind: "manual", status: "removed" },
+        ],
+      },
+    });
+    const out = renderTaskContract(s.task!);
+    assert.match(out, /My Task/);
+    assert.match(out, /T1/);
+    assert.match(out, /\[removed\]/);
+  });
+});
+
+// ═══ compaction embeds the contract ═══
+describe("compaction preserves the task contract", () => {
+  function ctxFor(state: WorkflowState): ExtensionContext {
+    return {
+      cwd: "/tmp/test",
+      sessionManager: {
+        getBranch: () => [{ type: "custom", customType: "workflow-state", data: state }],
+      },
+      ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, theme: { fg: (_: string, t: string) => t } },
+    } as unknown as ExtensionContext;
+  }
+
+  it("embeds behaviors and statuses in the compaction summary", async () => {
+    const s = implementingState({
+      phase: "finalized",
+      task: {
+        title: "Contracted", instruction: "i", files: ["a.ts"], done: "d",
+        behaviors: [
+          { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+        ],
+      },
+    });
+    const event = { preparation: { firstKeptEntryId: "e0", tokensBefore: 100 } } as unknown as SessionBeforeCompactEvent;
+    const result = await handlePreCompact(event, ctxFor(s));
+    assert.ok(result && "compaction" in result);
+    const summary = (result as { compaction: { summary: string } }).compaction.summary;
+    assert.match(summary, /Task Contract/);
+    assert.match(summary, /Contracted/);
+    assert.match(summary, /T1/);
+  });
+
+  it("still returns undefined for an idle phase", async () => {
+    const s: WorkflowState = { phase: "idle", specText: "" };
+    const event = { preparation: { firstKeptEntryId: "e0", tokensBefore: 100 } } as unknown as SessionBeforeCompactEvent;
+    const result = await handlePreCompact(event, ctxFor(s));
+    assert.equal(result, undefined);
+  });
+});

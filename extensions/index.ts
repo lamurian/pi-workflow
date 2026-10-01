@@ -1,23 +1,21 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { loadState, updateUi } from "./state.ts";
-import { applyDiscussTools, restoreTools } from "./tools.ts";
+import { applyDiscussTools, restoreTools, DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
-import { runYolo } from "./yolo.ts";
 import {
-  startTdd,
-  NO_INPUT_WARNING,
+  runImplement,
+  registerRunTestsTool,
+  registerMarkTaskDoneTool,
+  registerBackToFinalizeTool,
   registerCompleteImplementationTool,
-  resolveImplementSpec,
 } from "./implement.ts";
+import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
-import { parseArgs, getSkillsDir, stripFileRefs } from "./utils.ts";
+import { getSkillsDir } from "./utils.ts";
 import { setupAutocomplete } from "./autocomplete.ts";
 import { handlePreCompact, handlePostCompact } from "./compaction.ts";
-import { readFile } from "node:fs/promises";
-import { statSync, existsSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
 
 export default function (pi: ExtensionAPI): void {
   // ─── Resources Discovery ────────────────────────────────────
@@ -31,11 +29,9 @@ export default function (pi: ExtensionAPI): void {
     updateUi(state, ctx);
     setupAutocomplete(ctx, ctx.cwd);
 
-    // Re-apply or restore the toolset to match the resumed phase.
-    // A fresh RPC subprocess starts with default tools; a resume in the
-    // discussing phase re-filters, any other phase restores the saved set
-    // (no-op when no snapshot exists).
-    if (state && state.phase === "discussing") {
+    // Re-apply the read-only filter when resuming into a gated phase
+    // (discussing or finalized). Any other phase restores the saved set.
+    if (state && (state.phase === "discussing" || state.phase === "finalized")) {
       applyDiscussTools(pi);
     } else {
       restoreTools(pi);
@@ -54,14 +50,12 @@ export default function (pi: ExtensionAPI): void {
 
   // ─── Context Injection ──────────────────────────────────────
   pi.on("before_agent_start", async (event, ctx) => {
-    // Always read fresh state from session to avoid stale module-level cache.
     const currentState = loadState(ctx);
 
     if (!currentState || currentState.phase === "idle") {
       return;
     }
 
-    // Phase-specific protocol prompt (only discussing has one)
     const phasePrompt = await buildPhasePrompt(currentState.phase);
     const topic = currentState.specText
       ? `\n\nTopic: ${currentState.specText}`
@@ -75,20 +69,32 @@ export default function (pi: ExtensionAPI): void {
   // ─── Register Commands ──────────────────────────────────────
   registerExploreCommand(pi);
   registerExploreTool(pi);
+
+  // ─── Register Workflow Tools ────────────────────────────────
+  registerSaveTaskTool(pi);
+  registerRunTestsTool(pi);
+  registerMarkTaskDoneTool(pi);
+  registerBackToFinalizeTool(pi);
   registerCompleteImplementationTool(pi);
 
   // ── Phase-based edit restrictions ───────────────────────────
   pi.on("tool_call", async (event, ctx) => {
     const currentState = loadState(ctx);
-    if (!currentState || currentState.phase !== "discussing") return;
+    if (!currentState) return;
+    const gated = currentState.phase === "discussing" || currentState.phase === "finalized";
+    if (!gated) return;
 
-    // /discuss: no file edits allowed
-    if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
+    // Gated phases: no file edits or commit tools allowed.
+    if (
+      isToolCallEventType("write", event) ||
+      isToolCallEventType("edit", event) ||
+      DISCUSS_BLOCKED_TOOLS.includes(event.toolName)
+    ) {
       return {
         block: true,
         reason:
-          "The /discuss command does not allow file editing. " +
-          "Discuss the approach first, then use /implement to execute the agreed plan.",
+          "This phase does not allow file edits or commits. " +
+          "Run /implement to execute the agreed contract.",
       };
     }
   });
@@ -103,83 +109,23 @@ export default function (pi: ExtensionAPI): void {
     },
   });
 
-  // ── /implement ──────────────────────────────────────────────
-  pi.registerCommand("implement", {
+  // ── /finalize ──────────────────────────────────────────────
+  pi.registerCommand("finalize", {
     description:
-      "TDD implementation. Usage: /implement <topic> | /implement @<file> | " +
-      "/implement <path-to-file>",
-    handler: async (args, ctx) => {
-      const trimmed = args.trim();
-
-      // ── Phase 1: Extract @file references ──────────────────
-      const refRegex = /@(\S+)/g;
-      const refs: string[] = [];
-      let match: RegExpExecArray | null;
-      while ((match = refRegex.exec(trimmed)) !== null) {
-        refs.push(match[1]);
-      }
-
-      // ── Phase 2: Resolve the specification source ───────────
-      let spec: string | undefined;
-
-      // Strategy A: @-prefixed file references — read contents as spec
-      if (refs.length > 0) {
-        const { fileContents } = await parseArgs(args, ctx.cwd);
-        if (fileContents.length > 0) {
-          spec = fileContents.join("\n\n---\n\n");
-        }
-      }
-
-      // Strategy B: plain path (no @ prefix) — read the file
-      if (!spec && trimmed) {
-        const maybePath = isAbsolute(trimmed)
-          ? trimmed
-          : resolve(ctx.cwd, trimmed);
-        try {
-          if (existsSync(maybePath) && statSync(maybePath).isFile()) {
-            spec = await readFile(maybePath, "utf-8");
-          }
-        } catch {
-          // Not a valid file — fall through to free-form topic
-        }
-      }
-
-      // Strategy C: bare /implement — resolve from session
-      if (!spec) {
-        const topic = stripFileRefs(trimmed);
-
-        if (!topic) {
-          const resolvedSpec = await resolveImplementSpec(ctx);
-          if (resolvedSpec) {
-            spec = resolvedSpec;
-          } else {
-            ctx.ui.notify(NO_INPUT_WARNING, "warning");
-            return;
-          }
-        } else {
-          // Free-form topic text
-          spec = topic;
-        }
-      }
-
-      // ── Phase 3: Start TDD ─────────────────────────────────
-      if (!spec) {
-        ctx.ui.notify("No specification resolved. Nothing to implement.", "warning");
-        return;
-      }
-
-      await startTdd(spec, pi, ctx);
+      "Draft the task contract from the discussion. " +
+      "Valid only after /discuss. Usage: /finalize",
+    handler: async (_args, ctx) => {
+      await runFinalize(pi, ctx);
     },
   });
 
-  // ── /yolo ─────────────────────────────────────────────────
-  pi.registerCommand("yolo", {
+  // ── /implement ──────────────────────────────────────────────
+  pi.registerCommand("implement", {
     description:
-      "Snap back to the default pi session from any workflow phase. " +
-      "Resets all phase state (discussing, implementing, etc.). " +
-      "Usage: /yolo",
+      "TDD implementation of the finalized task contract. " +
+      "Valid only after /finalize. Usage: /implement",
     handler: async (_args, ctx) => {
-      await runYolo(pi, ctx);
+      await runImplement(pi, ctx);
     },
   });
 }

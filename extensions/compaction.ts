@@ -4,14 +4,14 @@ import type {
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { loadState } from "./state.ts";
+import { renderTaskContract } from "./task-contract.ts";
 
 /**
- * Intercept session_before_compact to preserve the agreed specification
- * in the compaction summary.
+ * Intercept session_before_compact to preserve the task contract and spec.
  *
- * When a workflow is active (brainstorming, spec_finalized, implementing),
- * this handler injects the spec text into the compaction summary under
- * "Key Decisions" and "Next Steps" so the LLM retains the specification
+ * When a workflow is active (discussing, finalized, implementing), this
+ * handler injects the spec text and the full task contract (behaviors and
+ * statuses) into the compaction summary so the LLM retains the contract
  * after compaction.
  *
  * @param event - The before-compact event with preparation data.
@@ -35,15 +35,18 @@ export async function handlePreCompact(
 
   const { preparation } = event;
 
-  // Build a spec-preserving summary injection
   const specSection = state.specText
     ? `\n\n## Specification\n${state.specText}`
+    : "";
+
+  const taskSection = state.task
+    ? `\n\n## Task Contract\n${renderTaskContract(state.task)}`
     : "";
 
   const nextSteps = `\n\n## Next Steps\nContinue ${state.phase.replace(/_/g, " ")} phase.`;
 
   const customSummary =
-    `Workflow phase: ${state.phase}.${specSection}${nextSteps}`;
+    `Workflow phase: ${state.phase}.${specSection}${taskSection}${nextSteps}`;
 
   return {
     compaction: {
@@ -60,7 +63,7 @@ export async function handlePreCompact(
 }
 
 /**
- * After compaction, re-inject spec context and update UI indicators.
+ * After compaction, re-inject context and update UI indicators.
  *
  * Called from the session_compact event. Restores the footer
  * status and widget to reflect the current workflow phase.

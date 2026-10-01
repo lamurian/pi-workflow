@@ -1,6 +1,5 @@
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import type { AgentConfig } from "../extensions/subagent-runner.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -225,20 +224,21 @@ describe("getScoutTimeoutMs", () => {
 // runScoutSubprocess — integration against a real pi binary
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/** True when a real `pi` binary is reachable on PATH. */
-function hasPiOnPath(): boolean {
-  try {
-    const r = spawnSync("pi", ["--version"], { stdio: "ignore", timeout: 8_000 });
-    return r.error === undefined && r.status === 0;
-  } catch {
-    return false;
-  }
-}
+/**
+ * Live-LLM integration tests are opt-in. They spawn a real `pi` subprocess
+ * and call a model, so they cannot finish inside the default unit-test
+ * timeout and depend on network/auth. Enable with PI_RUN_INTEGRATION=1.
+ */
+const RUN_INTEGRATION = process.env.PI_RUN_INTEGRATION === "1";
 
 describe("runScoutSubprocess integration (real pi)", () => {
   it(
     "extracts non-empty assistant text from a real pi subprocess",
-    { skip: !hasPiOnPath() && "pi not on PATH" },
+    {
+      skip:
+        !RUN_INTEGRATION &&
+        "integration test — set PI_RUN_INTEGRATION=1 to run against a live pi",
+    },
     async () => {
       const { runScoutSubprocess } = await import("../extensions/subagent-runner.ts");
 

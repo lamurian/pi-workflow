@@ -7,8 +7,8 @@ A pi extension for a lean **discuss → implement** workflow: discuss a feature 
 | Command | Description |
 |---------|-------------|
 | `/discuss <topic>` | Discuss an issue, bug, chore, or small fix. No files are written; the agent clarifies, proposes an approach, and iterates until you confirm. |
-| `/implement` | TDD implementation. Resolves the spec from: `@<file>` refs → plain file path → free-form topic → latest assistant message / discussion topic. |
-| `/yolo` | Snap back to the default pi session from any phase. Resets all workflow state. |
+| `/finalize` | Draft the atomic task contract (files, instruction, definition of done, testable behaviors) from the discussion. Valid only after `/discuss`. |
+| `/implement` | TDD implementation of the finalized task contract. Valid only after `/finalize`. |
 | `/explore <instruction>` | Explore the codebase using parallel searches (scout subagents) and get a structured summary. |
 
 ## AI Tools
@@ -16,14 +16,23 @@ A pi extension for a lean **discuss → implement** workflow: discuss a feature 
 | Tool | Description |
 |------|-------------|
 | `explore` | Runs parallel codebase searches via scout subagents and returns a synthesized summary with relative file paths. |
-| `complete_implementation` | Finalizes an implementation: ends the `implementing` phase and returns the workflow to idle. Call only after all tasks are done and tests pass. |
+| `save_task` | Persists the task contract, validating its shape deterministically. Transitions the workflow to the `finalized` phase. |
+| `run_tests` | Runs the detected test command and records the result. Exit code is the primary pass/fail signal. |
+| `mark_task_done` | Marks one behavior done after implementing it and running tests. |
+| `back_to_finalize` | Returns to the finalized phase to add a discovered testable surface or remove an out-of-scope behavior. |
+| `complete_implementation` | Finalizes an implementation: ends the `implementing` phase and returns the workflow to idle. Refuses while any behavior is active or tests are failing. |
 
 ## Workflow
 
-1. **Discuss** — `/discuss <topic>` starts a conversation. The agent asks probing questions, proposes an approach, and iterates on feedback. File edits are blocked during discussion.
-2. **Implement** — `/implement` picks up the finalized plan (from the latest assistant message or discussion topic) and runs TDD: write a failing test → implement → run tests → repeat.
-3. **Finalize** — the agent calls `complete_implementation` once all tasks are done and tests pass, returning to idle.
-4. **Commit & push** — use your `/commit` command, then push and open a PR.
+1. **Discuss** — `/discuss <topic>` starts a conversation. The agent asks probing questions, proposes an approach, and iterates on feedback. File edits are blocked.
+2. **Finalize** — `/finalize` has the agent draft an atomic task contract (files affected, instruction, definition of done, testable behaviors with expected outputs). You review it in the conversation and steer the tested behaviors; run `/implement` to approve.
+3. **Implement** — `/implement` consumes the contract and runs TDD per behavior: write a failing test → implement → `run_tests` → `mark_task_done`. Non-test behaviors are verified against the definition of done.
+4. **Complete** — the agent calls `complete_implementation` once all behaviors are done and tests pass, returning to idle.
+5. **Commit & push** — use your `/commit` command, then push and open a PR.
+
+### Escaping a gated phase
+
+`discussing` and `finalized` block file edits. There is no reset command; use `/new` to start a fresh session.
 
 ## Skills
 
@@ -34,7 +43,7 @@ Installed skills:
 
 ## Compaction
 
-The extension preserves the agreed specification during context compaction. The spec is included in compaction summaries under Specification and Next Steps.
+The extension preserves the task contract during context compaction. The contract (behaviors and their statuses) and the spec are included in compaction summaries under Task Contract, Specification, and Next Steps.
 
 ## File Structure
 
@@ -46,17 +55,20 @@ pi-workflow/
 │   ├── prompt.ts             # buildPhasePrompt (discussing phase protocol)
 │   ├── state.ts              # Phase state machine and persistence
 │   ├── discuss.ts            # /discuss orchestration
-│   ├── implement.ts          # TDD implementation + complete_implementation tool
+│   ├── implement.ts          # /implement + run_tests/mark_task_done/back_to_finalize/complete_implementation
+│   ├── finalize.ts           # /finalize command + save_task tool
+│   ├── task-contract.ts      # Pure contract logic (validation, rendering, parsing, gate)
 │   ├── explore.ts            # /explore command + explore tool
 │   ├── explore-core.ts       # Parallel exploration engine
 │   ├── subagent-runner.ts    # Scout subagent spawning
-│   ├── yolo.ts               # /yolo state reset
 │   ├── autocomplete.ts       # @ file reference autocomplete
 │   ├── compaction.ts         # Compaction spec preservation
 │   ├── paths.ts              # workflow.json config loading
 │   └── utils.ts              # Shared utilities (loadContent, parseArgs, shortSlug)
 ├── content/                  # Protocol prompts
 │   ├── phase-discussing.md   # /discuss protocol
+│   ├── phase-finalized.md    # /finalize review protocol
+│   ├── finalize-prompt.md    # Task-contract drafting prompt
 │   ├── tdd-prompt.md         # TDD enforcement prompt
 │   ├── report-template.md    # End-of-implementation report
 │   ├── explore-decompose.md  # Exploration decomposition prompt

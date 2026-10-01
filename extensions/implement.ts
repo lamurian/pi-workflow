@@ -3,127 +3,64 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import { loadContent, renderTemplate } from "./utils.ts";
-import { detectDiscussionTopic, getLatestAssistantMessage } from "./discuss.ts";
-import { restoreTools } from "./tools.ts";
 import {
-  type WorkflowState,
   loadState,
   transitionTo,
   updateUi,
+  saveState,
+  type WorkflowState,
+  type TaskContract,
 } from "./state.ts";
+import { restoreTools, applyDiscussTools } from "./tools.ts";
+import {
+  parseTestOutput,
+  validateBackToFinalize,
+  evaluateCompletionGate,
+  renderTaskContract,
+} from "./task-contract.ts";
 
 /**
- * Resolve the specification source when /implement is called without
- * any arguments (bare).
+ * Start the TDD implementation phase from a finalized task contract.
  *
- * Priority:
- * 1. Latest assistant (AI) message — the finalized plan from a discussion
- * 2. Discussion topic (from /discuss state or /discuss message)
- * 3. null — nothing to implement
+ * Valid only from the finalized phase. Consumes state.task (no args, no
+ * file resolution), transitions to implementing, restores the full toolset,
+ * and hands the agent a TDD prompt built from the contract.
  *
- * @param ctx - Extension context with session manager access.
- * @returns The resolved spec content, or null if nothing found.
+ * @param pi  - ExtensionAPI reference.
+ * @param ctx - Extension context.
  */
-export async function resolveImplementSpec(ctx: ExtensionContext): Promise<string | null> {
-  // Priority 1: latest assistant message (finalized plan from discussion)
-  const assistantMsg = getLatestAssistantMessage(ctx);
-  if (assistantMsg) {
-    return assistantMsg;
+export async function runImplement(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const state = loadState(ctx);
+  if (!state || state.phase !== "finalized") {
+    ctx.ui.notify(
+      "/implement is only valid after /finalize. Run /discuss then /finalize first.",
+      "warning",
+    );
+    return;
   }
-
-  // Priority 2: discussion topic
-  const discussionTopic = detectDiscussionTopic(ctx);
-  if (discussionTopic) {
-    return discussionTopic;
+  const task = state.task;
+  if (!task) {
+    ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
+    return;
   }
-
-  return null;
-}
-
-/**
- * Warning shown when /implement is called with no args and
- * no prior discussion or ADR exists.
- *
- * Guides the user to the right starting point.
- */
-export const NO_INPUT_WARNING =
-  "No spec provided. Run /discuss <topic> to discuss first, " +
-  "then /implement executes the agreed plan.";
-
-/**
- * Start the TDD implementation phase.
- *
- * 1. Builds a TDD system prompt from the specification
- * 2. Transitions state to "implementing"
- * 3. Injects the TDD context into the next agent turn
- *   via pi.sendUserMessage
- *
- * The actual TDD enforcement (test-first, run tests) is driven
- * by the system prompt injected in before_agent_start.
- *
- * @param spec - Full specification text (usually from a discussion).
- * @param pi   - ExtensionAPI reference.
- * @param ctx  - Current extension context.
- */
-export async function startTdd(
-  spec: string,
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-): Promise<void> {
-  const state: WorkflowState = {
-    phase: "implementing",
-    specText: spec,
-  };
-
+  state.returnCount = 0;
   transitionTo(pi, state, "implementing");
-  // Bring the full toolset back: write/edit are needed for TDD.
   restoreTools(pi);
   updateUi(state, ctx);
-
-  const tddPrompt = await buildTddPrompt(spec);
-
+  const prompt = await buildTddPrompt(task);
   ctx.ui.notify("Starting TDD implementation.", "info");
-
-  // Send the TDD prompt as a user message to kick off the agent
-  pi.sendUserMessage(tddPrompt, { deliverAs: "steer" });
+  pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 
 /**
- * Build the TDD-mode system prompt by loading the template
- * and substituting the specification.
+ * Build the TDD prompt from the task contract.
  *
- * @param spec - Specification text to inject.
+ * @param task - The finalized task contract.
  * @returns The rendered TDD prompt string.
  */
-export async function buildTddPrompt(spec: string): Promise<string> {
+export async function buildTddPrompt(task: TaskContract): Promise<string> {
   const template = await loadContent("tdd-prompt.md");
-  return renderTemplate(template, { spec });
-}
-
-/**
- * Generate an end-of-implementation report.
- *
- * Reads test results from state and compares against the spec.
- *
- * @param state - Current workflow state with test results.
- * @param ctx   - Extension context.
- * @returns A markdown report string.
- */
-export async function generateReport(
-  state: WorkflowState,
-  _ctx: ExtensionContext,
-): Promise<string> {
-  const template = await loadContent("report-template.md");
-  const results = state.lastTestResults;
-
-  return renderTemplate(template, {
-    summary: "Implementation complete. See details below.",
-    coverageRows: "| (no ADR reference) | Implemented |",
-    passed: String(results?.passed ?? 0),
-    failed: String(results?.failed ?? 0),
-    coveragePercent: String(results?.coveragePercent ?? 0),
-    gaps: "Review the specification for any unimplemented edge cases.",
-  });
+  return renderTemplate(template, { task: renderTaskContract(task) });
 }
 
 /**
@@ -141,60 +78,184 @@ function detectTestCommand(cwd: string): [string, string[]] {
 }
 
 /**
- * Run the project's test command and return results.
+ * Register the `run_tests` AI tool.
  *
- * Detects common test frameworks by checking for config files.
- * Falls back to "npm test". Parses output for pass/fail counts.
+ * Runs the detected test command and records the result in workflow state.
+ * The exit code is the primary pass/fail signal; counts/coverage are
+ * best-effort. The agent must call this before mark_task_done.
  *
- * @param pi  - ExtensionAPI reference for execution.
- * @param ctx - Extension context (for cwd).
- * @returns Object with pass/fail counts.
+ * @param pi - ExtensionAPI reference.
  */
-export async function runTests(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-): Promise<{ passed: number; failed: number; coveragePercent?: number }> {
-  ctx.ui.notify("Running tests...", "info");
+export function registerRunTestsTool(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "run_tests",
+    label: "Run Tests",
+    description:
+      "Run the project's test command and record the result. Call this " +
+      "after implementing a test behavior and before mark_task_done.",
+    parameters: Type.Object({}),
 
-  const [cmd, args] = detectTestCommand(ctx.cwd);
-  try {
-    const result = await pi.exec(cmd, args, { cwd: ctx.cwd, timeout: 120_000 });
-    const stdout = result.stdout ?? "";
-
-    // Parse test counts from common output formats (Mocha/Jest)
-    const passMatch = stdout.match(/(\d+)\s+passing/);
-    const failMatch = stdout.match(/(\d+)\s+failing/);
-    // Parse coverage from istanbul/lcov summary line
-    const coverageMatch = stdout.match(/All files\s+\|[^|]+\|[^|]+\|\s*([\d.]+)/);
-
-    return {
-      passed: passMatch ? parseInt(passMatch[1], 10) : 0,
-      failed: failMatch ? parseInt(failMatch[1], 10) : 0,
-      coveragePercent: coverageMatch ? parseFloat(coverageMatch[1]) : undefined,
-    };
-  } catch {
-    return { passed: 0, failed: 1 };
-  }
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const state = loadState(ctx);
+      if (!state || state.phase !== "implementing") {
+        return {
+          content: [{ type: "text", text: "run_tests requires the implementing phase." }],
+          isError: true,
+        };
+      }
+      const [cmd, args] = detectTestCommand(ctx.cwd);
+      let exitCode = 1;
+      let stdout = "";
+      try {
+        const result = await pi.exec(cmd, args, { cwd: ctx.cwd, timeout: 120_000 });
+        exitCode = result.exitCode ?? 0;
+        stdout = result.stdout ?? "";
+      } catch (err) {
+        stdout = String((err as Error).message ?? err);
+      }
+      const parsed = parseTestOutput(exitCode, stdout);
+      state.lastTestResults = parsed;
+      saveState(pi, state);
+      updateUi(state, ctx);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Tests ${exitCode === 0 ? "passed" : "failed"} (exit ${exitCode}). passed=${parsed.passed} failed=${parsed.failed}` +
+              (parsed.coveragePercent !== undefined ? ` coverage=${parsed.coveragePercent}%` : ""),
+          },
+        ],
+      };
+    },
+  });
 }
 
 /**
- * Get the "Not Yet Implemented" gaps from the session.
+ * Register the `mark_task_done` AI tool.
  *
- * @param _ctx - Extension context.
- * @returns Array of gap descriptions.
+ * Marks a single behavior as done after the agent has implemented it and
+ * run the tests. Records evidence in the session for the final report.
+ *
+ * @param pi - ExtensionAPI reference.
  */
-export async function getGaps(
-  _ctx: ExtensionContext,
-): Promise<string[]> {
-  // TODO: scan session for unimplemented items vs the specification
-  return [];
+export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "mark_task_done",
+    label: "Mark Task Done",
+    description:
+      "Mark one behavior as done after implementing it and running tests. " +
+      "Pass the behavior id and a short evidence note.",
+    parameters: Type.Object({
+      behaviorId: Type.String({ description: "The behavior id, e.g. T1" }),
+      evidence: Type.String({ description: "Short note on how it was verified" }),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const state = loadState(ctx);
+      if (!state || state.phase !== "implementing") {
+        return {
+          content: [{ type: "text", text: "mark_task_done requires the implementing phase." }],
+          isError: true,
+        };
+      }
+      const task = state.task;
+      const behavior = task?.behaviors.find((b) => b.id === params.behaviorId);
+      if (!task || !behavior) {
+        return {
+          content: [
+            { type: "text", text: `mark_task_done rejected: behavior not in contract (${params.behaviorId}).` },
+          ],
+          isError: true,
+        };
+      }
+      if (behavior.status === "removed") {
+        return {
+          content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }],
+          isError: true,
+        };
+      }
+      behavior.status = "done";
+      saveState(pi, state);
+      updateUi(state, ctx);
+      return {
+        content: [{ type: "text", text: `${params.behaviorId} marked done. Evidence: ${params.evidence}` }],
+      };
+    },
+  });
+}
+
+/**
+ * Register the `back_to_finalize` AI tool.
+ *
+ * Lets the agent return to the finalized phase when it discovers a new
+ * testable surface or an out-of-scope behavior. Enforces six deterministic
+ * checks via validateBackToFinalize. On success re-gates writes.
+ *
+ * @param pi - ExtensionAPI reference.
+ */
+export function registerBackToFinalizeTool(pi: ExtensionAPI): void {
+  pi.registerTool({
+    name: "back_to_finalize",
+    label: "Back to Finalize",
+    description:
+      "Return to the finalized phase to add a newly discovered testable " +
+      "surface or remove an out-of-scope behavior. reason must be " +
+      "new-testable-surface (with behaviors) or out-of-scope (with removals). " +
+      "Call alone, never batched with writes.",
+    parameters: Type.Object({
+      reason: Type.String({ description: "new-testable-surface | out-of-scope" }),
+      rationale: Type.String({ description: "Why this changes the contract" }),
+      behaviors: Type.Optional(
+        Type.Array(
+          Type.Object({
+            description: Type.String({ description: "Behavior under test" }),
+            expectedOutput: Type.String({ description: "Expected output" }),
+            sourceFile: Type.String({ description: "File that surfaces the behavior" }),
+          }),
+          { description: "New testable behaviors (reason=new-testable-surface)" },
+        ),
+      ),
+      removals: Type.Optional(
+        Type.Array(Type.String(), { description: "Behavior ids to remove (reason=out-of-scope)" }),
+      ),
+    }),
+
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const state = loadState(ctx);
+      if (!state) {
+        return { content: [{ type: "text", text: "No workflow state." }], isError: true };
+      }
+      const fileExists = (p: string) => existsSync(resolve(ctx.cwd, p));
+      const result = validateBackToFinalize(
+        state,
+        params as Record<string, unknown>,
+        fileExists,
+      );
+      if (!result.ok) {
+        return { content: [{ type: "text", text: `back_to_finalize rejected: ${result.reason}` }], isError: true };
+      }
+      state.task = result.task;
+      state.returnCount = result.returnCount;
+      transitionTo(pi, state, "finalized");
+      applyDiscussTools(pi);
+      updateUi(state, ctx);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Returned to finalized (return ${result.returnCount}/2). ${params.rationale} Review the contract, then run /implement to resume.`,
+          },
+        ],
+      };
+    },
+  });
 }
 
 /**
  * Register the `complete_implementation` AI tool.
  *
- * Called by the agent after all TDD tasks are done and all tests pass.
- * Ends the implementing phase and returns the workflow to idle.
+ * Ends the implementing phase and returns the workflow to idle. Refuses
+ * while any behavior is still active or the last test run had failures.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -204,8 +265,8 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
     label: "Complete Implementation",
     description:
       "Finalize implementation. Ends the implementing phase and returns " +
-      "the workflow to idle. Call this ONLY after all implementation tasks " +
-      "are complete and all tests pass.",
+      "the workflow to idle. Call this ONLY after all behaviors are done " +
+      "and all tests pass.",
 
     parameters: Type.Object({}),
 
@@ -213,29 +274,46 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
       const state = loadState(ctx);
       if (!state || state.phase !== "implementing") {
         return {
-          content: [
-            { type: "text", text: "Not in implementing phase. Nothing to finalize." },
-          ],
+          content: [{ type: "text", text: "Not in implementing phase. Nothing to finalize." }],
           isError: true,
         };
       }
-
+      const refusal = evaluateCompletionGate(state);
+      if (refusal) {
+        return {
+          content: [{ type: "text", text: `Cannot complete: ${refusal}.` }],
+          isError: true,
+        };
+      }
       transitionTo(pi, state, "idle");
-      // The workflow leaves the discussing phase: restore the full toolset.
       restoreTools(pi);
       updateUi(null, ctx);
-
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              "## Implementation Complete\n\n" +
-              "The implementation phase is now complete and the workflow " +
-              "has returned to idle.",
-          },
-        ],
+        content: [{ type: "text", text: "## Implementation Complete\n\nThe workflow has returned to idle." }],
       };
     },
   });
+}
+
+/**
+ * Build a completion report from the workflow state.
+ *
+ * @param state - Current workflow state.
+ * @returns A markdown report string.
+ */
+export function generateReport(state: WorkflowState): string {
+  const task = state.task;
+  const results = state.lastTestResults;
+  const lines: string[] = [];
+  lines.push("# Implementation Report");
+  if (task) {
+    lines.push("", `## ${task.title}`, "", renderTaskContract(task));
+  }
+  lines.push("", "## Test Results");
+  lines.push(`- Passed: ${results?.passed ?? 0}`);
+  lines.push(`- Failed: ${results?.failed ?? 0}`);
+  if (results?.coveragePercent !== undefined) {
+    lines.push(`- Coverage: ${results.coveragePercent}%`);
+  }
+  return lines.join("\n");
 }
