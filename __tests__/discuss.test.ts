@@ -12,7 +12,6 @@ import {
   updateUi,
 } from "../extensions/state.ts";
 import { handlePreCompact } from "../extensions/compaction.ts";
-import { resetToolsState } from "../extensions/tools.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -100,6 +99,7 @@ function mockCtx(
       notify: () => {},
       setStatus: () => {},
       setWidget: () => {},
+      setTitle: () => {},
       theme: { fg: () => "" },
       addAutocompleteProvider: () => {},
     },
@@ -181,6 +181,44 @@ describe("phase-discuss prompt", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// Phase prompts declare tool availability (T4) and report-and-wait (T8)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("phase prompts declare tool availability (T4)", () => {
+  it("phase-discussing.md declares read-only gating and wait-for-user", async () => {
+    const content = await loadContent("phase-discussing.md");
+    assert.match(content, /## Tools/);
+    assert.match(content, /read-only/);
+    assert.match(content, /wait for the user to run `\/finalize`/);
+    assert.match(content, /Do \*\*NOT\*\* write or edit any files/);
+  });
+
+  it("phase-finalizing.md is loaded for the finalizing phase and declares gating", async () => {
+    const prompt = await buildPhasePrompt("finalizing");
+    assert.match(prompt, /Phase: Finalizing/);
+    assert.match(prompt, /read-only/);
+    assert.match(prompt, /save_task/);
+    assert.match(prompt, /wait for them to run `\/implement`/);
+  });
+
+  it("tdd-prompt.md declares implementing access, mark-immediately, contract-authoritative", async () => {
+    const content = await loadContent("tdd-prompt.md");
+    assert.match(content, /run_tests/);
+    assert.match(content, /mark_task_done/);
+    assert.match(content, /complete_implementation/);
+    assert.match(content, /immediately/);
+    assert.match(content, /Never batch/i);
+    assert.match(content, /authoritative/i);
+  });
+
+  it("tdd-prompt.md has no back_to_finalize references and directs report-and-wait (T8)", async () => {
+    const content = await loadContent("tdd-prompt.md");
+    assert.doesNotMatch(content, /back_to_finalize/);
+    assert.match(content, /Report it to the user with a recommendation and wait/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // runDiscussion — end-to-end behaviour
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -256,23 +294,38 @@ describe("runDiscussion", () => {
     );
   });
 
-  it("filters write-capable tools from the active set", async () => {
-    resetToolsState();
+  it("does not touch the active toolset (T1)", async () => {
     const pi = mockPi();
     const ctx = mockCtx("/tmp/test");
 
     await runDiscussion("fix login button", pi, ctx);
 
     const setCalls = pi.calls["setActiveTools"] ?? [];
-    assert.equal(setCalls.length, 1, "setActiveTools should be called once");
+    assert.equal(setCalls.length, 0, "setActiveTools must not be called by runDiscussion");
+  });
 
-    const [filtered] = setCalls[0] as [string[]];
-    assert.ok(!filtered.includes("write"), "write should be removed");
-    assert.ok(!filtered.includes("edit"), "edit should be removed");
-    assert.ok(!filtered.includes("create_para_doc"), "create_para_doc should be removed");
-    assert.ok(!filtered.includes("commit_changes"), "commit_changes should be removed");
-    assert.ok(filtered.includes("read"), "read should remain");
-    assert.ok(filtered.includes("bash"), "bash should remain");
+  it("notifies that the previous contract is discarded when restarting from implementing (T8)", async () => {
+    const pi = mockPi();
+    const previous: WorkflowState = {
+      phase: "implementing",
+      specText: "old topic",
+      task: {
+        title: "Old", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }],
+      },
+    };
+    const ctx = mockCtx("/tmp/test", previous);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await runDiscussion("new topic", pi, ctx);
+
+    assert.ok(
+      notifyCalls.some((m) => /contract discarded/i.test(m)),
+      `expected a discard notify, got: ${notifyCalls.join(" | ")}`,
+    );
   });
 
   it("does not write any files (no ADR/spec/plan created)", async () => {

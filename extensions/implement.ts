@@ -11,27 +11,30 @@ import {
   type WorkflowState,
   type TaskContract,
 } from "./state.ts";
-import { restoreTools, applyDiscussTools } from "./tools.ts";
 import {
   parseTestOutput,
-  validateBackToFinalize,
   evaluateCompletionGate,
   renderTaskContract,
 } from "./task-contract.ts";
 
 /**
- * Start the TDD implementation phase from a finalized task contract.
+ * Start the TDD implementation phase from a finalizing task contract.
  *
- * Valid only from the finalized phase. Consumes state.task (no args, no
- * file resolution), transitions to implementing, restores the full toolset,
- * and hands the agent a TDD prompt built from the contract.
+ * Valid only from the finalizing phase. Consumes state.task, transitions
+ * to implementing, and hands the agent a TDD prompt built from the
+ * contract, with the optional engineer's note appended as guidance.
  *
- * @param pi  - ExtensionAPI reference.
- * @param ctx - Extension context.
+ * @param args - Optional note appended to the TDD prompt.
+ * @param pi   - ExtensionAPI reference.
+ * @param ctx  - Extension context.
  */
-export async function runImplement(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+export async function runImplement(
+  args: string,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+): Promise<void> {
   const state = loadState(ctx);
-  if (!state || state.phase !== "finalized") {
+  if (!state || state.phase !== "finalizing") {
     ctx.ui.notify(
       "/implement is only valid after /finalize. Run /discuss then /finalize first.",
       "warning",
@@ -43,19 +46,28 @@ export async function runImplement(pi: ExtensionAPI, ctx: ExtensionContext): Pro
     ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
     return;
   }
-  state.returnCount = 0;
   transitionTo(pi, state, "implementing");
-  restoreTools(pi);
   updateUi(state, ctx);
-  const prompt = await buildTddPrompt(task);
-  ctx.ui.notify("Starting TDD implementation.", "info");
+  let prompt = await buildTddPrompt(task);
+  const note = args.trim();
+  if (note) {
+    prompt +=
+      `\n\n## Engineer's note\n\n${note}` +
+      "\n\nGuidance on top of the authoritative contract. If it implies changes " +
+      "beyond the contract, report that and tell the user to run /finalize — " +
+      "do not implement beyond the contract.";
+  }
+  ctx.ui.notify(
+    "Starting TDD implementation. I'll work through the contract behavior by behavior.",
+    "info",
+  );
   pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 
 /**
  * Build the TDD prompt from the task contract.
  *
- * @param task - The finalized task contract.
+ * @param task - The task contract.
  * @returns The rendered TDD prompt string.
  */
 export async function buildTddPrompt(task: TaskContract): Promise<string> {
@@ -103,11 +115,11 @@ export function registerRunTestsTool(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      const [cmd, args] = detectTestCommand(ctx.cwd);
+      const [cmd, cmdArgs] = detectTestCommand(ctx.cwd);
       let exitCode = 1;
       let stdout = "";
       try {
-        const result = await pi.exec(cmd, args, { cwd: ctx.cwd, timeout: 120_000 });
+        const result = await pi.exec(cmd, cmdArgs, { cwd: ctx.cwd, timeout: 120_000 });
         exitCode = result.exitCode ?? 0;
         stdout = result.stdout ?? "";
       } catch (err) {
@@ -169,84 +181,12 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
         };
       }
       if (behavior.status === "removed") {
-        return {
-          content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }],
-          isError: true,
-        };
+        return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], isError: true };
       }
       behavior.status = "done";
       saveState(pi, state);
       updateUi(state, ctx);
-      return {
-        content: [{ type: "text", text: `${params.behaviorId} marked done. Evidence: ${params.evidence}` }],
-      };
-    },
-  });
-}
-
-/**
- * Register the `back_to_finalize` AI tool.
- *
- * Lets the agent return to the finalized phase when it discovers a new
- * testable surface or an out-of-scope behavior. Enforces six deterministic
- * checks via validateBackToFinalize. On success re-gates writes.
- *
- * @param pi - ExtensionAPI reference.
- */
-export function registerBackToFinalizeTool(pi: ExtensionAPI): void {
-  pi.registerTool({
-    name: "back_to_finalize",
-    label: "Back to Finalize",
-    description:
-      "Return to the finalized phase to add a newly discovered testable " +
-      "surface or remove an out-of-scope behavior. reason must be " +
-      "new-testable-surface (with behaviors) or out-of-scope (with removals). " +
-      "Call alone, never batched with writes.",
-    parameters: Type.Object({
-      reason: Type.String({ description: "new-testable-surface | out-of-scope" }),
-      rationale: Type.String({ description: "Why this changes the contract" }),
-      behaviors: Type.Optional(
-        Type.Array(
-          Type.Object({
-            description: Type.String({ description: "Behavior under test" }),
-            expectedOutput: Type.String({ description: "Expected output" }),
-            sourceFile: Type.String({ description: "File that surfaces the behavior" }),
-          }),
-          { description: "New testable behaviors (reason=new-testable-surface)" },
-        ),
-      ),
-      removals: Type.Optional(
-        Type.Array(Type.String(), { description: "Behavior ids to remove (reason=out-of-scope)" }),
-      ),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const state = loadState(ctx);
-      if (!state) {
-        return { content: [{ type: "text", text: "No workflow state." }], isError: true };
-      }
-      const fileExists = (p: string) => existsSync(resolve(ctx.cwd, p));
-      const result = validateBackToFinalize(
-        state,
-        params as Record<string, unknown>,
-        fileExists,
-      );
-      if (!result.ok) {
-        return { content: [{ type: "text", text: `back_to_finalize rejected: ${result.reason}` }], isError: true };
-      }
-      state.task = result.task;
-      state.returnCount = result.returnCount;
-      transitionTo(pi, state, "finalized");
-      applyDiscussTools(pi);
-      updateUi(state, ctx);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Returned to finalized (return ${result.returnCount}/2). ${params.rationale} Review the contract, then run /implement to resume.`,
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: `${params.behaviorId} marked done. Evidence: ${params.evidence}` }] };
     },
   });
 }
@@ -286,7 +226,6 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
         };
       }
       transitionTo(pi, state, "idle");
-      restoreTools(pi);
       updateUi(null, ctx);
       return {
         content: [{ type: "text", text: "## Implementation Complete\n\nThe workflow has returned to idle." }],

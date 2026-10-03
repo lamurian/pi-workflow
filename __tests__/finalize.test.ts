@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { registerSaveTaskTool } from "../extensions/finalize.ts";
+import { registerSaveTaskTool, runFinalize } from "../extensions/finalize.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -38,7 +38,8 @@ function ctxWithState(state: WorkflowState | null): ExtensionContext {
       notify: () => {},
       setStatus: () => {},
       setWidget: () => {},
-      theme: { fg: () => "" },
+      setTitle: () => {},
+      theme: { fg: (_c: string, t: string) => t },
       addAutocompleteProvider: () => {},
     },
   } as unknown as ExtensionContext;
@@ -64,7 +65,7 @@ const VALID = {
 };
 
 describe("save_task", () => {
-  it("transitions discussing → finalized on a valid payload", async () => {
+  it("transitions discussing → finalizing on a valid payload (T2)", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
     const s = discussingState();
@@ -73,10 +74,21 @@ describe("save_task", () => {
     const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
 
     assert.notEqual(res.isError, true);
-    assert.equal(s.phase, "finalized");
+    assert.equal(s.phase, "finalizing");
     assert.ok(s.task);
     assert.equal(s.task!.title, "My Task");
-    assert.equal(s.returnCount, 0);
+  });
+
+  it("result message says read-only and wait for the user to run /implement (T3)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.match(res.content[0].text, /Phase: finalizing/);
+    assert.match(res.content[0].text, /Wait for the user to run \/implement/);
   });
 
   it("rejects a malformed payload and stays in discussing", async () => {
@@ -99,7 +111,7 @@ describe("save_task", () => {
     assert.equal(s.task, undefined);
   });
 
-  it("is idempotent: updates the contract when already finalized", async () => {
+  it("is idempotent: updates the contract when already finalizing", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
     const s = discussingState();
@@ -107,12 +119,46 @@ describe("save_task", () => {
     const tool = getSaveTask(pi);
 
     await tool.execute("c1", VALID, undefined, undefined, ctx);
-    assert.equal(s.phase, "finalized");
+    assert.equal(s.phase, "finalizing");
 
     const updated = { ...VALID, title: "Renamed" };
     const res = await tool.execute("c2", updated, undefined, undefined, ctx);
     assert.notEqual(res.isError, true);
-    assert.equal(s.phase, "finalized");
+    assert.equal(s.phase, "finalizing");
+    assert.equal(s.task!.title, "Renamed");
+  });
+
+  it("notifies once on the discussing -> finalizing entry", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.equal(notifyCalls.length, 1, "entry save should notify exactly once");
+    assert.match(notifyCalls[0], /finalizing/);
+    assert.ok(notifyCalls[0].includes("/implement"));
+  });
+
+  it("stays silent on contract updates while already finalizing", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+    await getSaveTask(pi).execute("c2", { ...VALID, title: "Renamed" }, undefined, undefined, ctx);
+
+    assert.equal(notifyCalls.length, 0, "update saves while finalizing must stay silent");
     assert.equal(s.task!.title, "Renamed");
   });
 
@@ -124,6 +170,55 @@ describe("save_task", () => {
     const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
 
     assert.equal(res.isError, true);
-    assert.match(res.content[0].text, /discussing or finalized/);
+    assert.match(res.content[0].text, /discussing or finalizing/);
+  });
+
+  it("does not touch the active toolset (T1)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    const setCalls = pi.calls["setActiveTools"] ?? [];
+    assert.equal(setCalls.length, 0);
+  });
+});
+
+describe("runFinalize (T5)", () => {
+  it("refuses outside the discussing phase", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState({ phase: "finalizing", specText: "t" });
+
+    await runFinalize("note", pi, ctx);
+
+    assert.equal((pi.calls["sendUserMessage"] ?? []).length, 0);
+  });
+
+  it("appends an Engineer's note when args are provided", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState(discussingState());
+
+    await runFinalize("also add T7", pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(send.length, 1);
+    const [text] = send[0] as [string];
+    assert.match(text, /## Engineer's note/);
+    assert.match(text, /also add T7/);
+    assert.match(text, /Fold this note into the contract where relevant/);
+  });
+
+  it("sends no note section when args are empty", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState(discussingState());
+
+    await runFinalize("", pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(send.length, 1);
+    const [text] = send[0] as [string];
+    assert.doesNotMatch(text, /## Engineer's note/);
   });
 });

@@ -22,8 +22,28 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   } as unknown as ExtensionAPI & { calls: Record<string, unknown[]> };
 }
 
+function ctxFor(phase: string): ExtensionContext {
+  return {
+    cwd: "/tmp/test",
+    sessionManager: {
+      getBranch: () => [{ type: "custom", customType: "workflow-state", data: { phase, specText: "t" } }],
+    },
+    ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, setTitle: () => {}, theme: { fg: (_: string, t: string) => t } },
+  } as unknown as ExtensionContext;
+}
+
+async function getToolCallHandler(pi: ExtensionAPI & { calls: Record<string, unknown[]> }) {
+  const factory = (await import("../extensions/index.ts")).default;
+  factory(pi);
+  const onCalls = pi.calls["on"] ?? [];
+  return onCalls.find(([e]: [string]) => e === "tool_call")![1] as (
+    event: unknown,
+    ctx: ExtensionContext,
+  ) => Promise<{ block?: boolean; reason?: string } | undefined>;
+}
+
 describe("index.ts workflow wiring", () => {
-  it("registers the three phase commands and five workflow tools", async () => {
+  it("registers the three phase commands and four workflow tools (T8)", async () => {
     const pi = mockPi();
     const factory = (await import("../extensions/index.ts")).default;
     factory(pi);
@@ -35,15 +55,22 @@ describe("index.ts workflow wiring", () => {
     assert.ok(!commands.includes("yolo"), "/yolo must not be registered");
 
     const tools = (pi.calls["registerTool"] ?? []).map(([d]: [{ name: string }]) => d.name);
-    for (const t of [
-      "save_task",
-      "run_tests",
-      "mark_task_done",
-      "back_to_finalize",
-      "complete_implementation",
-    ]) {
+    for (const t of ["save_task", "run_tests", "mark_task_done", "complete_implementation"]) {
       assert.ok(tools.includes(t), `tool ${t} should be registered`);
     }
+    assert.ok(!tools.includes("back_to_finalize"), "back_to_finalize must not be registered");
+  });
+
+  it("command descriptions accept an optional note (T5)", async () => {
+    const pi = mockPi();
+    const factory = (await import("../extensions/index.ts")).default;
+    factory(pi);
+
+    const defs = Object.fromEntries(
+      (pi.calls["registerCommand"] ?? []).map(([n, d]: [string, { description: string }]) => [n, d.description]),
+    );
+    assert.match(defs["finalize"], /\[note\]/);
+    assert.match(defs["implement"], /\[note\]/);
   });
 
   it("subscribes to session lifecycle and phase events", async () => {
@@ -64,32 +91,44 @@ describe("index.ts workflow wiring", () => {
     }
   });
 
-  it("blocks write/edit in the finalized phase but allows it when implementing", async () => {
+  it("blocks write/edit with phase-aware reasons in gated phases, allows elsewhere (T1/T3)", async () => {
     const pi = mockPi();
-    const factory = (await import("../extensions/index.ts")).default;
-    factory(pi);
-
-    const onCalls = pi.calls["on"] ?? [];
-    const toolCall = onCalls.find(([e]: [string]) => e === "tool_call")![1] as (
-      event: unknown,
-      ctx: ExtensionContext,
-    ) => Promise<{ block?: boolean } | undefined>;
-
-    const ctxFor = (phase: string): ExtensionContext =>
-      ({
-        cwd: "/tmp/test",
-        sessionManager: {
-          getBranch: () => [{ type: "custom", customType: "workflow-state", data: { phase, specText: "t" } }],
-        },
-        ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, theme: { fg: (_: string, t: string) => t } },
-      }) as unknown as ExtensionContext;
+    const toolCall = await getToolCallHandler(pi);
 
     const writeEvent = { toolName: "write", input: {} };
-    // Stub the type guard path by relying on toolName matching in the handler.
-    const finalizedBlock = await toolCall(writeEvent, ctxFor("finalized"));
-    assert.equal(finalizedBlock?.block, true, "write must be blocked in finalized");
 
-    const implementingBlock = await toolCall(writeEvent, ctxFor("implementing"));
-    assert.equal(implementingBlock, undefined, "write must be allowed in implementing");
+    const discussingBlock = await toolCall(writeEvent, ctxFor("discussing"));
+    assert.equal(discussingBlock?.block, true, "write must be blocked in discussing");
+    assert.match(discussingBlock!.reason!, /discussing/);
+    assert.match(discussingBlock!.reason!, /Wait for the user to run \/finalize/);
+
+    const finalizingBlock = await toolCall(writeEvent, ctxFor("finalizing"));
+    assert.equal(finalizingBlock?.block, true, "write must be blocked in finalizing");
+    assert.match(finalizingBlock!.reason!, /finalizing/);
+    assert.match(finalizingBlock!.reason!, /Wait for the user to run \/implement/);
+
+    assert.equal(await toolCall(writeEvent, ctxFor("implementing")), undefined, "write allowed in implementing");
+    assert.equal(await toolCall(writeEvent, ctxFor("idle")), undefined, "write allowed in idle");
+  });
+
+  it("blocks commit tools and PARA mutators in gated phases", async () => {
+    const pi = mockPi();
+    const toolCall = await getToolCallHandler(pi);
+
+    for (const toolName of ["commit_changes", "create_para_doc"]) {
+      const block = await toolCall({ toolName, input: {} }, ctxFor("finalizing"));
+      assert.equal(block?.block, true, `${toolName} must be blocked in finalizing`);
+    }
+  });
+
+  it("never removes tools from the active set (T1)", async () => {
+    const pi = mockPi();
+    const toolCall = await getToolCallHandler(pi);
+
+    await toolCall({ toolName: "write", input: {} }, ctxFor("finalizing"));
+    await toolCall({ toolName: "write", input: {} }, ctxFor("discussing"));
+
+    const setCalls = pi.calls["setActiveTools"] ?? [];
+    assert.equal(setCalls.length, 0, "setActiveTools must never be called");
   });
 });

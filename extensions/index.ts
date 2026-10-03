@@ -1,14 +1,13 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
 import { loadState, updateUi } from "./state.ts";
-import { applyDiscussTools, restoreTools, DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
+import { DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
 import {
   runImplement,
   registerRunTestsTool,
   registerMarkTaskDoneTool,
-  registerBackToFinalizeTool,
   registerCompleteImplementationTool,
 } from "./implement.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
@@ -28,14 +27,6 @@ export default function (pi: ExtensionAPI): void {
     const state = loadState(ctx);
     updateUi(state, ctx);
     setupAutocomplete(ctx, ctx.cwd);
-
-    // Re-apply the read-only filter when resuming into a gated phase
-    // (discussing or finalized). Any other phase restores the saved set.
-    if (state && (state.phase === "discussing" || state.phase === "finalized")) {
-      applyDiscussTools(pi);
-    } else {
-      restoreTools(pi);
-    }
   });
 
   // ─── Compaction Preservation ─────────────────────────────────
@@ -74,27 +65,29 @@ export default function (pi: ExtensionAPI): void {
   registerSaveTaskTool(pi);
   registerRunTestsTool(pi);
   registerMarkTaskDoneTool(pi);
-  registerBackToFinalizeTool(pi);
   registerCompleteImplementationTool(pi);
 
-  // ── Phase-based edit restrictions ───────────────────────────
+  // ── Phase-based tool gate ──────────────────────────────────
+  // Gated phases (discussing, finalizing) block write-capable tools
+  // with a phase-aware message. Tools stay in the active set so the
+  // model gets an explanation instead of "tool not found".
   pi.on("tool_call", async (event, ctx) => {
     const currentState = loadState(ctx);
     if (!currentState) return;
-    const gated = currentState.phase === "discussing" || currentState.phase === "finalized";
-    if (!gated) return;
+    const phase = currentState.phase;
+    if (phase !== "discussing" && phase !== "finalizing") return;
 
-    // Gated phases: no file edits or commit tools allowed.
     if (
       isToolCallEventType("write", event) ||
       isToolCallEventType("edit", event) ||
       DISCUSS_BLOCKED_TOOLS.includes(event.toolName)
     ) {
+      const userCommand = phase === "discussing" ? "/finalize" : "/implement";
       return {
         block: true,
         reason:
-          "This phase does not allow file edits or commits. " +
-          "Run /implement to execute the agreed contract.",
+          `The '${phase}' phase is read-only: write, edit, PARA-doc and commit tools are gated. ` +
+          `Wait for the user to run ${userCommand}.`,
       };
     }
   });
@@ -113,19 +106,19 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("finalize", {
     description:
       "Draft the task contract from the discussion. " +
-      "Valid only after /discuss. Usage: /finalize",
-    handler: async (_args, ctx) => {
-      await runFinalize(pi, ctx);
+      "Valid only after /discuss. Usage: /finalize [note]",
+    handler: async (args, ctx) => {
+      await runFinalize(args, pi, ctx);
     },
   });
 
-  // ── /implement ──────────────────────────────────────────────
+  // ── /implement ─────────────────────────────────────────────
   pi.registerCommand("implement", {
     description:
-      "TDD implementation of the finalized task contract. " +
-      "Valid only after /finalize. Usage: /implement",
-    handler: async (_args, ctx) => {
-      await runImplement(pi, ctx);
+      "TDD implementation of the task contract. " +
+      "Valid only after /finalize. Usage: /implement [note]",
+    handler: async (args, ctx) => {
+      await runImplement(args, pi, ctx);
     },
   });
 }

@@ -1,10 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { shortSlug } from "./utils.ts";
 
 /** Valid phases of the workflow state machine. */
 export type WorkflowPhase =
   | "idle"
   | "discussing"
-  | "finalized"
+  | "finalizing"
   | "implementing";
 
 /** Lifecycle of one behavior in the task contract. */
@@ -25,7 +26,7 @@ export interface Behavior {
   kind: BehaviorKind;
   /** Lifecycle status. */
   status: BehaviorStatus;
-  /** File that surfaces this behavior (used by back_to_finalize checks). */
+  /** File that surfaces this behavior. */
   sourceFile?: string;
 }
 
@@ -49,10 +50,8 @@ export interface WorkflowState {
   phase: WorkflowPhase;
   /** The topic under discussion. */
   specText: string;
-  /** The finalized task contract (present from finalized onward). */
+  /** The task contract (present from finalizing onward). */
   task?: TaskContract;
-  /** Number of back_to_finalize returns this implementing round. */
-  returnCount?: number;
   /** Results from the latest test run, if any. */
   lastTestResults?: TestResults;
 }
@@ -65,6 +64,13 @@ export interface TestResults {
 }
 
 const STATE_CUSTOM_TYPE = "workflow-state";
+
+/** Per-phase widget header line. */
+const PHASE_HEADERS: Record<string, string> = {
+  discussing: "◉ discussing — read-only planning",
+  finalizing: "◉ finalizing — read-only contract review",
+  implementing: "◉ implementing — write access enabled",
+};
 
 /**
  * Persist the current workflow state to the session.
@@ -81,7 +87,9 @@ export function saveState(pi: ExtensionAPI, state: WorkflowState): void {
  * Restore the latest workflow state from session entries.
  *
  * Walks session entries in reverse to find the most recent
- * "workflow-state" custom entry.
+ * "workflow-state" custom entry. Migrates the legacy "finalized"
+ * phase name to "finalizing" so sessions persisted before the
+ * rename keep working.
  *
  * @param ctx - Extension context with session manager access.
  * @returns The restored state, or null if none exists.
@@ -96,6 +104,10 @@ export function loadState(ctx: ExtensionContext): WorkflowState | null {
     ) {
       const data = (entry as { data?: WorkflowState }).data;
       if (data && data.phase) {
+        // Backward compat: sessions persisted before the phase rename.
+        if ((data.phase as string) === "finalized") {
+          return { ...data, phase: "finalizing" };
+        }
         return data;
       }
     }
@@ -120,9 +132,31 @@ export function transitionTo(
 }
 
 /**
- * Update the UI footer and widget to reflect the current workflow state.
+ * Build the session title "<phase> · <short-topic>".
  *
- * Uses only the string-array form of setWidget so it works in RPC mode.
+ * Uses shortSlug() on specText; long topics that exceed the slug limit
+ * fall back to a phase-only title so updateUi never throws.
+ *
+ * @param state - Current workflow state.
+ * @returns The title string.
+ */
+function buildTitle(state: WorkflowState): string {
+  const phaseLabel = state.phase.replace(/_/g, " ");
+  if (!state.specText) return phaseLabel;
+  try {
+    const slug = shortSlug(state.specText);
+    return slug ? `${phaseLabel} · ${slug}` : phaseLabel;
+  } catch {
+    return phaseLabel;
+  }
+}
+
+/**
+ * Update the UI status, widget, and session title to reflect the phase.
+ *
+ * Uses only the string-array form of setWidget so it works in RPC mode
+ * (paseo). The widget's first line is a phase header so the current
+ * state is visible at a glance.
  *
  * @param state - Current workflow state.
  * @param ctx   - Extension context for UI access.
@@ -131,6 +165,7 @@ export function updateUi(state: WorkflowState | null, ctx: ExtensionContext): vo
   if (!state || state.phase === "idle") {
     ctx.ui.setStatus("workflow", undefined);
     ctx.ui.setWidget("workflow-todos", undefined);
+    ctx.ui.setTitle("pi");
     return;
   }
 
@@ -139,8 +174,11 @@ export function updateUi(state: WorkflowState | null, ctx: ExtensionContext): vo
     "workflow",
     ctx.ui.theme.fg("accent", `◉ ${phaseLabel}`),
   );
+  ctx.ui.setTitle(buildTitle(state));
 
-  const lines: string[] = [];
+  const lines: string[] = [
+    ctx.ui.theme.fg("accent", PHASE_HEADERS[state.phase] ?? `◉ ${phaseLabel}`),
+  ];
   if (state.task) {
     lines.push(state.task.title);
     for (const b of state.task.behaviors) {

@@ -1,7 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { applyDiscussTools, resetToolsState } from "../extensions/tools.ts";
 
 /**
  * Simulated default toolset with a mix of read-only and write-capable tools.
@@ -21,12 +20,9 @@ const ACTIVE_TOOLS = [
 /**
  * Create a mock ExtensionAPI with call-recording spies.
  *
- * @param activeTools - Initial active tool list returned by getActiveTools.
- * @returns Mock with a `.calls.setActiveTools` recording.
+ * @returns Mock with `.calls.setActiveTools` etc. recording.
  */
-function mockPi(
-  activeTools: string[] = ACTIVE_TOOLS,
-): ExtensionAPI & { calls: Record<string, unknown[]> } {
+function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};
   const record = (name: string) => {
     calls[name] = [];
@@ -41,7 +37,7 @@ function mockPi(
     registerTool: record("registerTool") as ExtensionAPI["registerTool"],
     appendEntry: record("appendEntry") as ExtensionAPI["appendEntry"],
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
-    getActiveTools: () => [...activeTools],
+    getActiveTools: () => [...ACTIVE_TOOLS],
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
     calls,
@@ -50,10 +46,6 @@ function mockPi(
 
 /**
  * Build a session context whose branch contains a workflow-state entry.
- *
- * @param phase    - Phase stored in the workflow-state entry.
- * @param specText - Spec text stored alongside the phase.
- * @returns A mock ExtensionContext.
  */
 function ctxWithState(phase: string, specText: string): ExtensionContext {
   return {
@@ -71,7 +63,8 @@ function ctxWithState(phase: string, specText: string): ExtensionContext {
       notify: () => {},
       setStatus: () => {},
       setWidget: () => {},
-      theme: { fg: () => "" },
+      setTitle: () => {},
+      theme: { fg: (_c: string, t: string) => t },
       addAutocompleteProvider: () => {},
     },
   } as unknown as ExtensionContext;
@@ -79,9 +72,6 @@ function ctxWithState(phase: string, specText: string): ExtensionContext {
 
 /**
  * Load the extension factory and extract the session_start handler.
- *
- * @param pi - Mock ExtensionAPI the factory is bound to.
- * @returns The registered session_start handler.
  */
 async function getSessionStartHandler(
   pi: ExtensionAPI & { calls: Record<string, unknown[]> },
@@ -101,73 +91,71 @@ async function getSessionStartHandler(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// session_start tool handling
+// session_start tool handling (T1: no tool removal in any phase)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("session_start tool handling", () => {
-  it("re-applies the read-only filter when resuming in the discussing phase", async () => {
-    resetToolsState();
-    const pi = mockPi();
-    const handler = await getSessionStartHandler(pi);
+  it("never touches the active toolset in any phase", async () => {
+    for (const phase of ["discussing", "finalizing", "implementing", "idle"]) {
+      const pi = mockPi();
+      const handler = await getSessionStartHandler(pi);
 
-    await handler({}, ctxWithState("discussing", "topic"));
+      await handler({}, ctxWithState(phase, "topic"));
 
-    const setCalls = pi.calls["setActiveTools"] ?? [];
-    assert.equal(setCalls.length, 1, "should filter once on discuss resume");
-
-    const [filtered] = setCalls[0] as [string[]];
-    assert.ok(!filtered.includes("write"), "write should be removed on resume");
-    assert.ok(!filtered.includes("edit"), "edit should be removed on resume");
-    assert.ok(!filtered.includes("commit_changes"), "commit tools should be removed on resume");
-    assert.ok(filtered.includes("read"), "read should remain on resume");
+      const setCalls = pi.calls["setActiveTools"] ?? [];
+      assert.equal(
+        setCalls.length,
+        0,
+        `setActiveTools must not be called in ${phase}`,
+      );
+    }
   });
 
-  it("leaves the default toolset intact when resuming in the implementing phase", async () => {
-    resetToolsState();
+  it("restores the workflow UI when resuming in a gated phase", async () => {
     const pi = mockPi();
     const handler = await getSessionStartHandler(pi);
 
-    await handler({}, ctxWithState("implementing", "topic"));
+    const setStatusCalls: Array<{ key: string; value: unknown }> = [];
+    const ctx = ctxWithState("finalizing", "topic");
+    ctx.ui.setStatus = (key: string, value: unknown) => {
+      setStatusCalls.push({ key, value });
+    };
 
-    const setCalls = pi.calls["setActiveTools"] ?? [];
-    assert.equal(setCalls.length, 0, "fresh session resume must not touch tools");
-  });
+    await handler({}, ctx);
 
-  it("leaves the default toolset intact on a fresh session (no state)", async () => {
-    resetToolsState();
-    const pi = mockPi();
-    const handler = await getSessionStartHandler(pi);
-
-    await handler(
-      {},
-      {
-        cwd: "/tmp/test",
-        sessionManager: { getBranch: () => [] },
-        ui: {
-          setStatus: () => {},
-          setWidget: () => {},
-          theme: { fg: () => "" },
-          addAutocompleteProvider: () => {},
-        },
-      } as unknown as ExtensionContext,
+    assert.ok(
+      setStatusCalls.some((c) => c.key === "workflow"),
+      "workflow status should be set on resume",
     );
-
-    const setCalls = pi.calls["setActiveTools"] ?? [];
-    assert.equal(setCalls.length, 0, "fresh session must not re-filter tools");
   });
 
-  it("restores the saved toolset when resuming after a mid-process snapshot", async () => {
-    resetToolsState();
+  it("clears the workflow UI on a fresh session (no state)", async () => {
     const pi = mockPi();
     const handler = await getSessionStartHandler(pi);
 
-    applyDiscussTools(pi); // simulate a discussion that reloaded the session
-    await handler({}, ctxWithState("implementing", "topic"));
+    const setStatusCalls: Array<{ key: string; value: unknown }> = [];
+    const ctx = {
+      cwd: "/tmp/test",
+      sessionManager: { getBranch: () => [] },
+      ui: {
+        notify: () => {},
+        setStatus: (key: string, value: unknown) => {
+          setStatusCalls.push({ key, value });
+        },
+        setWidget: () => {},
+        setTitle: () => {},
+        theme: { fg: (_c: string, t: string) => t },
+        addAutocompleteProvider: () => {},
+      },
+    } as unknown as ExtensionContext;
+
+    await handler({}, ctx);
 
     const setCalls = pi.calls["setActiveTools"] ?? [];
-    assert.equal(setCalls.length, 2, "filter on discuss, restore on resume");
-
-    const [restored] = setCalls[1] as [string[]];
-    assert.deepEqual(restored, ACTIVE_TOOLS, "resume should restore the full set");
+    assert.equal(setCalls.length, 0, "fresh session must not touch tools");
+    assert.ok(
+      setStatusCalls.some((c) => c.key === "workflow" && c.value === undefined),
+      "workflow status should be cleared on fresh session",
+    );
   });
 });

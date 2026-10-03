@@ -9,7 +9,7 @@ import { renderTaskContract } from "./task-contract.ts";
 /**
  * Intercept session_before_compact to preserve the task contract and spec.
  *
- * When a workflow is active (discussing, finalized, implementing), this
+ * When a workflow is active (discussing, finalizing, implementing), this
  * handler injects the spec text and the full task contract (behaviors and
  * statuses) into the compaction summary so the LLM retains the contract
  * after compaction.

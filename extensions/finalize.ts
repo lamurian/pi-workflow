@@ -1,21 +1,26 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadState, transitionTo, updateUi } from "./state.ts";
-import { applyDiscussTools } from "./tools.ts";
 import { validateTask } from "./task-contract.ts";
 import { loadContent } from "./utils.ts";
 
 /**
  * Finalize the discussion: steer the agent to draft the task contract.
  *
- * Valid only from the discussing phase. Loads finalize-prompt.md and hands
- * it to the agent as a steer. The agent drafts the contract and calls
- * save_task; the extension performs the phase transition there.
+ * Valid only from the discussing phase. Loads finalize-prompt.md, appends
+ * the optional engineer's note, and hands the prompt to the agent as a
+ * steer. The agent drafts the contract and calls save_task; the extension
+ * performs the phase transition there.
  *
- * @param pi  - ExtensionAPI reference.
- * @param ctx - Extension context.
+ * @param args - Optional note folded into the prompt as an Engineer's note.
+ * @param pi   - ExtensionAPI reference.
+ * @param ctx  - Extension context.
  */
-export async function runFinalize(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+export async function runFinalize(
+  args: string,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+): Promise<void> {
   const state = loadState(ctx);
   if (!state || state.phase !== "discussing") {
     ctx.ui.notify(
@@ -24,7 +29,13 @@ export async function runFinalize(pi: ExtensionAPI, ctx: ExtensionContext): Prom
     );
     return;
   }
-  const prompt = await loadContent("finalize-prompt.md");
+  let prompt = await loadContent("finalize-prompt.md");
+  const note = args.trim();
+  if (note) {
+    prompt +=
+      `\n\n## Engineer's note\n\n${note}` +
+      "\n\nFold this note into the contract where relevant.";
+  }
   pi.sendUserMessage(prompt, { deliverAs: "steer" });
 }
 
@@ -33,8 +44,8 @@ export async function runFinalize(pi: ExtensionAPI, ctx: ExtensionContext): Prom
  *
  * The agent calls save_task to persist a drafted or revised task contract.
  * The extension validates the payload deterministically, stores the task,
- * and transitions the workflow to the finalized phase. Idempotent: safe to
- * call again while already finalized to update the contract.
+ * and transitions the workflow to the finalizing phase. Idempotent: safe
+ * to call again while already finalizing to update the contract.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -43,9 +54,9 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
     name: "save_task",
     label: "Save Task",
     description:
-      "Persist the finalized task contract. Call once the contract is " +
-      "drafted or revised. Validates the payload, stores the task, and " +
-      "transitions the workflow to the finalized phase.",
+      "Persist the task contract. Call once the contract is drafted or " +
+      "revised. Validates the payload, stores the task, and transitions " +
+      "the workflow to the finalizing phase.",
 
     parameters: Type.Object({
       title: Type.String({ description: "Short task title" }),
@@ -69,12 +80,12 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);
-      if (!state || (state.phase !== "discussing" && state.phase !== "finalized")) {
+      if (!state || (state.phase !== "discussing" && state.phase !== "finalizing")) {
         return {
           content: [
             {
               type: "text",
-              text: "save_task requires the discussing or finalized phase.",
+              text: "save_task requires the discussing or finalizing phase.",
             },
           ],
           isError: true,
@@ -87,14 +98,24 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
           isError: true,
         };
       }
+      const entering = state.phase === "discussing";
       state.task = result.task;
-      state.returnCount = 0;
-      transitionTo(pi, state, "finalized");
-      applyDiscussTools(pi);
+      transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
+      if (entering) {
+        ctx.ui.notify(
+          "Contract saved. Phase: finalizing — review the contract, run /implement when ready.",
+          "info",
+        );
+      }
       return {
         content: [
-          { type: "text", text: "Task saved. Phase: finalized." },
+          {
+            type: "text",
+            text:
+              "Task saved. Phase: finalizing (read-only). " +
+              "Wait for the user to run /implement once the contract is approved.",
+          },
         ],
       };
     },

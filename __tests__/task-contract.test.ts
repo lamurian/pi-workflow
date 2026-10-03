@@ -2,7 +2,6 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   validateTask,
-  validateBackToFinalize,
   parseTestOutput,
   evaluateCompletionGate,
   renderTaskContract,
@@ -11,13 +10,10 @@ import { handlePreCompact } from "../extensions/compaction.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type { ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 
-const exists = (p: string) => p === "src/a.ts" || p === "src/b.ts";
-
 function implementingState(overrides: Partial<WorkflowState> = {}): WorkflowState {
   return {
     phase: "implementing",
     specText: "topic",
-    returnCount: 0,
     task: {
       title: "T",
       instruction: "do it",
@@ -75,94 +71,6 @@ describe("validateTask", () => {
   it("rejects a non-array behaviors field", () => {
     const r = validateTask({ title: "T", instruction: "i", files: [], done: "d", behaviors: "nope" });
     assert.equal(r.ok, false);
-  });
-});
-
-// ═══ validateBackToFinalize ═══
-describe("validateBackToFinalize", () => {
-  it("rejects outside the implementing phase", () => {
-    const s = implementingState({ phase: "finalized" });
-    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /implementing/);
-  });
-
-  it("rejects an unknown reason", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(s, { reason: "because" }, exists);
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /reason/);
-  });
-
-  it("enforces the returnCount cap of 2", () => {
-    const s = implementingState({ returnCount: 2 });
-    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /cap/);
-  });
-
-  it("rejects a duplicate new-testable-surface description", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(
-      s,
-      {
-        reason: "new-testable-surface",
-        behaviors: [{ description: "handler returns list", expectedOutput: "z", sourceFile: "src/a.ts" }],
-      },
-      exists,
-    );
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /already in contract/);
-  });
-
-  it("rejects a sourceFile that does not exist", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(
-      s,
-      {
-        reason: "new-testable-surface",
-        behaviors: [{ description: "new behavior", expectedOutput: "z", sourceFile: "src/missing.ts" }],
-      },
-      exists,
-    );
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /sourceFile does not exist/);
-  });
-
-  it("adds a new testable behavior and increments returnCount", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(
-      s,
-      {
-        reason: "new-testable-surface",
-        behaviors: [{ description: "b new", expectedOutput: "z", sourceFile: "src/b.ts" }],
-      },
-      exists,
-    );
-    assert.equal(r.ok, true);
-    if (r.ok) {
-      assert.equal(r.returnCount, 1);
-      assert.equal(r.task.behaviors.length, 2);
-      assert.equal(r.task.behaviors[1].status, "active");
-      assert.equal(r.task.behaviors[1].kind, "test");
-    }
-  });
-
-  it("marks a behavior removed for out-of-scope", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T1"] }, exists);
-    assert.equal(r.ok, true);
-    if (r.ok) {
-      assert.equal(r.task.behaviors[0].status, "removed");
-      assert.equal(r.returnCount, 1);
-    }
-  });
-
-  it("rejects removing a behavior that is not in the contract", () => {
-    const s = implementingState();
-    const r = validateBackToFinalize(s, { reason: "out-of-scope", removals: ["T99"] }, exists);
-    assert.equal(r.ok, false);
-    if (!r.ok) assert.match(r.reason, /not in contract/);
   });
 });
 
@@ -281,7 +189,7 @@ describe("compaction preserves the task contract", () => {
 
   it("embeds behaviors and statuses in the compaction summary", async () => {
     const s = implementingState({
-      phase: "finalized",
+      phase: "finalizing",
       task: {
         title: "Contracted", instruction: "i", files: ["a.ts"], done: "d",
         behaviors: [

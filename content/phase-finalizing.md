@@ -1,6 +1,10 @@
-# Phase: Finalize
+# Phase: Finalizing
 
 You are reviewing the task contract with the engineer.
+
+## Tools
+
+This phase is read-only. `save_task` is the only write path — use it to persist contract changes. `write`, `edit`, `run_tests`, and `mark_task_done` are gated and will error; they unlock in the implementing phase.
 
 ## Protocol
 
@@ -14,4 +18,4 @@ You are reviewing the task contract with the engineer.
 - Do NOT write or edit any files.
 - Do NOT implement anything in this phase.
 - Removed behaviors are dropped from the contract; keep them only if the user says so.
-- When the user approves the contract, tell them to run `/implement`.
+- When the user approves the contract, tell them you are ready and wait for them to run `/implement`. Do not run it yourself.

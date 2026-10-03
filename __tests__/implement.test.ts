@@ -4,10 +4,8 @@ import {
   runImplement,
   registerRunTestsTool,
   registerMarkTaskDoneTool,
-  registerBackToFinalizeTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
-import { applyDiscussTools, resetToolsState } from "../extensions/tools.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type {
   ExtensionAPI,
@@ -50,17 +48,17 @@ function ctxWithState(state: WorkflowState | null): ExtensionContext {
       notify: () => {},
       setStatus: () => {},
       setWidget: () => {},
-      theme: { fg: () => "" },
+      setTitle: () => {},
+      theme: { fg: (_c: string, t: string) => t },
       addAutocompleteProvider: () => {},
     },
   } as unknown as ExtensionContext;
 }
 
-function finalizedState(): WorkflowState {
+function finalizingState(): WorkflowState {
   return {
-    phase: "finalized",
+    phase: "finalizing",
     specText: "topic",
-    returnCount: 0,
     task: {
       title: "My Task",
       instruction: "do the thing",
@@ -80,14 +78,12 @@ function getTool(pi: ExtensionAPI & { calls: Record<string, unknown[]> }, name: 
 
 // ═══ runImplement ═══
 describe("runImplement", () => {
-  it("transitions finalized → implementing and consumes state.task", async () => {
-    resetToolsState();
+  it("transitions finalizing → implementing and consumes state.task (T2)", async () => {
     const pi = mockPi();
-    const state = finalizedState();
+    const state = finalizingState();
     const ctx = ctxWithState(state);
-    applyDiscussTools(pi); // simulate gated phase
 
-    await runImplement(pi, ctx);
+    await runImplement("", pi, ctx);
 
     assert.equal(state.phase, "implementing");
     const append = pi.calls["appendEntry"] ?? [];
@@ -96,11 +92,10 @@ describe("runImplement", () => {
   });
 
   it("sends a steer message", async () => {
-    resetToolsState();
     const pi = mockPi();
-    const ctx = ctxWithState(finalizedState());
+    const ctx = ctxWithState(finalizingState());
 
-    await runImplement(pi, ctx);
+    await runImplement("", pi, ctx);
 
     const send = pi.calls["sendUserMessage"] ?? [];
     assert.ok(send.length >= 1);
@@ -108,45 +103,93 @@ describe("runImplement", () => {
     assert.equal(opts.deliverAs, "steer");
   });
 
-  it("restores the full toolset when implementing starts", async () => {
-    resetToolsState();
+  it("does not touch the active toolset (T1)", async () => {
     const pi = mockPi();
-    const ctx = ctxWithState(finalizedState());
-    applyDiscussTools(pi);
+    const ctx = ctxWithState(finalizingState());
 
-    await runImplement(pi, ctx);
+    await runImplement("", pi, ctx);
 
     const setCalls = pi.calls["setActiveTools"] ?? [];
-    const [restored] = setCalls[setCalls.length - 1] as [string[]];
-    assert.deepEqual(restored, DEFAULT_ACTIVE_TOOLS);
+    assert.equal(setCalls.length, 0);
   });
 
-  it("does nothing when not in the finalized phase", async () => {
-    resetToolsState();
+  it("does nothing when not in the finalizing phase", async () => {
     const pi = mockPi();
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "discussing";
     const ctx = ctxWithState(s);
 
-    await runImplement(pi, ctx);
+    await runImplement("", pi, ctx);
 
     assert.equal(s.phase, "discussing");
     assert.equal((pi.calls["sendUserMessage"] ?? []).length, 0);
   });
+
+  it("appends an Engineer's note when args are provided (T5)", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState(finalizingState());
+
+    await runImplement("also wire the retry", pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(send.length, 1);
+    const [text] = send[0] as [string];
+    assert.match(text, /## Engineer's note/);
+    assert.match(text, /also wire the retry/);
+    assert.match(text, /authoritative contract/);
+    assert.match(text, /tell the user to run \/finalize/);
+  });
+
+  it("sends no note section when args are empty", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState(finalizingState());
+
+    await runImplement("", pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    const [text] = send[0] as [string];
+    assert.doesNotMatch(text, /## Engineer's note/);
+  });
+
+  it("notifies with the aligned TDD entry message", async () => {
+    const pi = mockPi();
+    const ctx = ctxWithState(finalizingState());
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await runImplement("", pi, ctx);
+
+    assert.equal(notifyCalls.length, 1, "runImplement should notify exactly once");
+    assert.match(notifyCalls[0], /Starting TDD implementation/);
+    assert.match(notifyCalls[0], /behavior by behavior/);
+  });
 });
 
-// ═══ tool registration ═══
+// ═══ tool registration (T8) ═══
 describe("implement tool registration", () => {
-  it("registers run_tests, mark_task_done, back_to_finalize, complete_implementation", () => {
+  it("registers exactly run_tests, mark_task_done, complete_implementation", () => {
     const pi = mockPi();
     registerRunTestsTool(pi);
     registerMarkTaskDoneTool(pi);
-    registerBackToFinalizeTool(pi);
     registerCompleteImplementationTool(pi);
 
-    for (const name of ["run_tests", "mark_task_done", "back_to_finalize", "complete_implementation"]) {
-      assert.ok(getTool(pi, name), `${name} should be registered`);
-    }
+    const names = ((pi.calls["registerTool"] ?? []) as Array<[{ name: string }]>)
+      .map(([d]) => d.name);
+    assert.deepEqual(names.sort(), [
+      "complete_implementation",
+      "mark_task_done",
+      "run_tests",
+    ]);
+  });
+
+  it("back_to_finalize is not exported from implement.ts (T8)", async () => {
+    const mod = await import("../extensions/implement.ts");
+    assert.equal(
+      (mod as unknown as Record<string, unknown>)["registerBackToFinalizeTool"],
+      undefined,
+    );
   });
 });
 
@@ -160,7 +203,7 @@ describe("complete_implementation", () => {
   }
 
   it("refuses while a behavior is still active", async () => {
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "implementing";
     const res = await runComplete(s);
     assert.equal(res.isError, true);
@@ -169,7 +212,7 @@ describe("complete_implementation", () => {
   });
 
   it("refuses when a test behavior exists but tests are failing", async () => {
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "implementing";
     s.task!.behaviors[0].status = "done";
     s.lastTestResults = { passed: 1, failed: 2 };
@@ -180,7 +223,7 @@ describe("complete_implementation", () => {
   });
 
   it("succeeds and returns to idle when all done and tests green", async () => {
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "implementing";
     s.task!.behaviors[0].status = "done";
     s.lastTestResults = { passed: 3, failed: 0 };
@@ -195,7 +238,7 @@ describe("mark_task_done", () => {
   it("marks a behavior done", async () => {
     const pi = mockPi();
     registerMarkTaskDoneTool(pi);
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "implementing";
     const ctx = ctxWithState(s);
 
@@ -214,7 +257,7 @@ describe("mark_task_done", () => {
   it("rejects a behaviorId not in the contract", async () => {
     const pi = mockPi();
     registerMarkTaskDoneTool(pi);
-    const s = finalizedState();
+    const s = finalizingState();
     s.phase = "implementing";
     const ctx = ctxWithState(s);
 
