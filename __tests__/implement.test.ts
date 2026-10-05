@@ -721,6 +721,58 @@ describe("T11: resume safety", () => {
   });
 });
 
+// ═══ T10: deletions — no test-command detection or execution in extensions/ ═══
+describe("T10: test-runner machinery is fully deleted", () => {
+  it("no detectTestCommand/verifyTests implementation or reference remains in extensions/", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const dir = resolve(import.meta.dirname!, "..", "extensions");
+    const offenders: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".ts")) continue;
+      const src = readFileSync(resolve(dir, name), "utf-8");
+      if (/detectTestCommand|verifyTests/.test(src)) {
+        offenders.push(name);
+      }
+    }
+    assert.deepEqual(offenders, [], "no extensions file may reference test-command detection/verify");
+  });
+
+  it("no code path in extensions/ execs a test runner", async () => {
+    const { readdirSync, readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const dir = resolve(import.meta.dirname!, "..", "extensions");
+    const offenders: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".ts")) continue;
+      const src = readFileSync(resolve(dir, name), "utf-8");
+      // pi.exec calls whose command names a test runner, in any form.
+      if (/pi\.exec\([^)]*(vitest|jest|mocha|npm[^\n]*test|go[^\n]*test|pytest|cargo[^\n]*test)/i.test(src)) {
+        offenders.push(name);
+      }
+    }
+    assert.deepEqual(offenders, [], "extensions must never exec a test runner");
+  });
+
+  it("index.ts no longer imports or registers run_tests", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const src = readFileSync(resolve(import.meta.dirname!, "..", "extensions", "index.ts"), "utf-8");
+    assert.doesNotMatch(src, /registerRunTestsTool/, "index.ts must not import/register run_tests");
+    const mod = await import("../extensions/index.ts");
+    assert.equal(mod["registerRunTestsTool"], undefined);
+  });
+
+  it("wiring asserts run_tests is NOT registered", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const wiring = readFileSync(resolve(import.meta.dirname!, "wiring.test.ts"), "utf-8");
+    assert.match(wiring, /run_tests.*must NOT be registered|!tools\.includes\("run_tests"\)/);
+    const tools = readFileSync(resolve(import.meta.dirname!, "tools.test.ts"), "utf-8");
+    assert.doesNotMatch(tools, /registerRunTestsTool/);
+  });
+});
+
 // ═══ T6: exception safety — no unhandled rejection escapes /implement ═══
 describe("T6: exception safety in runImplement", () => {
   function oneBehavior(): TaskContract {
