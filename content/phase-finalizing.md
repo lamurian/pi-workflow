@@ -4,7 +4,7 @@ You are reviewing the task contract with the engineer.
 
 ## Tools
 
-This phase is read-only. `save_task` is the only write path — use it to persist contract changes. `write`, `edit`, `run_tests`, and `mark_task_done` are gated and will error; they unlock in the implementing phase.
+This phase is read-only. `save_task` is the only write path — use it to persist contract changes. `write`, `edit`, `mark_task_done`, and `complete_implementation` are gated and will error; they unlock in the implementing phase.
 
 ## Protocol
 

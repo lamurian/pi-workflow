@@ -203,12 +203,26 @@ describe("phase prompts declare tool availability (T4)", () => {
 
   it("tdd-prompt.md declares implementing access, mark-immediately, contract-authoritative", async () => {
     const content = await loadContent("tdd-prompt.md");
-    assert.match(content, /run_tests/);
+    assert.match(content, /sandboxed command/i, "solo self-check runs via the agent's own sandboxed commands");
     assert.match(content, /mark_task_done/);
     assert.match(content, /complete_implementation/);
     assert.match(content, /immediately/);
     assert.match(content, /Never batch/i);
     assert.match(content, /authoritative/i);
+  });
+
+  it("tdd-prompt.md has no stale run_tests references (tool deleted in f2d848c)", async () => {
+    for (const file of ["tdd-prompt.md", "phase-finalizing.md"]) {
+      const content = await loadContent(file);
+      assert.doesNotMatch(content, /run_tests/, `${file} must not reference the deleted run_tests tool`);
+    }
+  });
+
+  it("tdd-prompt.md carries the solo prompt-only guard wording and the fold rule", async () => {
+    const content = await loadContent("tdd-prompt.md");
+    assert.match(content, /prompt discipline/i, "solo guard is prompt-level, not extension-enforced");
+    assert.match(content, /never (?:form )?their own behavior/i, "fold rule: test updates never their own behavior");
+    assert.match(content, /delete|skip|weaken/i, "solo guard names the tamper moves");
   });
 
   it("tdd-prompt.md has no back_to_finalize references and directs report-and-wait (T8)", async () => {
