@@ -5,6 +5,7 @@ import {
   buildFixTask,
   buildInvestigation,
   classifyCommit,
+  classifyStagedDiff,
   detectFailingStage,
   type GateInput,
 } from "../extensions/commit-gate.ts";
@@ -131,5 +132,118 @@ describe("buildFixTask (T2)", () => {
 
   it("uses the engineer's retry budget of 5", () => {
     assert.equal(RETRY_BUDGET, 5);
+  });
+});
+
+// ═══ classifyStagedDiff — staged-diff tamper guard (T4) ═══
+
+describe("classifyStagedDiff (T4)", () => {
+  const DECLARED = ["src/a.ts", "tests/a.test.ts"];
+  const SOURCE_FILES = ["tests/a.test.ts"];
+
+  function staged(overrides: Partial<Parameters<typeof classifyStagedDiff>[0]> = {}) {
+    return classifyStagedDiff({
+      nameStatus: "",
+      declaredFiles: DECLARED,
+      testKindSourceFiles: SOURCE_FILES,
+      attempt: 1,
+      ...overrides,
+    });
+  }
+
+  it("test-guard on D of an undeclared test path, with the offending path", () => {
+    const r = staged({ nameStatus: "D\tpkg/old_test.go\n" });
+    assert.equal(r.kind, "test-guard");
+    assert.ok(
+      r.violations.some((v) => v.includes("pkg/old_test.go")),
+      `violations must name the offending path, got ${JSON.stringify(r.violations)}`,
+    );
+  });
+
+  it("test-guard on D of a declared test-kind sourceFile", () => {
+    const r = staged({ nameStatus: "D\ttests/a.test.ts\n" });
+    assert.equal(r.kind, "test-guard");
+    assert.ok(r.violations.some((v) => v.includes("tests/a.test.ts")));
+  });
+
+  it("test-guard on skip/only markers added to an undeclared test path", () => {
+    const r = staged({
+      nameStatus: "M\ttests/other.test.ts\n",
+      unifiedDiff:
+        "diff --git a/tests/other.test.ts b/tests/other.test.ts\n" +
+        "--- a/tests/other.test.ts\n" +
+        "+++ b/tests/other.test.ts\n" +
+        "@@ -1 +1 @@\n" +
+        "-it('works')\n" +
+        "+it.skip('works')\n",
+    });
+    assert.equal(r.kind, "test-guard");
+    assert.ok(r.violations.some((v) => v.includes("tests/other.test.ts")));
+  });
+
+  it("A on any test path and M on a declared test path yield no violation", () => {
+    const r = staged({
+      nameStatus: "A\ttests/new.test.ts\nM\ttests/a.test.ts\n",
+      unifiedDiff:
+        "diff --git a/tests/a.test.ts b/tests/a.test.ts\n" +
+        "--- a/tests/a.test.ts\n" +
+        "+++ b/tests/a.test.ts\n" +
+        "@@ -1 +1 @@\n" +
+        "-it('old')\n" +
+        "+it('new')\n",
+    });
+    assert.equal(r.kind, "clean");
+    assert.deepEqual(r.violations, []);
+  });
+
+  it("M on an undeclared test path: clean on attempt 1, test-guard on retry", () => {
+    const nameStatus = "M\ttests/other.test.ts\n";
+    const first = staged({ nameStatus });
+    assert.equal(first.kind, "clean");
+
+    const retry = staged({ nameStatus, attempt: 2 });
+    assert.equal(retry.kind, "test-guard");
+    assert.ok(retry.violations.some((v) => v.includes("tests/other.test.ts")));
+  });
+
+  it("assertion deltas appear in the investigation for all outcomes, never gating", () => {
+    const diff =
+      "diff --git a/tests/a.test.ts b/tests/a.test.ts\n" +
+      "--- a/tests/a.test.ts\n" +
+      "+++ b/tests/a.test.ts\n" +
+      "@@ -1,2 +1,2 @@\n" +
+      "-it('old', () => { expect(x).toBe(1); })\n" +
+      "+it('new', () => { expect(x).toBe(2); })\n" +
+      "+it('extra', () => { assert.ok(y); })\n";
+    const clean = staged({ nameStatus: "M\ttests/a.test.ts\n", unifiedDiff: diff });
+    assert.equal(clean.kind, "clean");
+    assert.match(clean.investigation, /tests\/a\.test\.ts/);
+    assert.match(clean.investigation, /assertion/i);
+
+    const guard = staged({
+      nameStatus: "M\ttests/other.test.ts\nD\tpkg/old_test.go\n",
+      unifiedDiff: diff,
+      attempt: 2,
+    });
+    assert.equal(guard.kind, "test-guard");
+    assert.match(guard.investigation, /tests\/a\.test\.ts/);
+    assert.match(guard.investigation, /assertion/i);
+  });
+
+  it("investigation lists the exact name-status test lines", () => {
+    const r = staged({ nameStatus: "D\tpkg/old_test.go\nM\tsrc/a.ts\n" });
+    assert.equal(r.kind, "test-guard");
+    assert.match(r.investigation, /D\tpkg\/old_test\.go/);
+  });
+
+  it("buildFixTask for test-guard states the rule is enforced and carries name-status lines", () => {
+    const original = "Implement ONE behavior: T1.";
+    const classified = staged({ nameStatus: "D\tpkg/old_test.go\n" });
+    assert.equal(classified.kind, "test-guard");
+
+    const taskText = buildFixTask(BEHAVIOR, TASK, original, classified, 1);
+    assert.match(taskText, /enforced/i);
+    assert.match(taskText, /pkg\/old_test\.go/);
+    assert.match(taskText, /Original task/);
   });
 });
