@@ -95,6 +95,14 @@ export interface TestResults {
 
 const STATE_CUSTOM_TYPE = "workflow-state";
 
+/**
+ * Whether the workflow widget is currently shown.
+ *
+ * In-memory UI state only: hidden by default, never persisted, resets on
+ * session reload. Toggled by the /task command (extensions/index.ts).
+ */
+let widgetVisible = false;
+
 /** Per-phase widget header line. */
 const PHASE_HEADERS: Record<string, string> = {
   discussing: "◉ discussing — read-only planning",
@@ -188,6 +196,11 @@ function buildTitle(state: WorkflowState): string {
  * (paseo). The widget's first line is a phase header so the current
  * state is visible at a glance.
  *
+ * The widget itself is gated by the module-level `widgetVisible` flag:
+ * hidden by default, toggled by the /task command. setStatus and
+ * setTitle stay unconditional, so the footer phase indicator remains
+ * visible even while the widget is hidden.
+ *
  * @param state - Current workflow state.
  * @param ctx   - Extension context for UI access.
  */
@@ -205,6 +218,12 @@ export function updateUi(state: WorkflowState | null, ctx: ExtensionContext): vo
     ctx.ui.theme.fg("accent", `◉ ${phaseLabel}`),
   );
   ctx.ui.setTitle(buildTitle(state));
+
+  // Widget visibility gate: hidden by default; /task toggles it on.
+  if (!widgetVisible) {
+    ctx.ui.setWidget("workflow-todos", undefined);
+    return;
+  }
 
   const lines: string[] = [
     ctx.ui.theme.fg("accent", PHASE_HEADERS[state.phase] ?? `◉ ${phaseLabel}`),

@@ -21,17 +21,25 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   } as unknown as ExtensionAPI & { calls: Record<string, unknown[]> };
 }
 
+/** One recorded ctx.ui.setWidget call (lines may be undefined when hidden). */
+interface WidgetCall {
+  key: string;
+  lines: string[] | undefined;
+}
+
 interface UiRecorder {
   ctx: ExtensionContext;
   titles: string[];
   statuses: Array<{ key: string; value: unknown }>;
   widgets: string[][];
+  widgetCalls: WidgetCall[];
 }
 
 function ctxWithState(state: WorkflowState | null): UiRecorder {
   const titles: string[] = [];
   const statuses: Array<{ key: string; value: unknown }> = [];
   const widgets: string[][] = [];
+  const widgetCalls: WidgetCall[] = [];
   const ctx = {
     cwd: "/tmp/test",
     sessionManager: {
@@ -43,7 +51,8 @@ function ctxWithState(state: WorkflowState | null): UiRecorder {
       setStatus: (key: string, value: unknown) => {
         statuses.push({ key, value });
       },
-      setWidget: (_k: string, lines: string[] | undefined) => {
+      setWidget: (key: string, lines: string[] | undefined) => {
+        widgetCalls.push({ key, lines });
         if (lines) widgets.push(lines);
       },
       setTitle: (t: string) => {
@@ -53,7 +62,7 @@ function ctxWithState(state: WorkflowState | null): UiRecorder {
       addAutocompleteProvider: () => {},
     },
   } as unknown as ExtensionContext;
-  return { ctx, titles, statuses, widgets };
+  return { ctx, titles, statuses, widgets, widgetCalls };
 }
 
 describe("state machine finalizing phase (T2)", () => {
@@ -157,7 +166,7 @@ describe("updateUi paseo visibility (T6)", () => {
     ],
   };
 
-  it("sets title '<phase> · <topic>', status '◉ <phase>', and a widget phase header", () => {
+  it("sets title '<phase> · <topic>', status '◉ <phase>'; widget hidden by default", () => {
     const rec = ctxWithState({
       phase: "finalizing",
       specText: "verify the error when mise run payment",
@@ -169,12 +178,10 @@ describe("updateUi paseo visibility (T6)", () => {
     assert.match(rec.titles[0], /^finalizing · /);
     assert.equal(rec.statuses[0].key, "workflow");
     assert.equal(rec.statuses[0].value, "◉ finalizing");
-    assert.ok(rec.widgets[0][0].startsWith("◉"), "widget first line should be the phase header");
-    const flat = rec.widgets[0].join("\n");
-    assert.match(flat, /Widget Task/);
-    assert.match(flat, /T1/);
-    assert.match(flat, /T2/);
-    assert.match(flat, /✓/);
+    // Superseded: the widget is hidden by default. Full content when shown
+    // is covered by the toggle describe (T2).
+    assert.equal(rec.widgetCalls.length, 1);
+    assert.equal(rec.widgetCalls[0].lines, undefined, "widget hidden by default");
   });
 
   it("long specText does not throw and falls back to a phase-only title", () => {
@@ -198,6 +205,61 @@ describe("updateUi paseo visibility (T6)", () => {
       "status should be cleared",
     );
     assert.equal(rec.widgets.length, 0, "widget should be cleared");
+    assert.equal(rec.titles[0], "pi");
+  });
+});
+
+describe("updateUi widget visibility gate (T1)", () => {
+  const task = {
+    title: "Gate Task", instruction: "i", files: [], done: "d",
+    behaviors: [
+      { id: "T1", description: "x", expectedOutput: "y", kind: "test" as const, status: "active" as const },
+    ],
+  };
+
+  it("calls setWidget('workflow-todos', undefined) by default for active phases, keeping status and title", () => {
+    const rec = ctxWithState({
+      phase: "finalizing",
+      specText: "gate topic",
+      task,
+    });
+
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    assert.equal(rec.widgetCalls.length, 1);
+    assert.equal(rec.widgetCalls[0].key, "workflow-todos");
+    assert.equal(rec.widgetCalls[0].lines, undefined, "widget hidden by default");
+    assert.equal(rec.statuses[0].key, "workflow");
+    assert.equal(rec.statuses[0].value, "◉ finalizing");
+    assert.match(rec.titles[0], /^finalizing · /);
+  });
+
+  it("builds no widget lines while hidden, even with test results in implementing", () => {
+    const rec = ctxWithState({
+      phase: "implementing",
+      specText: "gate topic",
+      task,
+      lastTestResults: { passed: 2, failed: 1 },
+    });
+
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    const withLines = rec.widgetCalls.filter((c) => Array.isArray(c.lines));
+    assert.equal(withLines.length, 0, "no line arrays passed to setWidget while hidden");
+  });
+
+  it("idle/null path unchanged: widget cleared, status cleared, title reset to pi", () => {
+    const rec = ctxWithState(null);
+
+    updateUi(null, rec.ctx);
+
+    assert.equal(rec.widgetCalls.length, 1);
+    assert.equal(rec.widgetCalls[0].key, "workflow-todos");
+    assert.equal(rec.widgetCalls[0].lines, undefined);
+    assert.ok(
+      rec.statuses.some((s) => s.key === "workflow" && s.value === undefined),
+      "status should be cleared",
+    );
     assert.equal(rec.titles[0], "pi");
   });
 });
