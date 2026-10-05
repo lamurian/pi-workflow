@@ -525,6 +525,39 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const commits = (pi.calls["appendEntry"] ?? []).length;
     assert.ok(commits >= 1, "state was persisted");
   });
+
+  it("spawns exactly 5 fix subagents on persistent rejection, then halts with lastHalt carrying the investigation", async () => {
+    const { pi } = piWithRejectingHook();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.deepEqual(
+      spawns.map((s) => s.behaviorId),
+      ["T1", "T1", "T1", "T1", "T1", "T1"],
+      "initial + exactly 5 retries (RETRY_BUDGET), then the loop halts",
+    );
+    assert.match(spawns[5]!.taskText, /retry 5\/5/, "the fifth retry is the last allowed");
+
+    assert.equal(state.phase, "implementing", "halt keeps the implementing phase");
+    assert.equal(state.task!.behaviors[0]!.status, "active");
+
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    const halt = lastSaved[1].lastHalt;
+    assert.equal(lastSaved[0], "workflow-state", "handoff persisted as a session entry");
+    assert.equal(halt?.behaviorId, "T1");
+    assert.match(halt?.error ?? "", /pre-commit hook rejected the commit for T1 after 5 retries/);
+    assert.match(halt?.error ?? "", /golangci-lint run failed/, "lastHalt.error carries the investigation incl. hook output");
+    assert.ok(Array.isArray(halt?.landedCommits), "landedCommits recorded");
+    assert.equal(typeof halt?.at, "string", "timestamp recorded");
+    assert.equal(typeof halt?.treeState, "string", "tree state recorded");
+  });
 });
 
 // ═══ T4: retry once, halt with handoff, resume on re-run ═══

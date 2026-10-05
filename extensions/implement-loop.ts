@@ -321,7 +321,7 @@ export async function runOrchestratedImplement(
           commit.outcome.kind === "hook-rejected"
             ? `pre-commit hook rejected the commit for ${behavior.id} after ${RETRY_BUDGET} retries`
             : `no changes detected for ${behavior.id} after ${RETRY_BUDGET} retries`;
-        return halt(behavior.id, detail);
+        return halt(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
       }
 
       taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
