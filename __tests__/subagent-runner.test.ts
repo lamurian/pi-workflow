@@ -418,3 +418,106 @@ describe("runScoutSubprocess kill handling", () => {
     );
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T7 — subprocess diagnostics: spawn errors, stdout tails, named timeouts
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runRawPiProcess diagnostics (T7)", () => {
+  it("reports the ENOENT message when PI_BIN names a missing binary", async () => {
+    const { runRawPiProcess } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = "/nonexistent/pi-binary-for-test";
+    try {
+      const res = await runRawPiProcess(["--version"], "/tmp", undefined, 5_000);
+      assert.equal(res.exitCode, 1, "spawn failure resolves with a non-zero exit code");
+      assert.match(
+        res.stderr,
+        /ENOENT|no such file/i,
+        "spawn error message must be captured in stderr, not swallowed",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("names the timeout on stderr when the kill signal fires", async () => {
+    const { runRawPiProcess } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = "node";
+    try {
+      // node sleeps 60s; timeout 300ms → SIGKILL. Must settle promptly even
+      // though the killed process is gone — a hung orchestrator is the exact
+      // failure class this contract removes.
+      const started = Date.now();
+      const res = await runRawPiProcess(
+        ["-e", "setTimeout(() => {}, 60000)"],
+        "/tmp",
+        undefined,
+        300,
+      );
+      assert.equal(res.exitCode, 1, "killed process resolves non-zero");
+      assert.match(
+        res.stderr,
+        /timed out after 300ms/,
+        "timeout must be named explicitly so callers can distinguish it from hook/unit failures",
+      );
+      assert.ok(
+        Date.now() - started < 5_000,
+        "must settle promptly after the kill, not hang on lingering stdio pipes",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+});
+
+describe("runImplementerUnit diagnostics (T7)", () => {
+  /** Write an executable fake pi: prints one assistant JSON event, then behaves per `tail`. */
+  async function fakePi(tail: string): Promise<string> {
+    const { writeFileSync, chmodSync, mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "pi-fake-"));
+    const fake = join(dir, "fake-pi.sh");
+    writeFileSync(
+      fake,
+      "#!/bin/sh\n" +
+        "echo '{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"halfway there\"}]}}'\n" +
+        tail,
+    );
+    chmodSync(fake, 0o755);
+    return fake;
+  }
+
+  it("includes a stdout tail in the error when the unit exits non-zero", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = await fakePi("exit 3\n");
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 5_000);
+      assert.equal(typeof res.error, "string");
+      assert.match(res.error!, /halfway there/, "error must carry a tail of captured stdout");
+      assert.equal(res.summary, "halfway there", "parsed report survives alongside the error");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("names timeouts and keeps the last assistant text when available", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = await fakePi("sleep 60\n");
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 400);
+      assert.match(res.error ?? "", /timed out after 400ms/, "timeout must be named");
+      assert.match(res.summary, /halfway there/, "partial assistant text must survive the kill");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+});
