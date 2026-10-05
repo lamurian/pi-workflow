@@ -436,6 +436,164 @@ describe("T3: orchestrator default loop", () => {
   });
 });
 
+// ═══ T4: retry once, halt with handoff, resume on re-run ═══
+describe("T4: retry once, halt with handoff, resume on re-run", () => {
+  function t4Task(): TaskContract {
+    return {
+      title: "T4 Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  interface ExecLogEntry { cmd: string; args: string[] }
+
+  function piWithExecLog(): { pi: ExtensionAPI & { calls: Record<string, unknown[]> }; execLog: ExecLogEntry[] } {
+    const pi = mockPi();
+    const execLog: ExecLogEntry[] = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${++headCounter}\n`, stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "committed", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "npm") {
+        return { stdout: "2 passed", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  interface Spawn { behaviorId: string; taskText: string }
+
+  function failingThenSucceedingRunner(
+    spawns: Spawn[],
+    failOn: string,
+    error: string,
+  ) {
+    const attempts: Record<string, number> = {};
+    return async (unit: Spawn): Promise<ImplementerReport & { error?: string }> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      attempts[unit.behaviorId] = (attempts[unit.behaviorId] ?? 0) + 1;
+      if (unit.behaviorId === failOn && attempts[unit.behaviorId] === 1) {
+        return { summary: "", error };
+      }
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId === "T1" ? "first behavior" : "second behavior"}`,
+      };
+    };
+  }
+
+  it("retries once with the failure output appended to the task text", async () => {
+    const { pi } = piWithExecLog();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: t4Task() };
+    state.task!.behaviors = [state.task!.behaviors[0]!];
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    await runImplement("", pi, ctx, failingThenSucceedingRunner(spawns, "T1", "boom: cannot write file"));
+
+    assert.equal(spawns.length, 2, "one retry after the first failure");
+    assert.match(
+      spawns[1]!.taskText,
+      /Previous attempt failed/,
+      "retry task text must carry the failure section",
+    );
+    assert.match(
+      spawns[1]!.taskText,
+      /boom: cannot write file/,
+      "retry task text must contain the failure output",
+    );
+    assert.equal(state.phase, "idle", "recovered retry completes the workflow");
+    assert.equal(state.task!.behaviors[0]!.status, "done");
+  });
+
+  it("halts after the second failure with a handoff report; phase stays implementing", async () => {
+    const { pi } = piWithExecLog();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: t4Task() };
+    const ctx = ctxWithState(state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+    const spawns: Spawn[] = [];
+
+    await runImplement(
+      "",
+      pi,
+      ctx,
+      async (unit: Spawn): Promise<ImplementerReport & { error?: string }> => {
+        spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+        if (unit.behaviorId === "T2") {
+          return { summary: "", error: "EACCES: permission denied" };
+        }
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: "feat(core): add first behavior",
+        };
+      },
+    );
+
+    assert.deepEqual(
+      spawns.map((s) => s.behaviorId),
+      ["T1", "T2", "T2"],
+      "T1 once, T2 twice (attempt + one retry), then stop — no further spawns",
+    );
+    assert.equal(state.phase, "implementing", "halt must not complete the workflow");
+    assert.equal(state.task!.behaviors[0]!.status, "done");
+    assert.equal(state.task!.behaviors[1]!.status, "active");
+
+    const report = notifyCalls[notifyCalls.length - 1]!;
+    assert.match(report, /T2/, "report names the failed unit");
+    assert.match(report, /EACCES: permission denied/, "report carries the error");
+    assert.match(report, /M src\/a\.ts/, "report carries the tree state");
+    assert.match(
+      report,
+      /feat\(core\): add first behavior/,
+      "report lists commits landed so far",
+    );
+    assert.match(report, /\/implement again to resume/, "report tells the user how to resume");
+  });
+
+  it("re-running /implement resumes from the first active behavior only", async () => {
+    const { pi } = piWithExecLog();
+    const task = t4Task();
+    task.behaviors[0]!.status = "done"; // simulate partial progress from a prior run
+    const state: WorkflowState = { phase: "implementing", specText: "topic", task };
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    await runImplement("", pi, ctx, async (unit: Spawn) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: "feat(core): add second behavior",
+      };
+    });
+
+    assert.deepEqual(
+      spawns.map((s) => s.behaviorId),
+      ["T2"],
+      "done behaviors are skipped on resume — only active ones spawn",
+    );
+    assert.equal(state.phase, "idle", "resume completes once remaining units are done");
+    assert.equal(task.behaviors[1]!.status, "done");
+  });
+});
+
 // ═══ tool registration (T8) ═══
 describe("implement tool registration", () => {
   it("registers exactly run_tests, mark_task_done, complete_implementation", () => {

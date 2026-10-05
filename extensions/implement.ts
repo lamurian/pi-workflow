@@ -67,9 +67,10 @@ export async function runImplement(
   runUnit?: UnitRunner,
 ): Promise<void> {
   const state = loadState(ctx);
-  if (!state || state.phase !== "finalizing") {
+  if (!state || (state.phase !== "finalizing" && state.phase !== "implementing")) {
     ctx.ui.notify(
-      "/implement is only valid after /finalize. Run /discuss then /finalize first.",
+      "/implement is only valid after /finalize (or to resume an in-flight implementation). " +
+        "Run /discuss then /finalize first.",
       "warning",
     );
     return;
@@ -79,8 +80,14 @@ export async function runImplement(
     ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
     return;
   }
-  transitionTo(pi, state, "implementing");
-  state.baselineHead = (await readGitHead(pi, ctx.cwd)) ?? undefined;
+  const resuming = state.phase === "implementing";
+  if (!resuming) {
+    transitionTo(pi, state, "implementing");
+  }
+  // Resume keeps the original baseline so the soft-warn still spans the
+  // whole implementation, not just the current /implement invocation.
+  state.baselineHead =
+    state.baselineHead ?? ((await readGitHead(pi, ctx.cwd)) ?? undefined);
   saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
