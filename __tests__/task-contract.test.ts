@@ -142,19 +142,17 @@ describe("evaluateCompletionGate", () => {
     assert.match(r!, /active/);
   });
 
-  it("refuses when a test behavior exists but no run is recorded", () => {
+  it("passes when every behavior is done and no test run is recorded (T9)", () => {
     const s = implementingState({
       task: {
         title: "T", instruction: "i", files: [], done: "d",
         behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }],
       },
     });
-    const r = evaluateCompletionGate(s);
-    assert.ok(r !== null);
-    assert.match(r!, /no test run/);
+    assert.equal(evaluateCompletionGate(s), null);
   });
 
-  it("refuses when the last run had failures", () => {
+  it("passes when stale lastTestResults show failures (T9)", () => {
     const s = implementingState({
       task: {
         title: "T", instruction: "i", files: [], done: "d",
@@ -162,9 +160,14 @@ describe("evaluateCompletionGate", () => {
       },
       lastTestResults: { passed: 1, failed: 2 },
     });
+    assert.equal(evaluateCompletionGate(s), null);
+  });
+
+  it("refuses when no task contract exists (T9)", () => {
+    const s: WorkflowState = { phase: "implementing", specText: "topic" };
     const r = evaluateCompletionGate(s);
     assert.ok(r !== null);
-    assert.match(r!, /failing/);
+    assert.match(r!, /no task contract/);
   });
 
   it("passes with manual behaviors and no test run", () => {

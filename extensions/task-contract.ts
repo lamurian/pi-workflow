@@ -133,8 +133,10 @@ export function parseTestOutput(exitCode: number, stdout: string): ParsedTest {
 /**
  * Deterministically evaluate the complete_implementation gate.
  *
- * Refuses completion while any active behavior is pending, or when a test
- * behavior exists and the last recorded test run had failures.
+ * Refuses completion while any active behavior remains, or when no task
+ * contract is present. Test outcomes are not consulted: verification is
+ * owned by the project (per-behavior commits pass the project's own
+ * pre-commit hooks; some projects have no hooks at all).
  *
  * @param state - Current workflow state.
  * @returns null when the gate passes, otherwise a refusal reason.
@@ -147,16 +149,6 @@ export function evaluateCompletionGate(state: WorkflowState): string | null {
   const active = task.behaviors.filter((b) => b.status === "active");
   if (active.length > 0) {
     return `${active.length} behavior(s) still active`;
-  }
-  const hasTest = task.behaviors.some((b) => b.kind === "test" && b.status !== "removed");
-  if (hasTest) {
-    const r = state.lastTestResults;
-    if (!r) {
-      return "test behaviors present but no test run recorded";
-    }
-    if (r.failed > 0) {
-      return `${r.failed} test(s) failing`;
-    }
   }
   return null;
 }

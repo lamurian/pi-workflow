@@ -694,15 +694,23 @@ describe("complete_implementation", () => {
     assert.equal(s.phase, "implementing");
   });
 
-  it("refuses when a test behavior exists but tests are failing", async () => {
+  it("succeeds when all behaviors are done even with stale failing results (T9)", async () => {
     const s = finalizingState();
     s.phase = "implementing";
     s.task!.behaviors[0].status = "done";
     s.lastTestResults = { passed: 1, failed: 2 };
     const res = await runComplete(s);
-    assert.equal(res.isError, true);
-    assert.match(res.content[0].text, /failing/);
-    assert.equal(s.phase, "implementing");
+    assert.notEqual(res.isError, true);
+    assert.equal(s.phase, "idle");
+  });
+
+  it("succeeds when all behaviors are done with no test run recorded (T9)", async () => {
+    const s = finalizingState();
+    s.phase = "implementing";
+    s.task!.behaviors[0].status = "done";
+    const res = await runComplete(s);
+    assert.notEqual(res.isError, true);
+    assert.equal(s.phase, "idle");
   });
 
   it("succeeds and returns to idle when all done and tests green", async () => {

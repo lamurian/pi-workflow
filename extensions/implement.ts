@@ -298,7 +298,8 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
  * Register the `complete_implementation` AI tool.
  *
  * Ends the implementing phase and returns the workflow to idle. Refuses
- * while any behavior is still active or the last test run had failures.
+ * while any behavior is still active; test outcomes are not consulted
+ * (verification is owned by the project's own commit hooks).
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -308,8 +309,8 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
     label: "Complete Implementation",
     description:
       "Finalize implementation. Ends the implementing phase and returns " +
-      "the workflow to idle. Call this ONLY after all behaviors are done " +
-      "and all tests pass.",
+      "the workflow to idle. Call this ONLY after all behaviors are done. " +
+      "Test outcomes are not checked here — the project's commit hooks own verification.",
 
     parameters: Type.Object({}),
 
