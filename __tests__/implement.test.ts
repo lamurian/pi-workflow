@@ -447,6 +447,86 @@ describe("T1: HEAD-gate success path", () => {
   });
 });
 
+// ═══ T2: HEAD-gate hook-rejection path ═══
+describe("T2: HEAD-gate hook-rejection path", () => {
+  const HOOK_STDERR =
+    "golangci-lint run failed\n" +
+    "internal/app/services/sts/approve.go:42:1: undefined: Probe\n" +
+    "exit status 1";
+
+  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  function piWithRejectingHook() {
+    const pi = mockPi();
+    const execLog: Array<{ cmd: string; args: string[] }> = [];
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return { stdout: " src/a.ts | 2 +-\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: HOOK_STDERR, exitCode: 1 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  function oneBehaviorTask(): TaskContract {
+    return {
+      title: "Hook Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  it("spawns one fix subagent carrying the investigation, raw hook output, and original task", async () => {
+    const { pi } = piWithRejectingHook();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+    // Initial unit succeeds; the fix subagent crashes → loop halts via the
+    // exception-safety path, leaving the behavior active with no commit.
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 1) {
+        return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+      }
+      throw new Error("fix agent crashed");
+    });
+
+    assert.equal(spawns.length, 2, "initial unit + exactly one fix subagent");
+    const fix = spawns[1]!;
+    assert.equal(fix.behaviorId, "T1");
+    assert.match(fix.taskText, /Previous attempt failed \(retry 1\/5\)/, "fix spawn is a budgeted retry");
+    assert.match(fix.taskText, /Investigation: commit for T1 did not land/);
+    assert.match(fix.taskText, /git commit exit code: 1/);
+    assert.match(fix.taskText, /failing stage \(best-effort\): lint/);
+    assert.match(fix.taskText, /git status --short: M src\/a\.ts/);
+    assert.match(fix.taskText, /diff --stat: src\/a\.ts \| 2 \+-/);
+    assert.match(fix.taskText, /Raw hook output/);
+    assert.match(fix.taskText, /golangci-lint run failed/);
+    assert.match(fix.taskText, /approve\.go:42/, "raw hook stderr tail is included");
+    assert.match(fix.taskText, /Original task/);
+    assert.match(fix.taskText, /Implement ONE behavior: T1\./, "original behavior task text preserved");
+
+    assert.equal(state.task!.behaviors[0]!.status, "active", "behavior stays active after the halt");
+    assert.equal(state.phase, "implementing", "phase stays implementing for resume");
+    const commits = (pi.calls["appendEntry"] ?? []).length;
+    assert.ok(commits >= 1, "state was persisted");
+  });
+});
+
 // ═══ T4: retry once, halt with handoff, resume on re-run ═══
 describe("T4: retry once, halt with handoff, resume on re-run", () => {
   function t4Task(): TaskContract {
