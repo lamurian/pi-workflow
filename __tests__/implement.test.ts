@@ -649,6 +649,75 @@ describe("T2: HEAD-gate hook-rejection path", () => {
   });
 });
 
+// ═══ T6: exception safety — no unhandled rejection escapes /implement ═══
+describe("T6: exception safety in runImplement", () => {
+  function oneBehavior(): TaskContract {
+    return {
+      title: "Crash Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  it("catches a raw throw from the unit runner, persists lastHalt, keeps implementing", async () => {
+    const pi = mockPi();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehavior() };
+    const ctx = ctxWithState(state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    // No rejection expected: the safety wrapper must absorb the crash.
+    await runImplement("", pi, ctx, async () => {
+      throw new Error("subprocess exploded");
+    });
+
+    assert.equal(state.phase, "implementing", "phase stays implementing for resume");
+    assert.equal(state.task!.behaviors[0]!.status, "active");
+
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    assert.equal(lastSaved[0], "workflow-state");
+    const halt = lastSaved[1].lastHalt;
+    assert.equal(halt?.behaviorId, "T1", "lastHalt names the active behavior");
+    assert.match(halt?.error ?? "", /orchestrator crashed: subprocess exploded/);
+    assert.equal(typeof halt?.at, "string");
+
+    const report = notifyCalls[notifyCalls.length - 1]!;
+    assert.match(report, /Orchestration halted on T1: orchestrator crashed: subprocess exploded/, "user sees the crash in the halt handoff");
+    assert.match(report, /lastHalt/, "user is told the handoff was persisted");
+    assert.match(report, /\/implement again to resume/, "user is told how to resume");
+  });
+
+  it("halt path persists lastHalt before runImplement returns (covered with T3; smoke here)", async () => {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") return { stdout: "headA\n", stderr: "", exitCode: 0 };
+      if (cmd === "git" && args[0] === "status") return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+      if (cmd === "git" && args[0] === "diff") return { stdout: " src/a.ts | 2 +-\n", stderr: "", exitCode: 0 };
+      if (cmd === "git" && args[0] === "commit") return { stdout: "", stderr: "golangci-lint run failed", exitCode: 1 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehavior() };
+    const ctx = ctxWithState(state);
+
+    await runImplement("", pi, ctx, async () => ({
+      summary: "attempt",
+      suggestedCommit: "feat(core): add first behavior",
+    }));
+
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    assert.equal(lastSaved[1].lastHalt?.behaviorId, "T1", "halt persisted handoff as the final entry");
+    assert.match(lastSaved[1].lastHalt?.error ?? "", /golangci-lint/);
+  });
+});
+
 // ═══ T4: retry once, halt with handoff, resume on re-run ═══
 describe("T4: retry once, halt with handoff, resume on re-run", () => {
   function t4Task(): TaskContract {

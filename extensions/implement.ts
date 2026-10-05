@@ -152,12 +152,8 @@ async function runOrchestratedImplementSafely(
     state.lastHalt = lastHalt;
     saveState(pi, state);
     updateUi(state, ctx);
-    ctx.ui.notify(
-      `Orchestrator crashed: ${message}\n\n` +
-        `Handoff persisted to session state (lastHalt). ` +
-        `Phase stays implementing — run /implement again to resume.`,
-      "warning",
-    );
+    // No separate toast: runImplement's halt handoff already surfaces
+    // haltedOn/error plus the lastHalt persistence note and resume guidance.
     return {
       complete: false,
       unitsRun: 0,
