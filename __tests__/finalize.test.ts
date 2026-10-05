@@ -1,12 +1,18 @@
-import { describe, it } from "vitest";
+import { describe, it, afterEach } from "vitest";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { registerSaveTaskTool, runFinalize } from "../extensions/finalize.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const DEFAULT_ACTIVE_TOOLS = ["read", "bash", "write", "edit", "commit_changes"];
 
-function mockPi(activeTools: string[] = DEFAULT_ACTIVE_TOOLS): ExtensionAPI & { calls: Record<string, unknown[]> } {
+function mockPi(
+  activeTools: string[] = DEFAULT_ACTIVE_TOOLS,
+  execImpl?: ExtensionAPI["exec"],
+): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};
   const record = (name: string) => {
     calls[name] = [];
@@ -22,14 +28,14 @@ function mockPi(activeTools: string[] = DEFAULT_ACTIVE_TOOLS): ExtensionAPI & { 
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
     getActiveTools: () => [...activeTools],
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
-    exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    exec: execImpl ?? (async () => ({ stdout: "", stderr: "", exitCode: 0 })),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
 }
 
-function ctxWithState(state: WorkflowState | null): ExtensionContext {
+function ctxWithState(state: WorkflowState | null, cwd = "/tmp/test"): ExtensionContext {
   return {
-    cwd: "/tmp/test",
+    cwd,
     sessionManager: {
       getBranch: () =>
         state ? [{ type: "custom", customType: "workflow-state", data: state }] : [],
@@ -311,5 +317,140 @@ describe("runFinalize (T5)", () => {
     assert.equal(send.length, 1);
     const [text] = send[0] as [string];
     assert.doesNotMatch(text, /## Engineer's note/);
+  });
+});
+
+// ═══ save_task scan wiring (T3) ═══
+describe("save_task scan wiring (T3)", () => {
+  const tmpDirs: string[] = [];
+  afterEach(() => {
+    while (tmpDirs.length) fs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+  });
+
+  function tmpProject(files: Record<string, string>): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-scan-"));
+    tmpDirs.push(dir);
+    for (const [rel, content] of Object.entries(files)) {
+      const full = path.join(dir, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, content);
+    }
+    return dir;
+  }
+
+  function execReturning(stdout: string, exitCode = 0): ExtensionAPI["exec"] {
+    return async () => ({ stdout, stderr: "", exitCode });
+  }
+
+  it("appends per-entry evidence with method+confidence and cross-check warnings", async () => {
+    const dir = tmpProject({
+      "src/a.ts": "export function handler() { return 200; }\n",
+      "tests/flows.test.ts": 'import { handler } from "../a"\n',
+    });
+    const listing = ["./src/a.ts", "./tests/flows.test.ts"].join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: ["src/a.ts"] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true, "scan warnings are advisory; save still succeeds");
+    assert.match(
+      res.content[0].text,
+      /src\/a\.ts -> tests\/flows\.test\.ts \[import-path, high\]/,
+      "evidence line must name method and confidence",
+    );
+    assert.match(res.content[0].text, /undeclared-referencing/);
+    assert.match(notifyCalls[0]!, /warnings: 1/, "notify carries the scan warning count");
+  });
+
+  it("degrades to scan unavailable when the scan exec throws", async () => {
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async () => {
+      throw new Error("exec blocked");
+    });
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true, "scan failure must never block the save");
+    assert.match(res.content[0].text, /Task saved/);
+    assert.match(res.content[0].text, /scan unavailable — apply judgment from the discussion/);
+  });
+
+  it("degrades to scan unavailable when the find listing is empty", async () => {
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(""));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /Task saved/);
+    assert.match(res.content[0].text, /scan unavailable/);
+  });
+
+  it("clean contract: success text intact, no warning lines, no scan-unavailable marker", async () => {
+    const dir = tmpProject({
+      "src/a.ts": "export const x = 1;\n",
+      "tests/a.test.ts": "import { x } from '../src/a'\nexpect(x).toBe(1);\n",
+    });
+    const listing = ["./src/a.ts", "./tests/a.test.ts"].join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: ["src/a.ts", "tests/a.test.ts"] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.match(res.content[0].text, /Task saved/);
+    assert.match(res.content[0].text, /Phase: finalizing/);
+    assert.doesNotMatch(res.content[0].text, /warning/i);
+    assert.doesNotMatch(res.content[0].text, /scan unavailable/);
+  });
+
+  it("all-new files contract yields the no-evidence note", async () => {
+    const dir = tmpProject({ "tests/existing.test.ts": "nothing relevant\n" });
+    const listing = "./tests/existing.test.ts\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: ["src/newfeature.ts"] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /no-evidence/);
+    assert.match(res.content[0].text, /declared-not-found/);
+    assert.match(notifyCalls[0]!, /warnings: 2/);
   });
 });
