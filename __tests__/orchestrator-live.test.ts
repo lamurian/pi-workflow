@@ -1,7 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImplement } from "../extensions/implement.ts";
@@ -193,11 +193,11 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         assert.doesNotMatch(s, /\bT[12]\b/, "commit subject must not carry the behavior id");
       }
       assert.equal(state.phase, "idle", "workflow returns to idle on completion");
-      assert.ok(state.task!.behaviors.every((b) => b.status === "done"));
-      assert.equal(state.lastTestResults!.failed, 0, "final verify is green");
-      assert.ok(
-        (state.lastTestResults!.passed ?? 0) >= 2,
-        "final verify ran the behavior tests (sanity + 2 units)",
+      assert.ok(state.task!.behaviors.every((b) => b.status !== "active"));
+      assert.equal(
+        state.lastTestResults,
+        undefined,
+        "HEAD-gate loop never records test results — verification is the project's hooks",
       );
 
       const progressed = widgets.filter((w) => w.t1Done && !w.t2Done);
@@ -231,10 +231,15 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
       };
 
       await runImplement("", pi, ctx, failingRunner);
-      assert.deepEqual(spawns, ["T1", "T2", "T2"], "T2 retried once, then the line stopped");
+      assert.deepEqual(
+        spawns,
+        ["T1", "T2", "T2", "T2", "T2", "T2", "T2"],
+        "T1 once; T2 initial + 5 budgeted retries, then the line stopped",
+      );
       assert.equal(state.phase, "implementing", "halt keeps the implementing phase");
       assert.equal(state.task!.behaviors[0]!.status, "done");
       assert.equal(state.task!.behaviors[1]!.status, "active");
+      assert.equal(state.lastHalt?.behaviorId, "T2", "lastHalt names the failed unit");
       assert.deepEqual(
         git(repo, "log", "--format=%s").split("\n"),
         ["feat: add greet helper", "chore: scaffold scratch repo"],
@@ -271,6 +276,61 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         "resume lands the second behavior's commit",
       );
       assert.equal(git(repo, "status", "--short"), "", "tree is clean after resume");
+    },
+  );
+
+  it(
+    "M1: real pre-commit hook fail-once-then-pass drives fix subagent with the investigation",
+    { timeout: 120_000 },
+    async () => {
+      const repo = makeRepo();
+      // Real hook: fails the first N attempts (counter file), then passes.
+      const counter = join(tmpdir(), `pi-hook-count-${Date.now()}`);
+      const hook = join(repo, ".git", "hooks", "pre-commit");
+      writeFileSync(
+        hook,
+        "#!/bin/sh\n" +
+          `if [ ! -f ${counter} ]; then echo 1 > ${counter}; else n=$(cat ${counter}); echo $((n+1)) > ${counter}; fi\n` +
+          `if [ "$(cat ${counter})" -le 1 ]; then echo 'golangci-lint style failure: bad formatting' >&2; exit 1; fi\n` +
+          "exit 0\n",
+      );
+      chmodSync(hook, 0o755);
+
+      const state = finalizingState({
+        title: "Hook feature",
+        instruction: "Add greet helper",
+        files: ["src/greet.js"],
+        done: "hooks green",
+        behaviors: [
+          { id: "T1", description: "greet helper", expectedOutput: "greet() returns hello", kind: "test", status: "active" },
+        ],
+      });
+      const { ctx, notifies } = ctxFor(repo, state);
+      const pi = piFor(repo);
+
+      const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+      const runner = async (unit: { behaviorId: string; taskText: string }) => {
+        spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+        writeFileSync(join(repo, "src", "greet.js"), "exports.greet = () => 'hello';\n");
+        writeFileSync(join(repo, "test", "t1.test.js"), T1_TEST);
+        return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat: add greet helper" };
+      };
+
+      await runImplement("", pi, ctx, runner);
+
+      // Hook fails attempt 1 → fix subagent spawned once with the investigation;
+      // attempt 2 passes → commit lands, behavior done, workflow idle.
+      assert.equal(spawns.length, 2, "initial + exactly one fix subagent");
+      assert.match(spawns[1]!.taskText, /Investigation: commit for T1 did not land/);
+      assert.match(spawns[1]!.taskText, /failing stage \(best-effort\):/);
+      assert.match(spawns[1]!.taskText, /Raw hook output/);
+      assert.match(spawns[1]!.taskText, /golangci-lint style failure/);
+
+      const subjects = git(repo, "log", "--format=%s").split("\n");
+      assert.equal(subjects[0], "feat: add greet helper", "commit landed after the hook passed");
+      assert.equal(state.phase, "idle", "workflow returns to idle");
+      assert.equal(state.task!.behaviors[0]!.status, "done");
+      assert.equal(git(repo, "status", "--short"), "", "tree is clean after the run");
     },
   );
 });
