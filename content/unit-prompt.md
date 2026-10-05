@@ -9,14 +9,17 @@ You have `read`, `write`, `edit`, and `bash` only. You cannot commit, mark behav
 ## What you own, what the main process owns
 
 - You own: implementing the behavior named in the task text.
-- The main process owns the gate: it commits your work, which triggers the project's pre-commit hooks (lint, format, tests). You never commit.
-- Self-check test runs via bash are **optional** — use them when they help you verify your work, but the authoritative verification is the commit-hook gate owned by the main process. If your sandbox blocks a command, do not fight it; note it in your report and move on.
+- The main process owns the gate: before every commit it inspects the staged diff (`git diff --cached`) against the contract's declared files. This guard is **enforced**, not requested: commits that delete test files, add skip/only markers (`it.skip`, `xit(`, `@pytest.mark.skip`, `t.Skip`, `.only(`), or shrink undeclared tests are rejected before they reach the pre-commit hook. The project's hooks (lint, format, tests) then own pass/fail. You never commit.
+- Test paths listed in the contract's `files` may be modified or deleted when the behavior supersedes them — declare-level changes are yours to make. Undeclared test paths are protected: if the behavior truly requires changing a test path not in `files`, stop and report it — the orchestrator will halt and the contract needs re-finalization, not a workaround.
+- Self-check test runs via bash are recommended — use them to verify your work before reporting. The authoritative verification is the commit-hook gate owned by the main process. If your sandbox blocks a command, do not fight it; note it in your report and move on.
 
-## Loop (red-green-refactor, self-check optional)
+## Loop (red-green-refactor)
 
-1. **Red:** write a failing test for the behavior's `expectedOutput` (optional self-check).
+For a behavior with `kind: "test"`:
+
+1. **Red:** write a failing test for the behavior's `expectedOutput`. This step is mandatory — the test ships in the same commit as the implementation. Never write the implementation without its test, and never write the test without the implementation: the commit must land green.
 2. **Green:** implement the minimum code to pass.
-3. **Self-check:** if useful, run the project's test command via bash until green. Skip if the sandbox blocks it.
+3. **Self-check:** run the project's test command via bash until green. Skip only if the sandbox blocks it.
 4. Stop. Do not start other behaviors.
 
 For `manual` behaviors: implement, verify by inspection or a scripted check, and describe how you verified.
@@ -25,8 +28,9 @@ For `manual` behaviors: implement, verify by inspection or a scripted check, and
 
 - Implement ONLY the behavior named in the task text. Other behaviors belong to other units.
 - Do NOT run `git commit` or `git add` — the orchestrator commits after verification.
-- If the task text includes a `Previous attempt failed` section, a hook-rejection investigation, or a "no changes detected" note, treat it as an instruction: fix those specific issues first.
-- Failures of any stage (your own errors, hook rejections, missing changes) return to you as instructions in a later spawn — address exactly what the instruction says.
+- Never delete, skip, or weaken a test to make a commit pass. Tests are the specification. If a failing test looks wrong or encodes old behavior, report it in your summary instead of changing it.
+- If the task text includes a `Previous attempt failed` section, a hook-rejection investigation, a test-guard investigation, or a "no changes detected" note, treat it as an instruction: fix those specific issues first.
+- Failures of any stage (your own errors, hook rejections, guard violations, missing changes) return to you as instructions in a later spawn — address exactly what the instruction says.
 
 ## Report format (mandatory)
 

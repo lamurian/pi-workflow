@@ -506,3 +506,35 @@ describe("finalize-prompt.md content assertions (T6)", () => {
     );
   });
 });
+
+// ═══ unit-prompt.md content assertions (T7) ═══
+describe("unit-prompt.md content assertions (T7)", () => {
+  it("red step is mandatory for test-kind behaviors — no optional qualifier on the red step", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /Red:/);
+    assert.match(content, /failing test/i);
+    const redLine = content.split("\n").find((l) => l.includes("Red:")) ?? "";
+    assert.doesNotMatch(redLine, /optional/i, "the red step itself must not be optional");
+  });
+
+  it("states the enforced-guard wording: orchestrator inspects the staged diff", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /staged diff/i);
+    assert.match(content, /enforced/i);
+    assert.match(content, /delete/i);
+    assert.match(content, /skip/i);
+  });
+
+  it("declared-path semantics: contract files may change, undeclared test paths are protected", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /declared/i);
+    assert.match(content, /undeclared/i);
+  });
+
+  it("keeps existing invariants: only the named behavior, JSON report, no commits", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /Implement ONLY the behavior named in the task text/);
+    assert.match(content, /suggestedCommit/);
+    assert.match(content, /Do NOT run `git commit`/);
+  });
+});

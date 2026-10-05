@@ -259,10 +259,10 @@ describe("getImplementerTimeoutMs (T8)", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("content/unit-prompt.md contract (T8)", () => {
-  it("states self-checks are optional, the gate is the main process, failures return as instructions", async () => {
+  it("states self-checks are recommended, the gate is the main process, failures return as instructions", async () => {
     const { loadContent } = await import("../extensions/utils.ts");
     const prompt = await loadContent("unit-prompt.md");
-    assert.match(prompt, /optional/i, "self-check test runs must be optional");
+    assert.match(prompt, /recommended/i, "self-check test runs are recommended");
     assert.match(prompt, /main process/i, "the commit-hook gate is owned by the main process");
     assert.match(prompt, /return.*as instruction/i, "failures of any stage return as instructions");
     assert.match(prompt, /never commit|do NOT run `git commit`/i, "units must not commit");
