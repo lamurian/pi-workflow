@@ -116,6 +116,36 @@ describe("state machine finalizing phase (T2)", () => {
     );
     assert.doesNotMatch(src, /returnCount/);
   });
+
+  it("loads sessions persisted before the HEAD fields existed (T2)", () => {
+    const legacy = {
+      phase: "implementing",
+      specText: "old topic",
+      task: {
+        title: "Legacy", instruction: "i", files: [], done: "d",
+        behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }],
+      },
+    } as unknown as WorkflowState;
+    const { ctx } = ctxWithState(legacy);
+    const loaded = loadState(ctx);
+    assert.ok(loaded);
+    assert.equal(loaded!.phase, "implementing");
+    assert.equal(loaded!.baselineHead, undefined);
+    assert.equal(loaded!.lastMarkedHead, undefined);
+  });
+
+  it("round-trips the optional HEAD fields when present (T2)", () => {
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "topic",
+      baselineHead: "abc123",
+      lastMarkedHead: "def456",
+    };
+    const { ctx } = ctxWithState(state);
+    const loaded = loadState(ctx);
+    assert.equal(loaded!.baselineHead, "abc123");
+    assert.equal(loaded!.lastMarkedHead, "def456");
+  });
 });
 
 describe("updateUi paseo visibility (T6)", () => {

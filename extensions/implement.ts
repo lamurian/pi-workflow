@@ -44,6 +44,30 @@ export function hasCommitTool(pi: ExtensionAPI): boolean {
 }
 
 /**
+ * Read the current git HEAD hash for a working directory.
+ *
+ * Best-effort: returns null when git fails (not a repo, git missing,
+ * empty output) so callers can skip HEAD-based checks gracefully.
+ *
+ * @param pi   - ExtensionAPI reference (for exec access).
+ * @param cwd  - Working directory to resolve HEAD in.
+ * @returns The HEAD hash, or null when unavailable.
+ */
+export async function readGitHead(
+  pi: ExtensionAPI,
+  cwd: string,
+): Promise<string | null> {
+  try {
+    const result = await pi.exec("git", ["rev-parse", "HEAD"], { cwd });
+    if ((result.exitCode ?? 1) !== 0) return null;
+    const head = (result.stdout ?? "").trim();
+    return head || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Start the TDD implementation phase from a finalizing task contract.
  *
  * Valid only from the finalizing phase. Consumes state.task and transitions
@@ -73,6 +97,8 @@ export async function runImplement(
     return;
   }
   transitionTo(pi, state, "implementing");
+  state.baselineHead = (await readGitHead(pi, ctx.cwd)) ?? undefined;
+  saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
   // NOTE(T3): the orchestrator loop replaces the unconditional solo call
@@ -242,9 +268,29 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
         return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], isError: true };
       }
       behavior.status = "done";
+      // T2 soft-warn: HEAD unchanged since the previous mark (or the
+      // /implement baseline) means no commit landed for the last behavior.
+      const head = await readGitHead(pi, ctx.cwd);
+      let warning = "";
+      if (head !== null) {
+        const previous = state.lastMarkedHead ?? state.baselineHead;
+        if (previous !== undefined && head === previous) {
+          warning =
+            "\nWarning: no commit detected since the previous behavior — " +
+            "consider calling commit_changes.";
+        }
+        state.lastMarkedHead = head;
+      }
       saveState(pi, state);
       updateUi(state, ctx);
-      return { content: [{ type: "text", text: `${params.behaviorId} marked done. Evidence: ${params.evidence}` }] };
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${params.behaviorId} marked done. Evidence: ${params.evidence}${warning}`,
+          },
+        ],
+      };
     },
   });
 }

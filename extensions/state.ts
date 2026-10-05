@@ -54,6 +54,17 @@ export interface WorkflowState {
   task?: TaskContract;
   /** Results from the latest test run, if any. */
   lastTestResults?: TestResults;
+  /**
+   * HEAD hash recorded when /implement started. Optional: absent on
+   * sessions persisted before this field existed, and when git is
+   * unavailable (not a repo).
+   */
+  baselineHead?: string;
+  /**
+   * HEAD hash after the most recent mark_task_done. Compared against the
+   * current HEAD to soft-warn when no commit landed between behaviors.
+   */
+  lastMarkedHead?: string;
 }
 
 /** Test run results. */

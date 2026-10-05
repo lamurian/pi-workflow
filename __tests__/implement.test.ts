@@ -206,6 +206,123 @@ describe("T1: capability-conditional commit instruction", () => {
   });
 });
 
+// ═══ T2: HEAD tracking and soft warn ═══
+describe("T2: HEAD tracking and soft warn", () => {
+  function implementingState(overrides: Partial<WorkflowState> = {}): WorkflowState {
+    return { ...finalizingState(), phase: "implementing", ...overrides };
+  }
+
+  function piWithHead(head: string | null): ExtensionAPI & { calls: Record<string, unknown[]> } {
+    const pi = mockPi();
+    pi.exec = async () => {
+      if (head === null) throw new Error("not a git repository");
+      return { stdout: `${head}\n`, stderr: "", exitCode: 0 };
+    };
+    return pi;
+  }
+
+  it("runImplement records baselineHead at start", async () => {
+    const pi = piWithHead("abc123");
+    const state = finalizingState();
+    const ctx = ctxWithState(state);
+
+    await runImplement("--solo", pi, ctx);
+
+    assert.equal(state.baselineHead, "abc123");
+  });
+
+  it("runImplement leaves baselineHead undefined when git fails", async () => {
+    const pi = piWithHead(null);
+    const state = finalizingState();
+    const ctx = ctxWithState(state);
+
+    await runImplement("--solo", pi, ctx);
+
+    assert.equal(state.baselineHead, undefined);
+  });
+
+  async function mark(pi: ExtensionAPI, state: WorkflowState, behaviorId = "T1") {
+    registerMarkTaskDoneTool(pi);
+    const ctx = ctxWithState(state);
+    return getTool(pi, "mark_task_done")!.execute(
+      "c1",
+      { behaviorId, evidence: "verified" },
+      undefined,
+      undefined,
+      ctx,
+    );
+  }
+
+  it("warns suggesting commit_changes when HEAD unchanged since baseline", async () => {
+    const pi = piWithHead("abc");
+    const state = implementingState({ baselineHead: "abc" });
+
+    const res = await mark(pi, state);
+
+    assert.notEqual(res.isError, true, "mark must still succeed");
+    assert.match(res.content[0].text, /no commit detected/i);
+    assert.match(res.content[0].text, /commit_changes/);
+    assert.equal(state.task!.behaviors[0].status, "done");
+  });
+
+  it("no warning when HEAD advanced since the previous mark", async () => {
+    const pi = piWithHead("def");
+    const state = implementingState({ baselineHead: "abc" });
+
+    const res = await mark(pi, state);
+
+    assert.notEqual(res.isError, true);
+    assert.doesNotMatch(res.content[0].text, /no commit detected/i);
+    assert.equal(state.lastMarkedHead, "def", "lastMarkedHead should record the advanced head");
+  });
+
+  it("warns on the second mark when HEAD unchanged since previous mark", async () => {
+    const pi = piWithHead("def");
+    const state = implementingState({
+      baselineHead: "abc",
+      lastMarkedHead: "def",
+      task: {
+        ...finalizingState().task!,
+        behaviors: [
+          { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" },
+          { id: "T2", description: "z", expectedOutput: "w", kind: "test", status: "active" },
+        ],
+      },
+    });
+
+    const res = await mark(pi, state, "T2");
+
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /no commit detected/i);
+  });
+
+  it("succeeds with no warning when git rev-parse fails", async () => {
+    const pi = piWithHead(null);
+    const state = implementingState({ baselineHead: "abc" });
+
+    const res = await mark(pi, state);
+
+    assert.notEqual(res.isError, true, "mark must succeed even when git fails");
+    assert.doesNotMatch(res.content[0].text, /no commit detected/i);
+    assert.equal(state.task!.behaviors[0].status, "done");
+  });
+
+  it("loads and marks cleanly on sessions persisted before the HEAD fields existed", async () => {
+    const pi = piWithHead("abc");
+    // Legacy shape: no baselineHead / lastMarkedHead fields at all.
+    const legacy = {
+      phase: "implementing",
+      specText: "old",
+      task: finalizingState().task,
+    } as WorkflowState;
+
+    const res = await mark(pi, legacy);
+
+    assert.notEqual(res.isError, true);
+    assert.equal(legacy.task!.behaviors[0].status, "done");
+  });
+});
+
 // ═══ tool registration (T8) ═══
 describe("implement tool registration", () => {
   it("registers exactly run_tests, mark_task_done, complete_implementation", () => {
