@@ -8,16 +8,12 @@ import {
   saveState,
   type WorkflowState,
   type TaskContract,
+  type LastHalt,
 } from "./state.ts";
-import {
-  parseTestOutput,
-  evaluateCompletionGate,
-  renderTaskContract,
-} from "./task-contract.ts";
+import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
   runOrchestratedImplement,
   setUnitPrompt,
-  detectTestCommand,
   readGitHead,
   type UnitRunner,
 } from "./implement-loop.ts";
@@ -101,7 +97,7 @@ export async function runImplement(
     return;
   }
 
-  const result = await runOrchestratedImplement(pi, ctx, state, task, runUnit);
+  const result = await runOrchestratedImplementSafely(pi, ctx, state, task, runUnit);
   if (result.complete) {
     ctx.ui.notify(
       `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
@@ -115,9 +111,61 @@ export async function runImplement(
       `Tree state:\n${result.treeState ?? "(unavailable)"}\n\n` +
       `Commits landed so far: ${
         result.landedCommits.length ? result.landedCommits.join("; ") : "(none)"
-      }\n\nRun /implement again to resume from the first active behavior.`,
+      }\n\n` +
+      `Handoff persisted to session state (lastHalt). ` +
+      `Run /implement again to resume from the first active behavior.`,
     "warning",
   );
+}
+
+/**
+ * Run the orchestrator loop with exception safety.
+ *
+ * Any uncaught error is persisted as lastHalt (so it is diagnosable from
+ * the session log) and surfaced in a notification instead of killing the
+ * /implement turn silently. The phase stays implementing for resume.
+ *
+ * @param pi      - ExtensionAPI reference.
+ * @param ctx     - Extension context.
+ * @param state   - Current workflow state.
+ * @param task    - The task contract.
+ * @param runUnit - Injectable unit runner.
+ * @returns Loop outcome; error details when an exception was caught.
+ */
+async function runOrchestratedImplementSafely(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  state: WorkflowState,
+  task: TaskContract,
+  runUnit?: UnitRunner,
+): Promise<Awaited<ReturnType<typeof runOrchestratedImplement>>> {
+  try {
+    return await runOrchestratedImplement(pi, ctx, state, task, runUnit);
+  } catch (err) {
+    const message = String((err as Error)?.message ?? err);
+    const active = task.behaviors.find((b) => b.status === "active");
+    const lastHalt: LastHalt = {
+      behaviorId: active?.id ?? "(unknown)",
+      error: `orchestrator crashed: ${message}`,
+      at: new Date().toISOString(),
+    };
+    state.lastHalt = lastHalt;
+    saveState(pi, state);
+    updateUi(state, ctx);
+    ctx.ui.notify(
+      `Orchestrator crashed: ${message}\n\n` +
+        `Handoff persisted to session state (lastHalt). ` +
+        `Phase stays implementing — run /implement again to resume.`,
+      "warning",
+    );
+    return {
+      complete: false,
+      unitsRun: 0,
+      landedCommits: [],
+      haltedOn: lastHalt.behaviorId,
+      error: lastHalt.error,
+    };
+  }
 }
 
 /**
@@ -169,59 +217,6 @@ export async function buildTddPrompt(
   return renderTemplate(template, {
     task: renderTaskContract(task),
     commitInstruction,
-  });
-}
-
-/**
- * Register the `run_tests` AI tool.
- *
- * Runs the detected test command and records the result in workflow state.
- * The exit code is the primary pass/fail signal; counts/coverage are
- * best-effort. The agent must call this before mark_task_done.
- *
- * @param pi - ExtensionAPI reference.
- */
-export function registerRunTestsTool(pi: ExtensionAPI): void {
-  pi.registerTool({
-    name: "run_tests",
-    label: "Run Tests",
-    description:
-      "Run the project's test command and record the result. Call this " +
-      "after implementing a test behavior and before mark_task_done.",
-    parameters: Type.Object({}),
-
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const state = loadState(ctx);
-      if (!state || state.phase !== "implementing") {
-        return {
-          content: [{ type: "text", text: "run_tests requires the implementing phase." }],
-          isError: true,
-        };
-      }
-      const [cmd, cmdArgs] = detectTestCommand(ctx.cwd);
-      let exitCode = 1;
-      let stdout = "";
-      try {
-        const result = await pi.exec(cmd, cmdArgs, { cwd: ctx.cwd, timeout: 120_000 });
-        exitCode = result.exitCode ?? 0;
-        stdout = result.stdout ?? "";
-      } catch (err) {
-        stdout = String((err as Error).message ?? err);
-      }
-      const parsed = parseTestOutput(exitCode, stdout);
-      state.lastTestResults = parsed;
-      saveState(pi, state);
-      updateUi(state, ctx);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Tests ${exitCode === 0 ? "passed" : "failed"} (exit ${exitCode}). passed=${parsed.passed} failed=${parsed.failed}` +
-              (parsed.coveragePercent !== undefined ? ` coverage=${parsed.coveragePercent}%` : ""),
-          },
-        ],
-      };
-    },
   });
 }
 

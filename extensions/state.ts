@@ -44,6 +44,20 @@ export interface TaskContract {
   behaviors: Behavior[];
 }
 
+/** Persisted handoff for a halted or crashed orchestration attempt. */
+export interface LastHalt {
+  /** The behavior that failed. */
+  behaviorId: string;
+  /** Failure detail (unit error, hook investigation, timeout note). */
+  error: string;
+  /** `git status --short` snapshot at halt time. */
+  treeState?: string;
+  /** Commit subjects landed before the halt. */
+  landedCommits?: string[];
+  /** ISO timestamp of the halt. */
+  at: string;
+}
+
 /** Serializable workflow state persisted via pi.appendEntry(). */
 export interface WorkflowState {
   /** Current workflow phase. */
@@ -54,6 +68,11 @@ export interface WorkflowState {
   task?: TaskContract;
   /** Results from the latest test run, if any. */
   lastTestResults?: TestResults;
+  /**
+   * Details of the most recent orchestration halt or crash. Persisted to the
+   * session log so failures are diagnosable after the fact.
+   */
+  lastHalt?: LastHalt;
   /**
    * HEAD hash recorded when /implement started. Optional: absent on
    * sessions persisted before this field existed, and when git is

@@ -6,7 +6,6 @@ import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
 import {
   runImplement,
-  registerRunTestsTool,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "./implement.ts";
@@ -63,7 +62,6 @@ export default function (pi: ExtensionAPI): void {
 
   // ─── Register Workflow Tools ────────────────────────────────
   registerSaveTaskTool(pi);
-  registerRunTestsTool(pi);
   registerMarkTaskDoneTool(pi);
   registerCompleteImplementationTool(pi);
 

@@ -2,7 +2,6 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   runImplement,
-  registerRunTestsTool,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
@@ -324,8 +323,8 @@ describe("T2: HEAD tracking and soft warn", () => {
   });
 });
 
-// ═══ T3: orchestrator default loop ═══
-describe("T3: orchestrator default loop", () => {
+// ═══ T1: HEAD-gate success path ═══
+describe("T1: HEAD-gate success path", () => {
   function orchTask(): TaskContract {
     return {
       title: "Orch Task",
@@ -342,34 +341,32 @@ describe("T3: orchestrator default loop", () => {
 
   interface ExecLogEntry { cmd: string; args: string[] }
 
-  function piWithExecLog(): { pi: ExtensionAPI & { calls: Record<string, unknown[]> }; execLog: ExecLogEntry[] } {
+  /** Exec mock where git commit succeeds and HEAD advances on each commit. */
+  function piWithGit(): { pi: ExtensionAPI & { calls: Record<string, unknown[]> }; execLog: ExecLogEntry[] } {
     const pi = mockPi();
     const execLog: ExecLogEntry[] = [];
     let headCounter = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: `head${++headCounter}\n`, stderr: "", exitCode: 0 };
+        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "add") {
+        return { stdout: "", stderr: "", exitCode: 0 };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "committed", stderr: "", exitCode: 0 };
-      }
-      if (cmd === "npm") {
-        return { stdout: "2 passed", stderr: "", exitCode: 0 };
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
       }
       return { stdout: "", stderr: "", exitCode: 0 };
     }) as ExtensionAPI["exec"];
     return { pi, execLog };
   }
 
-  function recordingRunner(
-    calls: string[],
-    _taskTexts: string[],
-    maxActiveRef: { value: number },
-  ) {
+  function recordingRunner(calls: string[], maxActiveRef: { value: number }) {
     let active = 0;
     return async (unit: { behaviorId: string }): Promise<ImplementerReport> => {
       active++;
@@ -384,14 +381,14 @@ describe("T3: orchestrator default loop", () => {
     };
   }
 
-  it("default /implement runs one sequential unit per active behavior: verify → commit → mark", async () => {
-    const { pi, execLog } = piWithExecLog();
+  it("runs one sequential unit per active behavior: commit → HEAD gate → mark", async () => {
+    const { pi, execLog } = piWithGit();
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };
     const ctx = ctxWithState(state);
     const calls: string[] = [];
     const maxActiveRef = { value: 0 };
 
-    await runImplement("", pi, ctx, recordingRunner(calls, [], maxActiveRef));
+    await runImplement("", pi, ctx, recordingRunner(calls, maxActiveRef));
 
     assert.deepEqual(calls, ["T1", "T2"], "one spawn per active behavior, in order, removed skipped");
     assert.equal(maxActiveRef.value, 1, "units must run strictly sequentially");
@@ -400,25 +397,39 @@ describe("T3: orchestrator default loop", () => {
       state.task!.behaviors.every((b) => b.status !== "active"),
       "all non-removed behaviors should be done",
     );
-    assert.deepEqual(state.lastTestResults, { passed: 2, failed: 0 });
-
-    const seq = execLog
-      .filter((e) => e.cmd === "npm" || (e.cmd === "git" && e.args[0] === "commit"))
-      .map((e) => (e.cmd === "npm" ? "test" : `commit:${e.args[2]}`));
-    assert.deepEqual(
-      seq,
-      [
-        "test",
-        "commit:feat(core): add first behavior",
-        "test",
-        "commit:feat(core): add second behavior",
-      ],
-      "each unit must be verified with run_tests before its commit, using the suggested conventional subject",
+    assert.equal(
+      state.lastTestResults,
+      undefined,
+      "the loop never runs a test command — lastTestResults stays untouched",
     );
+
+    const commits = execLog
+      .filter((e) => e.cmd === "git" && e.args[0] === "commit")
+      .map((e) => e.args[2]);
+    assert.deepEqual(
+      commits,
+      ["feat(core): add first behavior", "feat(core): add second behavior"],
+      "each unit commits with the suggested conventional subject",
+    );
+
+    const nonGit = execLog.filter((e) => e.cmd !== "git");
+    assert.deepEqual(
+      nonGit,
+      [],
+      "no test runner (or any non-git command) is ever exec'ed — hooks own verification",
+    );
+
+    const commands = execLog.map((e) => (e.cmd === "git" ? e.args[0] : e.cmd));
+    for (const c of commands) {
+      assert.ok(
+        ["rev-parse", "status", "add", "commit"].includes(c),
+        `only git plumbing is allowed, got: ${c}`,
+      );
+    }
   });
 
   it("--solo restores the in-session steer loop", async () => {
-    const { pi, execLog } = piWithExecLog();
+    const { pi, execLog } = piWithGit();
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };
     const ctx = ctxWithState(state);
 
@@ -521,7 +532,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     assert.equal(state.task!.behaviors[0]!.status, "done");
   });
 
-  it("halts after the second failure with a handoff report; phase stays implementing", async () => {
+  it("retries a failing unit up to 5 times, then halts with a persisted handoff", async () => {
     const { pi } = piWithExecLog();
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: t4Task() };
     const ctx = ctxWithState(state);
@@ -549,22 +560,28 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
 
     assert.deepEqual(
       spawns.map((s) => s.behaviorId),
-      ["T1", "T2", "T2"],
-      "T1 once, T2 twice (attempt + one retry), then stop — no further spawns",
+      ["T1", "T2", "T2", "T2", "T2", "T2", "T2"],
+      "T1 once; T2 initial + exactly 5 retries, then stop",
     );
+    assert.match(spawns[2]!.taskText, /retry 1\/5/, "first retry carries the budget header");
+    assert.match(spawns[6]!.taskText, /retry 5\/5/, "fifth retry is the last allowed");
     assert.equal(state.phase, "implementing", "halt must not complete the workflow");
     assert.equal(state.task!.behaviors[0]!.status, "done");
     assert.equal(state.task!.behaviors[1]!.status, "active");
 
+    // Handoff persisted: appendEntry carried workflow-state with lastHalt.
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    assert.equal(lastSaved[0], "workflow-state");
+    assert.equal(lastSaved[1].lastHalt?.behaviorId, "T2");
+    assert.match(lastSaved[1].lastHalt?.error ?? "", /EACCES: permission denied/);
+    assert.ok(Array.isArray(lastSaved[1].lastHalt?.landedCommits));
+    assert.equal(typeof lastSaved[1].lastHalt?.at, "string");
+
     const report = notifyCalls[notifyCalls.length - 1]!;
     assert.match(report, /T2/, "report names the failed unit");
     assert.match(report, /EACCES: permission denied/, "report carries the error");
-    assert.match(report, /M src\/a\.ts/, "report carries the tree state");
-    assert.match(
-      report,
-      /feat\(core\): add first behavior/,
-      "report lists commits landed so far",
-    );
+    assert.match(report, /lastHalt/, "report says the handoff was persisted");
     assert.match(report, /\/implement again to resume/, "report tells the user how to resume");
   });
 
@@ -650,21 +667,29 @@ describe("T6: manual behaviors flagged in the final report", () => {
   });
 });
 
-// ═══ tool registration (T8) ═══
+// ═══ tool registration ═══
 describe("implement tool registration", () => {
-  it("registers exactly run_tests, mark_task_done, complete_implementation", () => {
+  it("registers mark_task_done and complete_implementation; run_tests is gone (T10)", async () => {
     const pi = mockPi();
-    registerRunTestsTool(pi);
-    registerMarkTaskDoneTool(pi);
-    registerCompleteImplementationTool(pi);
+    const mod = await import("../extensions/implement.ts");
+    (mod as unknown as Record<string, Function>)["registerMarkTaskDoneTool"]!(pi);
+    (mod as unknown as Record<string, Function>)["registerCompleteImplementationTool"]!(pi);
 
     const names = ((pi.calls["registerTool"] ?? []) as Array<[{ name: string }]>)
       .map(([d]) => d.name);
     assert.deepEqual(names.sort(), [
       "complete_implementation",
       "mark_task_done",
-      "run_tests",
     ]);
+    assert.ok(!names.includes("run_tests"), "run_tests must not be registered");
+  });
+
+  it("registerRunTestsTool is not exported from implement.ts (T10)", async () => {
+    const mod = await import("../extensions/implement.ts");
+    assert.equal(
+      (mod as unknown as Record<string, unknown>)["registerRunTestsTool"],
+      undefined,
+    );
   });
 
   it("back_to_finalize is not exported from implement.ts (T8)", async () => {

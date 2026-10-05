@@ -1,6 +1,4 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import {
   saveState,
   updateUi,
@@ -8,12 +6,18 @@ import {
   type TaskContract,
   type Behavior,
 } from "./state.ts";
-import { parseTestOutput, evaluateCompletionGate } from "./task-contract.ts";
+import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
   runImplementerUnit,
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { ImplementerReport } from "./subagent-runner.ts";
+import {
+  RETRY_BUDGET,
+  buildFixTask,
+  classifyCommit,
+  type GateOutcome,
+} from "./commit-gate.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -40,21 +44,7 @@ export interface OrchestratorResult {
   treeState?: string;
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Detect the project's test command by checking for common config files.
- *
- * @param cwd - Project working directory.
- * @returns [command, args[]] tuple, or ["npm", ["test"]] as fallback.
- */
-export function detectTestCommand(cwd: string): [string, string[]] {
-  if (existsSync(resolve(cwd, "vitest.config.ts"))) return ["npx", ["vitest", "run"]];
-  if (existsSync(resolve(cwd, "jest.config.ts"))) return ["npx", ["jest"]];
-  if (existsSync(resolve(cwd, "jest.config.js"))) return ["npx", ["jest"]];
-  if (existsSync(resolve(cwd, ".mocharc.yml"))) return ["npx", ["mocha"]];
-  return ["npm", ["test"]];
-}
+// ─── Git helpers ───────────────────────────────────────────────────────────────
 
 /**
  * Read the current git HEAD hash for a working directory.
@@ -80,6 +70,32 @@ export async function readGitHead(
 }
 
 /**
+ * Read a short git tree-state summary for handoffs and resume context.
+ *
+ * @param pi  - ExtensionAPI reference.
+ * @param cwd - Working directory.
+ * @returns `git status --short` output, "" when clean, "(unavailable)" on error.
+ */
+export async function readTreeState(
+  pi: ExtensionAPI,
+  cwd: string,
+): Promise<string> {
+  try {
+    const res = await pi.exec("git", ["status", "--short"], { cwd });
+    return (res.stdout ?? "").trim();
+  } catch {
+    return "(unavailable)";
+  }
+}
+
+/** Outcome of a commit attempt, classified by the HEAD gate. */
+interface CommitAttempt {
+  outcome: Exclude<GateOutcome, { kind: "landed" }> | null;
+  /** Best-effort subject when the commit landed. */
+  subject?: string;
+}
+
+/**
  * Pick the conventional commit subject for a unit.
  *
  * Prefers the subagent's suggestion; falls back to a generic subject so a
@@ -98,16 +114,105 @@ export function pickCommitSubject(
   return `feat: implement ${behavior.description}`.slice(0, 75);
 }
 
+/**
+ * Stage all changes and commit with the given subject; classify via HEAD gate.
+ *
+ * Never passes --no-verify: the project's pre-commit hooks are the gate.
+ *
+ * @param pi       - ExtensionAPI reference.
+ * @param cwd      - Working directory.
+ * @param subject  - Conventional commit subject line.
+ * @param behavior - The behavior being committed (for investigations).
+ * @returns The classified commit attempt.
+ */
+async function commitAndGate(
+  pi: ExtensionAPI,
+  cwd: string,
+  subject: string,
+  behavior: Behavior,
+): Promise<CommitAttempt> {
+  const timeoutMs = getCommitTimeoutMs();
+  const headBefore = await readGitHead(pi, cwd);
+  let commitOutput = "";
+  let commitExitCode = 1;
+  let timedOut = false;
+  try {
+    await pi.exec("git", ["add", "--all"], { cwd });
+    const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
+    commitExitCode = res.exitCode ?? 1;
+    commitOutput = [res.stdout ?? "", res.stderr ?? ""].filter(Boolean).join("\n");
+  } catch (err) {
+    const message = String((err as Error)?.message ?? err);
+    commitOutput = message;
+    timedOut = /timed out/i.test(message);
+    commitExitCode = 1;
+  }
+  const headAfter = await readGitHead(pi, cwd);
+  if (!timedOut && headBefore !== null && headAfter !== null && headAfter !== headBefore) {
+    return { outcome: null, subject };
+  }
+  // HEAD did not move: gather tree evidence for the investigation only now.
+  const statusAfter = timedOut ? "" : await readTreeState(pi, cwd);
+  const diffStat = timedOut ? "" : await readDiffStat(pi, cwd);
+  const outcome = classifyCommit(behavior, {
+    headBefore,
+    headAfter,
+    commitExitCode,
+    commitOutput,
+    timedOut,
+    statusAfter,
+    diffStat,
+    timeoutMs,
+  });
+  if (outcome.kind === "landed") return { outcome: null, subject };
+  return { outcome };
+}
+
+/** Read `git diff --stat` for investigations. Best-effort, "" on failure. */
+async function readDiffStat(pi: ExtensionAPI, cwd: string): Promise<string> {
+  try {
+    const res = await pi.exec("git", ["diff", "--stat"], { cwd });
+    return (res.stdout ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+// ─── Commit timeout budget ─────────────────────────────────────────────────────
+
+/** Default git-commit budget: hooks run lint+format+test on cold caches. */
+const DEFAULT_COMMIT_TIMEOUT_MS = 300_000;
+
+/**
+ * Resolve the git-commit timeout budget, honoring PI_COMMIT_TIMEOUT_MS.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns The timeout in milliseconds (&gt; 0).
+ */
+export function getCommitTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PI_COMMIT_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_COMMIT_TIMEOUT_MS;
+}
+
 // ─── Orchestrator loop ─────────────────────────────────────────────────────────
 
 /**
- * Run the orchestrator loop over a task contract.
+ * Run the orchestrator loop over a task contract (HEAD-gate design).
  *
- * For each active behavior, in order: run the unit (subprocess), verify via
- * the test command, commit with the subagent-suggested subject, mark done.
- * On unit failure, retry once with the failure output appended; a second
- * failure halts the loop and reports the tree state plus commits landed.
- * Already-done behaviors are skipped, so re-running resumes cleanly.
+ * For each active behavior, in order: run the unit (subprocess), then commit
+ * with the unit's suggested subject — the project's pre-commit hooks fire and
+ * own verification. HEAD before/after classifies the attempt: landed (done),
+ * hook-rejected (investigation + fix subagent, RETRY_BUDGET retries), or
+ * no-changes (same budget). Commit-process timeouts halt as infrastructure
+ * failures. Every halt persists lastHalt into workflow state so failures are
+ * diagnosable from the session log. Already-done behaviors are skipped, so
+ * re-running resumes cleanly.
  *
  * @param pi      - ExtensionAPI reference.
  * @param ctx     - Extension context (cwd, UI).
@@ -129,16 +234,20 @@ export async function runOrchestratedImplement(
   const units = task.behaviors.filter((b) => b.status === "active");
   const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits };
 
-  // T4 contract: the handoff report names the unit id, the error, the tree
-  // state, and the commits landed so far. Populate the report pieces here so
-  // the halt path stays uniform across unit / verify / commit failures.
-  const halt = (behaviorId: string, error: string) => {
+  const halt = async (behaviorId: string, error: string) => {
     result.haltedOn = behaviorId;
     result.error = error;
-    return readTreeState(pi, cwd).then((treeState) => {
-      result.treeState = treeState;
-      return result;
-    });
+    result.treeState = await readTreeState(pi, cwd);
+    state.lastHalt = {
+      behaviorId,
+      error,
+      treeState: result.treeState,
+      landedCommits: [...landedCommits],
+      at: new Date().toISOString(),
+    };
+    saveState(pi, state);
+    updateUi(state, ctx);
+    return result;
   };
 
   if (units.length === 0) {
@@ -151,52 +260,79 @@ export async function runOrchestratedImplement(
     return result;
   }
 
-  for (const behavior of units) {
-    const unit: UnitTask = { behaviorId: behavior.id, taskText: buildUnitTask(behavior, task) };
-    const first = await runUnit(unit, cwd);
-    result.unitsRun++;
-    let outcome = first;
+  const resuming = state.phase === "implementing";
+  let resumeTreeContext = "";
+  if (resuming) {
+    const tree = await readTreeState(pi, cwd);
+    if (tree && tree !== "(unavailable)") {
+      resumeTreeContext =
+        `\n\n## Working tree is dirty (resumed session)\n` +
+        `The previous run left uncommitted changes. Inspect them before implementing:\n\n` +
+        "```\n" + tree + "\n```\n";
+    }
+  }
 
-    if (outcome.error) {
-      const retryUnit: UnitTask = {
-        behaviorId: behavior.id,
-        taskText: buildRetryTask(behavior, task, outcome),
-      };
-      outcome = await runUnit(retryUnit, cwd);
+  for (const behavior of units) {
+    const baseTask: UnitTask = {
+      behaviorId: behavior.id,
+      taskText: buildUnitTask(behavior, task) + resumeTreeContext,
+    };
+    resumeTreeContext = "";
+
+    let attempt = await runUnit(baseTask, cwd);
+    result.unitsRun++;
+    let taskText = baseTask.taskText;
+
+    for (let retry = 1; retry <= RETRY_BUDGET + 1; retry++) {
+      if (attempt.error) {
+        if (retry > RETRY_BUDGET) {
+          return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
+        }
+        taskText = buildRetryTask(behavior, task, attempt, retry);
+        attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
+        result.unitsRun++;
+        continue;
+      }
+
+      const subject = pickCommitSubject(attempt, behavior);
+      const commit = await commitAndGate(pi, cwd, subject, behavior);
+
+      if (commit.outcome === null) {
+        landedCommits.push(subject);
+        behavior.status = "done";
+        state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
+        state.lastHalt = undefined;
+        saveState(pi, state);
+        updateUi(state, ctx);
+        break;
+      }
+
+      if (commit.outcome.kind === "commit-timeout") {
+        return halt(
+          behavior.id,
+          `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms ` +
+            `(PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. ` +
+            `Raise the budget or scope the project's pre-commit hooks.`,
+        );
+      }
+
+      if (retry > RETRY_BUDGET) {
+        const detail =
+          commit.outcome.kind === "hook-rejected"
+            ? `pre-commit hook rejected the commit for ${behavior.id} after ${RETRY_BUDGET} retries`
+            : `no changes detected for ${behavior.id} after ${RETRY_BUDGET} retries`;
+        return halt(behavior.id, detail);
+      }
+
+      taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
+      attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
       result.unitsRun++;
     }
-
-    if (outcome.error) {
-      return halt(behavior.id, outcome.error);
-    }
-
-    const verify = await verifyTests(pi, cwd);
-    state.lastTestResults = verify.parsed;
-    saveState(pi, state);
-    updateUi(state, ctx);
-    if (!verify.ok) {
-      return halt(behavior.id, `Tests failed after unit ${behavior.id}: ${verify.detail}`);
-    }
-
-    const subject = pickCommitSubject(outcome, behavior);
-    const commit = await commitAll(pi, cwd, subject);
-    if (!commit.ok) {
-      return halt(behavior.id, `Commit failed for ${behavior.id}: ${commit.detail}`);
-    }
-    landedCommits.push(subject);
-
-    behavior.status = "done";
-    state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
-    saveState(pi, state);
-    updateUi(state, ctx);
   }
 
   const refusal = evaluateCompletionGate(state);
   if (refusal) {
-    return halt(
-      units[units.length - 1].id,
-      `Completion gate refused: ${refusal}`,
-    );
+    return halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`);
   }
   state.phase = "idle";
   saveState(pi, state);
@@ -251,6 +387,9 @@ export function buildUnitTask(behavior: Behavior, task: TaskContract): string {
     `Files: ${task.files.join(", ")}`,
     `Definition of done: ${task.done}`,
     "",
+    "## Contract (for reference)",
+    renderTaskContract(task),
+    "",
     "End with the JSON report block (summary, suggestedCommit) as instructed.",
   ]
     .filter(Boolean)
@@ -258,117 +397,26 @@ export function buildUnitTask(behavior: Behavior, task: TaskContract): string {
 }
 
 /**
- * Build the retry task text with the prior failure output appended.
+ * Build the retry task text for a unit-reported failure (pre-commit stage).
  *
  * @param behavior - The behavior being retried.
  * @param task     - The full task contract.
- * @param prior    - The failed outcome from the first attempt.
+ * @param prior    - The failed outcome from the previous attempt.
+ * @param attempt  - 1-based retry attempt number.
  * @returns Rendered retry task text.
  */
 export function buildRetryTask(
   behavior: Behavior,
   task: TaskContract,
   prior: ImplementerReport & { error?: string },
+  attempt: number,
 ): string {
   const failure = prior.error ?? prior.summary ?? "unknown failure";
   return (
+    `## Previous attempt failed (retry ${attempt}/${RETRY_BUDGET})\n` +
+    failure +
+    `\n\n## Original task\n` +
     buildUnitTask(behavior, task) +
-    `\n\n## Previous attempt failed\n${failure}\n\nFix the reported issues and re-verify.`
+    "\n\nFix the reported issues and re-verify."
   );
-}
-
-// ─── Verification, commit, tree state ──────────────────────────────────────────
-
-/** Outcome of a test verification run. */
-export interface VerifyResult {
-  /** True when the test command exited 0. */
-  ok: boolean;
-  /** Parsed pass/fail counts. */
-  parsed: { passed: number; failed: number; coveragePercent?: number };
-  /** Human-readable detail (exit code / failure excerpt). */
-  detail: string;
-}
-
-/**
- * Run the project's test command and parse the result.
- *
- * @param pi  - ExtensionAPI reference.
- * @param cwd - Project working directory.
- * @returns Verification outcome.
- */
-export async function verifyTests(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<VerifyResult> {
-  const [cmd, cmdArgs] = detectTestCommand(cwd);
-  let exitCode = 1;
-  let stdout = "";
-  try {
-    const res = await pi.exec(cmd, cmdArgs, { cwd, timeout: 120_000 });
-    exitCode = res.exitCode ?? 0;
-    stdout = res.stdout ?? "";
-  } catch (err) {
-    stdout = String((err as Error).message ?? err);
-  }
-  const parsed = parseTestOutput(exitCode, stdout);
-  return {
-    ok: exitCode === 0,
-    parsed,
-    detail:
-      exitCode === 0
-        ? `exit 0 passed=${parsed.passed}`
-        : `exit ${exitCode} ${stdout.slice(-400)}`,
-  };
-}
-
-/** Outcome of a commit attempt. */
-export interface CommitResult {
-  /** True when the commit landed. */
-  ok: boolean;
-  /** Human-readable detail on failure. */
-  detail: string;
-}
-
-/**
- * Stage all changes and commit with the given subject.
- *
- * @param pi      - ExtensionAPI reference.
- * @param cwd     - Project working directory.
- * @param subject - Conventional commit subject line.
- * @returns Commit outcome.
- */
-export async function commitAll(
-  pi: ExtensionAPI,
-  cwd: string,
-  subject: string,
-): Promise<CommitResult> {
-  try {
-    await pi.exec("git", ["add", "--all"], { cwd });
-    const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: 60_000 });
-    if ((res.exitCode ?? 1) !== 0) {
-      return { ok: false, detail: (res.stdout ?? res.stderr ?? "commit failed").slice(-400) };
-    }
-    return { ok: true, detail: subject };
-  } catch (err) {
-    return { ok: false, detail: String((err as Error).message ?? err) };
-  }
-}
-
-/**
- * Read a short git tree-state summary for halt reports.
- *
- * @param pi  - ExtensionAPI reference.
- * @param cwd - Project working directory.
- * @returns `git status --short` output, or "(unavailable)".
- */
-export async function readTreeState(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<string> {
-  try {
-    const res = await pi.exec("git", ["status", "--short"], { cwd });
-    return (res.stdout ?? "").trim() || "(clean)";
-  } catch {
-    return "(unavailable)";
-  }
 }

@@ -43,7 +43,7 @@ async function getToolCallHandler(pi: ExtensionAPI & { calls: Record<string, unk
 }
 
 describe("index.ts workflow wiring", () => {
-  it("registers the three phase commands and four workflow tools (T8)", async () => {
+  it("registers the three phase commands and the workflow tools (T8/T10)", async () => {
     const pi = mockPi();
     const factory = (await import("../extensions/index.ts")).default;
     factory(pi);
@@ -55,9 +55,10 @@ describe("index.ts workflow wiring", () => {
     assert.ok(!commands.includes("yolo"), "/yolo must not be registered");
 
     const tools = (pi.calls["registerTool"] ?? []).map(([d]: [{ name: string }]) => d.name);
-    for (const t of ["save_task", "run_tests", "mark_task_done", "complete_implementation"]) {
+    for (const t of ["save_task", "mark_task_done", "complete_implementation"]) {
       assert.ok(tools.includes(t), `tool ${t} should be registered`);
     }
+    assert.ok(!tools.includes("run_tests"), "run_tests must NOT be registered (deleted)");
     assert.ok(!tools.includes("back_to_finalize"), "back_to_finalize must not be registered");
   });
 
