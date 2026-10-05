@@ -5,6 +5,7 @@ import {
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
+import { runOrchestratedImplement } from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/subagent-runner.ts";
 import type {
@@ -422,7 +423,7 @@ describe("T1: HEAD-gate success path", () => {
     const commands = execLog.map((e) => (e.cmd === "git" ? e.args[0] : e.cmd));
     for (const c of commands) {
       assert.ok(
-        ["rev-parse", "status", "add", "commit"].includes(c),
+        ["rev-parse", "status", "add", "diff", "commit"].includes(c),
         `only git plumbing is allowed, got: ${c}`,
       );
     }
@@ -1182,5 +1183,151 @@ describe("mark_task_done", () => {
 
     assert.equal(res.isError, true);
     assert.match(res.content[0].text, /not in contract/);
+  });
+});
+
+// ═══ T5: staged-diff guard halts the loop before commit ═══
+describe("T5: staged-diff guard halts the loop before commit", () => {
+  function guardTask(): TaskContract {
+    return {
+      title: "Guard Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        {
+          id: "T1",
+          description: "first behavior",
+          expectedOutput: "e1",
+          kind: "test",
+          status: "active",
+          sourceFile: "tests/a.test.ts",
+        },
+      ],
+    };
+  }
+
+  interface ExecLogEntry { cmd: string; args: string[] }
+
+  /** Exec mock: add succeeds; staged diff shows an undeclared test deletion. */
+  function piWithTamperDiff(): {
+    pi: ExtensionAPI & { calls: Record<string, unknown[]> };
+    execLog: ExecLogEntry[];
+  } {
+    const pi = mockPi();
+    const execLog: ExecLogEntry[] = [];
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "add") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
+        return { stdout: "D\tpkg/old_test.go\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return {
+          stdout:
+            "diff --git a/pkg/old_test.go b/pkg/old_test.go\n" +
+            "--- a/pkg/old_test.go\n+++ b/pkg/old_test.go\n" +
+            "@@ -1,2 +0,0 @@\n" +
+            "-func TestOld(t *testing.T) { assert.True(t, true) }\n",
+          stderr: "",
+          exitCode: 0,
+        };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        throw new Error("git commit must never run when the guard trips");
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  it("halts immediately on test-guard: no commit, no fix subagent, lastHalt carries lines + guidance", async () => {
+    const { pi, execLog } = piWithTamperDiff();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: guardTask() };
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedImplement(
+      pi,
+      ctx,
+      state,
+      state.task!,
+      async (unit) => {
+        spawns.push(unit.behaviorId);
+        return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat(core): add first behavior" };
+      },
+    );
+
+    assert.equal(spawns.length, 1, "only the base unit runs — no fix subagent on test-guard");
+    assert.ok(
+      !execLog.some((e) => e.cmd === "git" && e.args[0] === "commit"),
+      "git commit must never be invoked when the guard trips",
+    );
+    assert.equal(result.complete, false);
+    assert.equal(result.haltedOn, "T1");
+    assert.match(result.error ?? "", /test-guard|Staged-diff guard/i);
+    assert.ok(state.lastHalt, "halt persists lastHalt");
+    assert.equal(state.lastHalt!.behaviorId, "T1");
+    assert.match(state.lastHalt!.error, /D\tpkg\/old_test\.go/, "lastHalt carries the name-status lines");
+    assert.match(state.lastHalt!.error, /re-declare/, "lastHalt carries re-declare guidance");
+    assert.match(state.lastHalt!.error, /\/finalize/, "lastHalt names the /discuss -> /finalize path");
+  });
+
+  it("clean staged diff: staged diff inspected between add and commit, commit lands once", async () => {
+    const pi = mockPi();
+    const execLog: ExecLogEntry[] = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "add") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: guardTask() };
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedImplement(
+      pi,
+      ctx,
+      state,
+      state.task!,
+      async (unit) => {
+        spawns.push(unit.behaviorId);
+        return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat(core): add first behavior" };
+      },
+    );
+
+    assert.equal(result.complete, true, "clean staged diff lands the commit");
+    assert.equal(state.task!.behaviors[0].status, "done");
+    const gitCommands = execLog.filter((e) => e.cmd === "git").map((e) => e.args[0]);
+    const addIdx = gitCommands.indexOf("add");
+    const diffIdx = gitCommands.indexOf("diff");
+    const commitIdx = gitCommands.indexOf("commit");
+    assert.ok(addIdx !== -1 && diffIdx !== -1 && commitIdx !== -1, "add, diff, commit all run");
+    assert.ok(addIdx < diffIdx && diffIdx < commitIdx, "staged diff inspected between add and commit");
   });
 });

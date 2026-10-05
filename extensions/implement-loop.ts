@@ -16,6 +16,7 @@ import {
   RETRY_BUDGET,
   buildFixTask,
   classifyCommit,
+  classifyStagedDiff,
   type GateOutcome,
 } from "./commit-gate.ts";
 
@@ -118,11 +119,16 @@ export function pickCommitSubject(
  * Stage all changes and commit with the given subject; classify via HEAD gate.
  *
  * Never passes --no-verify: the project's pre-commit hooks are the gate.
+ * Before committing, inspects the staged diff (git diff --cached) against
+ * the tamper guard: undeclared test deletions, sourceFile deletions, and
+ * retry-touching of undeclared tests block the commit without invoking it.
  *
  * @param pi       - ExtensionAPI reference.
  * @param cwd      - Working directory.
  * @param subject  - Conventional commit subject line.
  * @param behavior - The behavior being committed (for investigations).
+ * @param task     - The task contract (declared files + test-kind sourceFiles).
+ * @param attempt  - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
  * @returns The classified commit attempt.
  */
 async function commitAndGate(
@@ -130,6 +136,8 @@ async function commitAndGate(
   cwd: string,
   subject: string,
   behavior: Behavior,
+  task: TaskContract,
+  attempt: number,
 ): Promise<CommitAttempt> {
   const timeoutMs = getCommitTimeoutMs();
   const headBefore = await readGitHead(pi, cwd);
@@ -138,6 +146,29 @@ async function commitAndGate(
   let timedOut = false;
   try {
     await pi.exec("git", ["add", "--all"], { cwd });
+    // Staged-diff tamper guard: inspect before committing. On a violation the
+    // commit is never invoked — the loop halts with a test-guard outcome.
+    const nameStatusRes = await pi.exec("git", ["diff", "--cached", "--name-status"], { cwd });
+    const unifiedRes = await pi.exec("git", ["diff", "--cached"], { cwd });
+    const testKindSourceFiles = task.behaviors
+      .filter((b) => b.kind === "test" && b.sourceFile)
+      .map((b) => b.sourceFile!);
+    const staged = classifyStagedDiff({
+      nameStatus: nameStatusRes.stdout ?? "",
+      declaredFiles: task.files,
+      testKindSourceFiles,
+      attempt,
+      unifiedDiff: unifiedRes.stdout ?? "",
+    });
+    if (staged.kind === "test-guard") {
+      return {
+        outcome: {
+          kind: "test-guard",
+          investigation: staged.investigation,
+          violations: staged.violations,
+        },
+      };
+    }
     const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
     commitExitCode = res.exitCode ?? 1;
     commitOutput = [res.stdout ?? "", res.stderr ?? ""].filter(Boolean).join("\n");
@@ -295,7 +326,7 @@ export async function runOrchestratedImplement(
       }
 
       const subject = pickCommitSubject(attempt, behavior);
-      const commit = await commitAndGate(pi, cwd, subject, behavior);
+      const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry);
 
       if (commit.outcome === null) {
         landedCommits.push(subject);
@@ -305,6 +336,16 @@ export async function runOrchestratedImplement(
         saveState(pi, state);
         updateUi(state, ctx);
         break;
+      }
+
+      if (commit.outcome.kind === "test-guard") {
+        return halt(
+          behavior.id,
+          `Staged-diff guard blocked the commit for ${behavior.id} — tests are the specification. ` +
+            `If the contract requires updating or removing test paths, re-declare them via ` +
+            `/discuss -> /finalize listing those paths in files, then /implement resumes.\n\n` +
+            commit.outcome.investigation,
+        );
       }
 
       if (commit.outcome.kind === "commit-timeout") {
