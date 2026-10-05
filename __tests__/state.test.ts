@@ -7,6 +7,7 @@ import {
   loadState,
   updateUi,
   toggleWidgetVisible,
+  resetWidgetVisibility,
   type WorkflowState,
 } from "../extensions/state.ts";
 import { getPackageRoot } from "../extensions/utils.ts";
@@ -339,5 +340,39 @@ describe("toggleWidgetVisible shows and hides full widget content (T2)", () => {
     assert.match(rec.titles[rec.titles.length - 1]!, /^finalizing · /);
 
     toggleWidgetVisible(); // restore hidden default for other suites
+  });
+});
+
+describe("resetWidgetVisibility restores the hidden default (T3)", () => {
+  const task = {
+    title: "Reset Task", instruction: "i", files: [], done: "d",
+    behaviors: [
+      { id: "T1", description: "x", expectedOutput: "y", kind: "test" as const, status: "active" as const },
+    ],
+  };
+
+  it("toggled-on widget is hidden again after resetWidgetVisible", () => {
+    const rec = ctxWithState({
+      phase: "implementing",
+      specText: "reset topic",
+      task,
+      lastTestResults: { passed: 1, failed: 0 },
+    });
+
+    toggleWidgetVisible();
+    updateUi(loadState(rec.ctx), rec.ctx);
+    const shown = rec.widgetCalls[rec.widgetCalls.length - 1]!;
+    assert.ok(Array.isArray(shown.lines), "lines rendered while shown");
+
+    resetWidgetVisibility();
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    const hidden = rec.widgetCalls[rec.widgetCalls.length - 1]!;
+    assert.equal(hidden.key, "workflow-todos");
+    assert.equal(hidden.lines, undefined, "widget hidden after reset");
+    assert.ok(
+      rec.statuses.some((s) => s.key === "workflow" && s.value !== undefined),
+      "status still reflects the phase after reset",
+    );
   });
 });

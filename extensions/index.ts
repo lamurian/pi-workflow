@@ -1,6 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
-import { loadState, updateUi } from "./state.ts";
+import {
+  loadState,
+  updateUi,
+  toggleWidgetVisible,
+  resetWidgetVisibility,
+} from "./state.ts";
 import { DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
@@ -23,6 +28,7 @@ export default function (pi: ExtensionAPI): void {
 
   // ─── Session Lifecycle ──────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
+    resetWidgetVisibility();
     const state = loadState(ctx);
     updateUi(state, ctx);
     setupAutocomplete(ctx, ctx.cwd);
@@ -117,6 +123,15 @@ export default function (pi: ExtensionAPI): void {
       "Valid only after /finalize. Usage: /implement [note]",
     handler: async (args, ctx) => {
       await runImplement(args, pi, ctx);
+    },
+  });
+
+  // ── /task ──────────────────────────────────────────────────
+  pi.registerCommand("task", {
+    description: "Show/hide the workflow widget. Usage: /task",
+    handler: async (_args, ctx) => {
+      toggleWidgetVisible();
+      updateUi(loadState(ctx), ctx);
     },
   });
 }

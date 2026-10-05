@@ -1,6 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { toggleWidgetVisible } from "../extensions/state.ts";
 
 function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};
@@ -14,6 +15,7 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
     on: record("on") as ExtensionAPI["on"],
     registerCommand: record("registerCommand") as ExtensionAPI["registerCommand"],
     registerTool: record("registerTool") as ExtensionAPI["registerTool"],
+    registerShortcut: record("registerShortcut") as ExtensionAPI["registerShortcut"],
     appendEntry: record("appendEntry") as ExtensionAPI["appendEntry"],
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
     getActiveTools: () => ["read", "write"],
@@ -131,5 +133,102 @@ describe("index.ts workflow wiring", () => {
 
     const setCalls = pi.calls["setActiveTools"] ?? [];
     assert.equal(setCalls.length, 0, "setActiveTools must never be called");
+  });
+});
+
+// ── /task widget toggle (T3) ────────────────────────────────
+
+interface TaskCtx {
+  ctx: ExtensionContext;
+  widgetCalls: Array<{ key: string; lines: string[] | undefined }>;
+}
+
+function taskCtxFor(phase: string): TaskCtx {
+  const widgetCalls: Array<{ key: string; lines: string[] | undefined }> = [];
+  const ctx = {
+    cwd: "/tmp/test",
+    sessionManager: {
+      getBranch: () => [
+        {
+          type: "custom",
+          customType: "workflow-state",
+          data: {
+            phase,
+            specText: "t",
+            task: {
+              title: "Wiring Task",
+              instruction: "i",
+              files: [],
+              done: "d",
+              behaviors: [
+                { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+              ],
+            },
+          },
+        },
+      ],
+    },
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setTitle: () => {},
+      setWidget: (key: string, lines: string[] | undefined) => {
+        widgetCalls.push({ key, lines });
+      },
+      theme: { fg: (_: string, t: string) => t },
+      addAutocompleteProvider: () => {},
+    },
+  } as unknown as ExtensionContext;
+  return { ctx, widgetCalls };
+}
+
+describe("/task command and session_start widget reset (T3)", () => {
+  it("registers the task command, a handler that toggles the widget, and no keyboard shortcut", async () => {
+    const pi = mockPi();
+    const factory = (await import("../extensions/index.ts")).default;
+    factory(pi);
+
+    const commands = (pi.calls["registerCommand"] ?? []).map(([n]: [string]) => n);
+    assert.ok(commands.includes("task"), "command /task should be registered");
+
+    const shortcutCalls = pi.calls["registerShortcut"] ?? [];
+    assert.equal(shortcutCalls.length, 0, "no keyboard shortcut must be registered");
+
+    const taskDef = (pi.calls["registerCommand"] ?? []).find(
+      ([n]: [string]) => n === "task",
+    )![1] as { handler: (args: string, ctx: ExtensionContext) => Promise<void> | void };
+
+    const { ctx, widgetCalls } = taskCtxFor("implementing");
+
+    // Hidden by default: first call shows, second call hides.
+    await taskDef.handler("", ctx);
+    const first = widgetCalls[widgetCalls.length - 1]!;
+    assert.ok(Array.isArray(first.lines), "first /task invocation shows widget lines");
+    assert.match(first.lines!.join("\n"), /Wiring Task/);
+
+    await taskDef.handler("", ctx);
+    const second = widgetCalls[widgetCalls.length - 1]!;
+    assert.equal(second.lines, undefined, "second /task invocation hides the widget");
+  });
+
+  it("session_start resets widget visibility to hidden", async () => {
+    const pi = mockPi();
+    const factory = (await import("../extensions/index.ts")).default;
+    factory(pi);
+
+    const sessionStart = (pi.calls["on"] ?? []).find(
+      ([e]: [string]) => e === "session_start",
+    )![1] as (event: unknown, ctx: ExtensionContext) => Promise<void>;
+
+    // Simulate a resumed session: widget was toggled visible mid-process.
+    toggleWidgetVisible();
+
+    const { ctx, widgetCalls } = taskCtxFor("implementing");
+    await sessionStart({}, ctx);
+
+    const last = widgetCalls[widgetCalls.length - 1]!;
+    assert.equal(last.lines, undefined, "session_start must leave the widget hidden");
+
+    toggleWidgetVisible(); // restore hidden default for other suites
   });
 });

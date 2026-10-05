@@ -204,6 +204,16 @@ export function toggleWidgetVisible(): boolean {
 }
 
 /**
+ * Reset widget visibility to hidden.
+ *
+ * Called on session_start so every session — including a resume in the
+ * same process — starts with the workflow widget hidden.
+ */
+export function resetWidgetVisibility(): void {
+  widgetVisible = false;
+}
+
+/**
  * Update the UI status, widget, and session title to reflect the phase.
  *
  * Uses only the string-array form of setWidget so it works in RPC mode
