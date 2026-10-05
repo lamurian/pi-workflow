@@ -600,6 +600,53 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     assert.match(lastSaved[1].lastHalt?.error ?? "", /no changes detected for T1 after 5 retries/);
     assert.match(lastSaved[1].lastHalt?.error ?? "", /No changes detected for T1/);
   });
+
+  it("commit-process timeout halts as infrastructure failure — no fix subagent spawned", async () => {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        // Simulate pi.exec hitting the timeout budget.
+        throw new Error("Command timed out after 300000ms: git commit");
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+    const spawns: Array<{ taskText: string }> = [];
+
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ taskText: unit.taskText });
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 1, "timeout must NOT spawn a fix subagent — retrying cannot fix a slow hook");
+    assert.equal(state.phase, "implementing", "halt keeps the implementing phase");
+    assert.equal(state.task!.behaviors[0]!.status, "active");
+
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    const halt = lastSaved[1].lastHalt;
+    assert.equal(halt?.behaviorId, "T1");
+    assert.match(halt?.error ?? "", /timed out after 300000ms/, "lastHalt.error names the timeout with the budget");
+    assert.match(halt?.error ?? "", /PI_COMMIT_TIMEOUT_MS/);
+    assert.match(halt?.error ?? "", /infrastructure failure, not a hook verdict/i);
+    assert.doesNotMatch(
+      halt?.error ?? "",
+      /pre-commit hook rejected/,
+      "a timeout must not be reported as a hook verdict",
+    );
+
+    const report = notifyCalls[notifyCalls.length - 1]!;
+    assert.match(report, /timed out after 300000ms/, "handoff names the timeout");
+  });
 });
 
 // ═══ T4: retry once, halt with handoff, resume on re-run ═══
