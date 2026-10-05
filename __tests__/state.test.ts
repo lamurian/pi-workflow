@@ -6,6 +6,7 @@ import {
   transitionTo,
   loadState,
   updateUi,
+  toggleWidgetVisible,
   type WorkflowState,
 } from "../extensions/state.ts";
 import { getPackageRoot } from "../extensions/utils.ts";
@@ -261,5 +262,82 @@ describe("updateUi widget visibility gate (T1)", () => {
       "status should be cleared",
     );
     assert.equal(rec.titles[0], "pi");
+  });
+});
+
+describe("toggleWidgetVisible shows and hides full widget content (T2)", () => {
+  const task = {
+    title: "Toggle Task", instruction: "i", files: [], done: "d",
+    behaviors: [
+      { id: "T1", description: "first", expectedOutput: "y", kind: "test" as const, status: "active" as const },
+      { id: "T2", description: "second", expectedOutput: "w", kind: "manual" as const, status: "done" as const },
+      { id: "T3", description: "third", expectedOutput: "v", kind: "test" as const, status: "removed" as const },
+    ],
+  };
+
+  it("first toggle returns true and updateUi renders the full widget lines", () => {
+    const rec = ctxWithState({
+      phase: "implementing",
+      specText: "toggle topic",
+      task,
+      lastTestResults: { passed: 3, failed: 1 },
+    });
+
+    const visible = toggleWidgetVisible();
+    assert.equal(visible, true, "first toggle returns true");
+
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    const call = rec.widgetCalls[rec.widgetCalls.length - 1]!;
+    assert.ok(Array.isArray(call.lines), "lines passed when shown");
+    assert.ok(call.lines![0]!.startsWith("◉"), "first line is the phase header");
+    const flat = call.lines!.join("\n");
+    assert.match(flat, /Toggle Task/, "task title rendered");
+    assert.match(flat, /○ \[test\] T1: first/, "active behavior marked ○");
+    assert.match(flat, /✓ \[manual\] T2: second/, "done behavior marked ✓");
+    assert.match(flat, /– \[test\] T3: third/, "removed behavior marked –");
+    assert.match(flat, /tests: 3✓ 1✗/, "implementing test summary rendered");
+
+    toggleWidgetVisible(); // restore hidden default for other tests
+  });
+
+  it("toggle on renders full lines; second toggle reverts to hidden (self-contained cycle)", () => {
+    const rec = ctxWithState({
+      phase: "implementing",
+      specText: "toggle topic",
+      task,
+      lastTestResults: { passed: 3, failed: 1 },
+    });
+
+    const shown = toggleWidgetVisible();
+    assert.equal(shown, true, "toggle on returns true");
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    const shownCall = rec.widgetCalls[rec.widgetCalls.length - 1]!;
+    assert.ok(Array.isArray(shownCall.lines), "lines passed when shown");
+
+    const hidden = toggleWidgetVisible();
+    assert.equal(hidden, false, "second toggle returns false");
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    const hiddenCall = rec.widgetCalls[rec.widgetCalls.length - 1]!;
+    assert.equal(hiddenCall.key, "workflow-todos");
+    assert.equal(hiddenCall.lines, undefined, "widget hidden again");
+  });
+
+  it("status and title still update while toggled on", () => {
+    const rec = ctxWithState({
+      phase: "finalizing",
+      specText: "toggle topic",
+      task,
+    });
+
+    toggleWidgetVisible();
+    updateUi(loadState(rec.ctx), rec.ctx);
+
+    assert.equal(rec.statuses[rec.statuses.length - 1]!.value, "◉ finalizing");
+    assert.match(rec.titles[rec.titles.length - 1]!, /^finalizing · /);
+
+    toggleWidgetVisible(); // restore hidden default for other suites
   });
 });

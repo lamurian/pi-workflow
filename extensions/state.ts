@@ -190,6 +190,20 @@ function buildTitle(state: WorkflowState): string {
 }
 
 /**
+ * Toggle workflow widget visibility.
+ *
+ * Flips the in-memory `widgetVisible` flag and returns the new value.
+ * The caller re-renders via updateUi afterwards. State is not
+ * persisted: a session reload starts hidden again.
+ *
+ * @returns true when the widget is now visible.
+ */
+export function toggleWidgetVisible(): boolean {
+  widgetVisible = !widgetVisible;
+  return widgetVisible;
+}
+
+/**
  * Update the UI status, widget, and session title to reflect the phase.
  *
  * Uses only the string-array form of setWidget so it works in RPC mode
