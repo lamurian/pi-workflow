@@ -340,6 +340,10 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
 /**
  * Build a completion report from the workflow state.
  *
+ * Test behaviors appear under Test Results. Completed manual behaviors are
+ * listed under "Manual verification required" so the engineer can confirm
+ * them after the fact; the section is omitted when none completed.
+ *
  * @param state - Current workflow state.
  * @returns A markdown report string.
  */
@@ -357,5 +361,16 @@ export function generateReport(state: WorkflowState): string {
   if (results?.coveragePercent !== undefined) {
     lines.push(`- Coverage: ${results.coveragePercent}%`);
   }
+
+  const completedManual = (task?.behaviors ?? []).filter(
+    (b) => b.kind === "manual" && b.status === "done",
+  );
+  if (completedManual.length > 0) {
+    lines.push("", "## Manual verification required");
+    for (const b of completedManual) {
+      lines.push(`- ${b.id}: ${b.description}`);
+    }
+  }
+
   return lines.join("\n");
 }

@@ -594,6 +594,62 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
   });
 });
 
+// ═══ T6: manual behaviors flagged in the final report ═══
+describe("T6: manual behaviors flagged in the final report", () => {
+  it("lists completed manual behaviors under 'Manual verification required'", async () => {
+    const { generateReport } = await import("../extensions/implement.ts");
+    const state: WorkflowState = {
+      phase: "idle",
+      specText: "topic",
+      lastTestResults: { passed: 4, failed: 0, coveragePercent: 92 },
+      task: {
+        title: "Ship the thing",
+        instruction: "do the thing",
+        files: ["src/a.ts"],
+        done: "tests green + docs updated",
+        behaviors: [
+          { id: "T1", description: "adds retry backoff", expectedOutput: "retries", kind: "test", status: "done" },
+          { id: "M1", description: "updates README usage section", expectedOutput: "docs show new flag", kind: "manual", status: "done" },
+          { id: "M2", description: "regenerates the changelog", expectedOutput: "changelog lists the release", kind: "manual", status: "done" },
+        ],
+      },
+    };
+
+    const report = generateReport(state);
+
+    assert.match(report, /Manual verification required/);
+    assert.match(report, /M1/);
+    assert.match(report, /updates README usage section/);
+    assert.match(report, /M2/);
+    assert.match(report, /regenerates the changelog/);
+  });
+
+  it("keeps test behaviors under Test Results and omits the manual section when none completed", async () => {
+    const { generateReport } = await import("../extensions/implement.ts");
+    const state: WorkflowState = {
+      phase: "idle",
+      specText: "topic",
+      lastTestResults: { passed: 4, failed: 0 },
+      task: {
+        title: "Ship the thing",
+        instruction: "do the thing",
+        files: ["src/a.ts"],
+        done: "tests green",
+        behaviors: [
+          { id: "T1", description: "adds retry backoff", expectedOutput: "retries", kind: "test", status: "done" },
+        ],
+      },
+    };
+
+    const report = generateReport(state);
+
+    assert.match(report, /Test Results/);
+    assert.match(report, /Passed:\s*4/);
+    assert.match(report, /adds retry backoff/);
+    assert.doesNotMatch(report, /Manual verification required/);
+  });
+});
+
 // ═══ tool registration (T8) ═══
 describe("implement tool registration", () => {
   it("registers exactly run_tests, mark_task_done, complete_implementation", () => {
