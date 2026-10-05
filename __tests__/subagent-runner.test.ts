@@ -273,8 +273,129 @@ describe("runScoutSubprocess integration (real pi)", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// runScoutSubprocess — kill signal handling
+// T5 — implementer subprocess argv builder and report parser
 // ═══════════════════════════════════════════════════════════════════════════════
+
+describe("buildImplementerArgs (T5)", () => {
+  const SYSTEM = "You are an implementation unit.";
+  const TASK = "Implement behavior T3: add retry backoff.";
+
+  it("includes the lean flag set", async () => {
+    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const args = buildImplementerArgs(SYSTEM, TASK);
+
+    assert.ok(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "json");
+    assert.ok(args.includes("-p"), "should be non-interactive");
+    assert.ok(args.includes("--no-session"));
+    assert.ok(args.includes("--no-extensions"));
+    assert.ok(args.includes("--no-skills"));
+    assert.ok(args.includes("--offline"));
+    const t = args.indexOf("--thinking");
+    assert.notEqual(t, -1);
+    assert.equal(args[t + 1], "minimal");
+  });
+
+  it("restricts --tools to write,edit,bash", async () => {
+    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const args = buildImplementerArgs(SYSTEM, TASK);
+
+    const idx = args.indexOf("--tools");
+    assert.notEqual(idx, -1, "--tools should be present");
+    assert.equal(args[idx + 1], "write,edit,bash");
+    assert.doesNotMatch(
+      args[idx + 1],
+      /run_tests|mark_task_done|commit_changes|commit_amend/,
+      "implementer must not receive workflow or commit tools",
+    );
+  });
+
+  it("sources --append-system-prompt from content/unit-prompt.md", async () => {
+    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const { loadContent } = await import("../extensions/utils.ts");
+    const unitPrompt = await loadContent("unit-prompt.md");
+
+    const args = buildImplementerArgs(unitPrompt, TASK);
+
+    const idx = args.indexOf("--append-system-prompt");
+    assert.notEqual(idx, -1);
+    assert.equal(args[idx + 1], unitPrompt, "must pass the literal unit prompt text");
+  });
+
+  it("appends the unit task text as the final positional argument", async () => {
+    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const args = buildImplementerArgs(SYSTEM, TASK);
+    assert.equal(args[args.length - 1], TASK);
+  });
+});
+
+describe("parseImplementerReport (T5)", () => {
+  function assistantEvent(text: string): string {
+    return JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+  }
+
+  it("extracts summary and suggestedCommit from the last assistant message", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = [
+      assistantEvent("First pass, still working."),
+      assistantEvent(
+        'Done.\n```json\n{"summary": "added retry backoff with jitter", "suggestedCommit": "feat(http): add retry backoff"}\n```',
+      ),
+    ].join("\n");
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "added retry backoff with jitter");
+    assert.equal(report.suggestedCommit, "feat(http): add retry backoff");
+  });
+
+  it("uses the final message when no JSON block is present", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = assistantEvent("Implemented the behavior and tests pass.");
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "Implemented the behavior and tests pass.");
+    assert.equal(report.suggestedCommit, undefined);
+  });
+
+  it("tolerates malformed JSON lines between events", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = [
+      "{{{ not json",
+      assistantEvent('ok\n```json\n{"summary": "touched one file", "suggestedCommit": "fix: handle null head"}\n```'),
+      "}}} still not json",
+    ].join("\n");
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "touched one file");
+    assert.equal(report.suggestedCommit, "fix: handle null head");
+  });
+
+  it("tolerates killed processes: empty and partial output do not throw", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    assert.deepEqual(parseImplementerReport(""), { summary: "" });
+    assert.deepEqual(parseImplementerReport("\n\n"), { summary: "" });
+    // Killed mid-write: truncated JSON event, no closing braces.
+    const partial = assistantEvent("half a mess").slice(0, 25);
+    assert.deepEqual(parseImplementerReport(partial), { summary: "" });
+  });
+
+  it("falls back to the whole message when the JSON block is malformed", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = assistantEvent('Tried.\n```json\n{"summary": "broken\n```');
+
+    const report = parseImplementerReport(stdout);
+
+    assert.match(report.summary, /Tried\./);
+    assert.equal(report.suggestedCommit, undefined);
+  });
+});
+
 
 describe("runScoutSubprocess kill handling", () => {
   it("rejects with the abort reason when killed by signal", async () => {

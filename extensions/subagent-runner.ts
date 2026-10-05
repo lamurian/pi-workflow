@@ -364,6 +364,118 @@ export async function runScoutSubprocess(
   }
 }
 
+// ─── Implementer subprocess (orchestrator units) ─────────────────────────────
+
+/** Tools granted to an implementer subprocess: filesystem + bash only. */
+const IMPLEMENTER_TOOLS = "write,edit,bash";
+
+/** Structured report extracted from an implementer subprocess output. */
+export interface ImplementerReport {
+  /** One or two sentences on what the unit changed and how it verified. */
+  summary: string;
+  /** Conventional commit subject suggested by the unit (no behavior id). */
+  suggestedCommit?: string;
+}
+
+/**
+ * Build the argv array for an implementer subprocess.
+ *
+ * Lean flags skip extension/skill/session loading for fast startup and
+ * determinism. Tools are restricted to write/edit/bash — the unit cannot
+ * commit or touch workflow state; the orchestrator owns both. Does NOT
+ * pass --model so the subprocess uses the user's default model.
+ *
+ * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
+ * @param taskText     - The behavior slice for this unit.
+ * @returns Array of CLI arguments for the implementer subprocess.
+ */
+export function buildImplementerArgs(
+  systemPrompt: string,
+  taskText: string,
+): string[] {
+  const args: string[] = [
+    "--mode", "json",
+    "-p",
+    "--no-session",
+    "--no-extensions",
+    "--no-skills",
+    "--offline",
+    "--thinking", "minimal",
+    "--tools", IMPLEMENTER_TOOLS,
+  ];
+  if (systemPrompt.trim()) {
+    args.push("--append-system-prompt", systemPrompt);
+  }
+  args.push(taskText);
+  return args;
+}
+
+/**
+ * Extract the last assistant text from JSON-mode event output.
+ *
+ * Malformed JSON lines (e.g. from a killed process) are skipped.
+ *
+ * @param stdout - Raw JSONL output from the subprocess.
+ * @returns The last assistant message text, or "" when none parsed.
+ */
+function lastAssistantText(stdout: string): string {
+  let last = "";
+  for (const line of stdout.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
+      };
+      if (
+        (event.type === "message_end" || event.type === "tool_result_end") &&
+        event.message?.role === "assistant"
+      ) {
+        const parts = event.message.content
+          ?.filter((c) => c.type === "text" && c.text)
+          .map((c) => c.text as string);
+        if (parts && parts.length > 0) last = parts.join("\n").trim();
+      }
+    } catch {
+      // Skip malformed JSON lines (truncated writes from killed processes).
+    }
+  }
+  return last;
+}
+
+/**
+ * Parse implementer JSON-mode output into a structured report.
+ *
+ * Reads the final fenced ```json block from the last assistant message.
+ * Tolerates malformed JSON lines and killed processes: when no block or
+ * only a broken block is found, falls back to the whole message text (or
+ * an empty summary). Never throws.
+ *
+ * @param stdout - Raw JSONL output from the implementer subprocess.
+ * @returns The parsed report; `suggestedCommit` absent when unavailable.
+ */
+export function parseImplementerReport(stdout: string): ImplementerReport {
+  const text = lastAssistantText(stdout);
+  if (!text) return { summary: "" };
+  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]!) as Record<string, unknown>;
+      if (typeof parsed.summary === "string") {
+        return {
+          summary: parsed.summary,
+          ...(typeof parsed.suggestedCommit === "string"
+            ? { suggestedCommit: parsed.suggestedCommit }
+            : {}),
+        };
+      }
+    } catch {
+      // Broken JSON block — fall through to whole-message summary.
+    }
+  }
+  return { summary: text.trim() };
+}
+
 // ─── Concurrency limiter ───────────────────────────────────────────────────────
 
 /**
