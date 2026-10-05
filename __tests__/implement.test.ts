@@ -558,6 +558,48 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     assert.equal(typeof halt?.at, "string", "timestamp recorded");
     assert.equal(typeof halt?.treeState, "string", "tree state recorded");
   });
+
+  it("no-changes anomaly: retry note, budget-counted, behavior never marked done", async () => {
+    // Hook path irrelevant here: the unit lands no file changes, so the
+    // commit finds nothing to commit — HEAD unchanged, tree clean.
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: "nothing to commit, working tree clean", exitCode: 1 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ taskText: string }> = [];
+
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ taskText: unit.taskText });
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 6, "initial + 5 budgeted retries for the no-changes anomaly");
+    assert.match(spawns[1]!.taskText, /No changes detected for T1/, "first retry instruction names the anomaly");
+    assert.match(spawns[1]!.taskText, /retry 1\/5/);
+    assert.match(spawns[5]!.taskText, /retry 5\/5/);
+    assert.equal(state.task!.behaviors[0]!.status, "active", "behavior is never marked done without changes");
+    assert.equal(state.phase, "implementing");
+
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    assert.match(lastSaved[1].lastHalt?.error ?? "", /no changes detected for T1 after 5 retries/);
+    assert.match(lastSaved[1].lastHalt?.error ?? "", /No changes detected for T1/);
+  });
 });
 
 // ═══ T4: retry once, halt with handoff, resume on re-run ═══
