@@ -18,13 +18,39 @@ import {
 } from "./task-contract.ts";
 
 /**
+ * Parse `/implement` arguments into a mode flag and an engineer's note.
+ *
+ * Recognizes a `--solo` flag anywhere in the args; everything else is
+ * treated as the engineer's note appended to the prompt.
+ *
+ * @param args - Raw argument string from the /implement command.
+ * @returns `{ solo, note }` where `solo` selects the in-session loop.
+ */
+export function parseImplementArgs(args: string): { solo: boolean; note: string } {
+  const tokens = args.split(/\s+/).filter(Boolean);
+  const solo = tokens.includes("--solo");
+  const note = tokens.filter((t) => t !== "--solo").join(" ").trim();
+  return { solo, note };
+}
+
+/**
+ * Detect whether the `commit_changes` tool is registered in this session.
+ *
+ * @param pi - ExtensionAPI reference.
+ * @returns True when a tool named `commit_changes` is registered.
+ */
+export function hasCommitTool(pi: ExtensionAPI): boolean {
+  return pi.getAllTools().some((t) => t.name === "commit_changes");
+}
+
+/**
  * Start the TDD implementation phase from a finalizing task contract.
  *
- * Valid only from the finalizing phase. Consumes state.task, transitions
- * to implementing, and hands the agent a TDD prompt built from the
- * contract, with the optional engineer's note appended as guidance.
+ * Valid only from the finalizing phase. Consumes state.task and transitions
+ * to implementing. By default runs the orchestrator loop; pass `--solo` to
+ * hand the agent an in-session TDD prompt instead.
  *
- * @param args - Optional note appended to the TDD prompt.
+ * @param args - Optional `--solo` flag plus engineer's note.
  * @param pi   - ExtensionAPI reference.
  * @param ctx  - Extension context.
  */
@@ -48,8 +74,28 @@ export async function runImplement(
   }
   transitionTo(pi, state, "implementing");
   updateUi(state, ctx);
-  let prompt = await buildTddPrompt(task);
-  const note = args.trim();
+  const { solo, note } = parseImplementArgs(args);
+  // NOTE(T3): the orchestrator loop replaces the unconditional solo call
+  // below; until it lands, both flag states run the in-session loop.
+  void solo;
+  await runSoloImplement(note, pi, ctx, task);
+}
+
+/**
+ * In-session TDD loop (`--solo`): steer the agent with the TDD prompt.
+ *
+ * @param note  - Optional engineer's note appended to the prompt.
+ * @param pi    - ExtensionAPI reference.
+ * @param ctx   - Extension context.
+ * @param task  - The task contract.
+ */
+async function runSoloImplement(
+  note: string,
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  task: TaskContract,
+): Promise<void> {
+  let prompt = await buildTddPrompt(task, hasCommitTool(pi));
   if (note) {
     prompt +=
       `\n\n## Engineer's note\n\n${note}` +
@@ -70,9 +116,21 @@ export async function runImplement(
  * @param task - The task contract.
  * @returns The rendered TDD prompt string.
  */
-export async function buildTddPrompt(task: TaskContract): Promise<string> {
+export async function buildTddPrompt(
+  task: TaskContract,
+  hasCommitTool = false,
+): Promise<string> {
   const template = await loadContent("tdd-prompt.md");
-  return renderTemplate(template, { task: renderTaskContract(task) });
+  const commitInstruction = hasCommitTool
+    ? "\n## Commits\n\n" +
+      "After each `mark_task_done`, call `commit_changes` with a conventional commit subject line " +
+      "(`type(scope): description`, ≤75 chars) that describes what the behavior changed. " +
+      "Do NOT include the behavior id in the subject.\n"
+    : "";
+  return renderTemplate(template, {
+    task: renderTaskContract(task),
+    commitInstruction,
+  });
 }
 
 /**

@@ -27,5 +27,6 @@ Skip `removed` behaviors.
 - The contract is authoritative. An engineer's note (if any) is guidance only — do not implement beyond the contract.
 - If implementation surfaces a bug or behavior not in the contract: do not act on it and do not attempt to revise the contract (`save_task` is rejected in this phase). Report it to the user with a recommendation and wait — the user controls the flow back via /discuss → /finalize → /implement.
 - When all `active` behaviors are done and tests pass, call `complete_implementation`.
+{{commitInstruction}}
 
 **Sandbox handoff:** If a command cannot be executed because it is blocked by the sandbox (bwrap mount failure, whitelist block, permission denied, EACCES): do NOT attempt workarounds or retries. Stop that step and hand off — state the exact command, why it is blocked, and what output to check. Request the user run it, then continue.

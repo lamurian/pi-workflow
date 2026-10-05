@@ -29,6 +29,7 @@ function mockPi(activeTools: string[] = DEFAULT_ACTIVE_TOOLS): ExtensionAPI & { 
     appendEntry: record("appendEntry") as ExtensionAPI["appendEntry"],
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
     getActiveTools: () => [...activeTools],
+    getAllTools: () => activeTools.map((name) => ({ name })),
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
     exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
     calls,
@@ -164,6 +165,44 @@ describe("runImplement", () => {
     assert.equal(notifyCalls.length, 1, "runImplement should notify exactly once");
     assert.match(notifyCalls[0], /Starting TDD implementation/);
     assert.match(notifyCalls[0], /behavior by behavior/);
+  });
+});
+
+// ═══ T1: capability-conditional commit instruction ═══
+describe("T1: capability-conditional commit instruction", () => {
+  it("buildTddPrompt(task, true) instructs commit_changes after each mark, no behavior id", async () => {
+    const { buildTddPrompt } = await import("../extensions/implement.ts");
+    const prompt = await buildTddPrompt(finalizingState().task!, true);
+    assert.match(prompt, /commit_changes/);
+    assert.match(prompt, /conventional/i);
+    assert.match(prompt, /after each `mark_task_done`/i);
+    assert.match(prompt, /Do NOT include the behavior id/i);
+  });
+
+  it("buildTddPrompt(task, false) contains no commit instruction", async () => {
+    const { buildTddPrompt } = await import("../extensions/implement.ts");
+    const prompt = await buildTddPrompt(finalizingState().task!, false);
+    assert.doesNotMatch(prompt, /commit_changes/);
+  });
+
+  it("runImplement injects the instruction when commit_changes is registered", async () => {
+    const pi = mockPi(["read", "commit_changes"]);
+    const ctx = ctxWithState(finalizingState());
+
+    await runImplement("--solo", pi, ctx);
+
+    const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
+    assert.match(text, /commit_changes/);
+  });
+
+  it("runImplement omits the instruction when commit_changes is absent", async () => {
+    const pi = mockPi(["read", "bash"]);
+    const ctx = ctxWithState(finalizingState());
+
+    await runImplement("--solo", pi, ctx);
+
+    const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
+    assert.doesNotMatch(text, /commit_changes/);
   });
 });
 
