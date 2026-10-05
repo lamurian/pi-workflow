@@ -6,7 +6,8 @@ import {
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
-import type { WorkflowState } from "../extensions/state.ts";
+import type { WorkflowState, TaskContract } from "../extensions/state.ts";
+import type { ImplementerReport } from "../extensions/subagent-runner.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -84,7 +85,7 @@ describe("runImplement", () => {
     const state = finalizingState();
     const ctx = ctxWithState(state);
 
-    await runImplement("", pi, ctx);
+    await runImplement("--solo", pi, ctx);
 
     assert.equal(state.phase, "implementing");
     const append = pi.calls["appendEntry"] ?? [];
@@ -96,7 +97,7 @@ describe("runImplement", () => {
     const pi = mockPi();
     const ctx = ctxWithState(finalizingState());
 
-    await runImplement("", pi, ctx);
+    await runImplement("--solo", pi, ctx);
 
     const send = pi.calls["sendUserMessage"] ?? [];
     assert.ok(send.length >= 1);
@@ -108,7 +109,7 @@ describe("runImplement", () => {
     const pi = mockPi();
     const ctx = ctxWithState(finalizingState());
 
-    await runImplement("", pi, ctx);
+    await runImplement("--solo", pi, ctx);
 
     const setCalls = pi.calls["setActiveTools"] ?? [];
     assert.equal(setCalls.length, 0);
@@ -130,7 +131,7 @@ describe("runImplement", () => {
     const pi = mockPi();
     const ctx = ctxWithState(finalizingState());
 
-    await runImplement("also wire the retry", pi, ctx);
+    await runImplement("--solo also wire the retry", pi, ctx);
 
     const send = pi.calls["sendUserMessage"] ?? [];
     assert.equal(send.length, 1);
@@ -145,7 +146,7 @@ describe("runImplement", () => {
     const pi = mockPi();
     const ctx = ctxWithState(finalizingState());
 
-    await runImplement("", pi, ctx);
+    await runImplement("--solo", pi, ctx);
 
     const send = pi.calls["sendUserMessage"] ?? [];
     const [text] = send[0] as [string];
@@ -160,7 +161,7 @@ describe("runImplement", () => {
       notifyCalls.push(msg);
     };
 
-    await runImplement("", pi, ctx);
+    await runImplement("--solo", pi, ctx);
 
     assert.equal(notifyCalls.length, 1, "runImplement should notify exactly once");
     assert.match(notifyCalls[0], /Starting TDD implementation/);
@@ -320,6 +321,118 @@ describe("T2: HEAD tracking and soft warn", () => {
 
     assert.notEqual(res.isError, true);
     assert.equal(legacy.task!.behaviors[0].status, "done");
+  });
+});
+
+// ═══ T3: orchestrator default loop ═══
+describe("T3: orchestrator default loop", () => {
+  function orchTask(): TaskContract {
+    return {
+      title: "Orch Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+        { id: "T3", description: "removed one", expectedOutput: "e3", kind: "test", status: "removed" },
+      ],
+    };
+  }
+
+  interface ExecLogEntry { cmd: string; args: string[] }
+
+  function piWithExecLog(): { pi: ExtensionAPI & { calls: Record<string, unknown[]> }; execLog: ExecLogEntry[] } {
+    const pi = mockPi();
+    const execLog: ExecLogEntry[] = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${++headCounter}\n`, stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "committed", stderr: "", exitCode: 0 };
+      }
+      if (cmd === "npm") {
+        return { stdout: "2 passed", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  function recordingRunner(
+    calls: string[],
+    _taskTexts: string[],
+    maxActiveRef: { value: number },
+  ) {
+    let active = 0;
+    return async (unit: { behaviorId: string }): Promise<ImplementerReport> => {
+      active++;
+      maxActiveRef.value = Math.max(maxActiveRef.value, active);
+      calls.push(unit.behaviorId);
+      await new Promise((r) => setTimeout(r, 5));
+      active--;
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId === "T1" ? "first behavior" : "second behavior"}`,
+      };
+    };
+  }
+
+  it("default /implement runs one sequential unit per active behavior: verify → commit → mark", async () => {
+    const { pi, execLog } = piWithExecLog();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };
+    const ctx = ctxWithState(state);
+    const calls: string[] = [];
+    const maxActiveRef = { value: 0 };
+
+    await runImplement("", pi, ctx, recordingRunner(calls, [], maxActiveRef));
+
+    assert.deepEqual(calls, ["T1", "T2"], "one spawn per active behavior, in order, removed skipped");
+    assert.equal(maxActiveRef.value, 1, "units must run strictly sequentially");
+    assert.equal(state.phase, "idle", "orchestrator completes the workflow on its own");
+    assert.ok(
+      state.task!.behaviors.every((b) => b.status !== "active"),
+      "all non-removed behaviors should be done",
+    );
+    assert.deepEqual(state.lastTestResults, { passed: 2, failed: 0 });
+
+    const seq = execLog
+      .filter((e) => e.cmd === "npm" || (e.cmd === "git" && e.args[0] === "commit"))
+      .map((e) => (e.cmd === "npm" ? "test" : `commit:${e.args[2]}`));
+    assert.deepEqual(
+      seq,
+      [
+        "test",
+        "commit:feat(core): add first behavior",
+        "test",
+        "commit:feat(core): add second behavior",
+      ],
+      "each unit must be verified with run_tests before its commit, using the suggested conventional subject",
+    );
+  });
+
+  it("--solo restores the in-session steer loop", async () => {
+    const { pi, execLog } = piWithExecLog();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };
+    const ctx = ctxWithState(state);
+
+    await runImplement("--solo", pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(send.length, 1, "solo mode steers the in-session agent");
+    const [, opts] = send[0] as [string, { deliverAs: string }];
+    assert.equal(opts.deliverAs, "steer");
+    assert.equal(state.phase, "implementing", "solo mode does not self-complete");
+    assert.ok(
+      !execLog.some((e) => e.cmd === "git" && e.args[0] === "commit"),
+      "solo mode must not commit from extension code",
+    );
   });
 });
 

@@ -1,6 +1,4 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
 import { Type } from "typebox";
 import { loadContent, renderTemplate } from "./utils.ts";
 import {
@@ -16,6 +14,13 @@ import {
   evaluateCompletionGate,
   renderTaskContract,
 } from "./task-contract.ts";
+import {
+  runOrchestratedImplement,
+  setUnitPrompt,
+  detectTestCommand,
+  readGitHead,
+  type UnitRunner,
+} from "./implement-loop.ts";
 
 /**
  * Parse `/implement` arguments into a mode flag and an engineer's note.
@@ -44,44 +49,22 @@ export function hasCommitTool(pi: ExtensionAPI): boolean {
 }
 
 /**
- * Read the current git HEAD hash for a working directory.
- *
- * Best-effort: returns null when git fails (not a repo, git missing,
- * empty output) so callers can skip HEAD-based checks gracefully.
- *
- * @param pi   - ExtensionAPI reference (for exec access).
- * @param cwd  - Working directory to resolve HEAD in.
- * @returns The HEAD hash, or null when unavailable.
- */
-export async function readGitHead(
-  pi: ExtensionAPI,
-  cwd: string,
-): Promise<string | null> {
-  try {
-    const result = await pi.exec("git", ["rev-parse", "HEAD"], { cwd });
-    if ((result.exitCode ?? 1) !== 0) return null;
-    const head = (result.stdout ?? "").trim();
-    return head || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Start the TDD implementation phase from a finalizing task contract.
  *
  * Valid only from the finalizing phase. Consumes state.task and transitions
  * to implementing. By default runs the orchestrator loop; pass `--solo` to
  * hand the agent an in-session TDD prompt instead.
  *
- * @param args - Optional `--solo` flag plus engineer's note.
- * @param pi   - ExtensionAPI reference.
- * @param ctx  - Extension context.
+ * @param args    - Optional `--solo` flag plus engineer's note.
+ * @param pi      - ExtensionAPI reference.
+ * @param ctx     - Extension context.
+ * @param runUnit - Optional unit runner override (tests inject a mock).
  */
 export async function runImplement(
   args: string,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
+  runUnit?: UnitRunner,
 ): Promise<void> {
   const state = loadState(ctx);
   if (!state || state.phase !== "finalizing") {
@@ -101,10 +84,33 @@ export async function runImplement(
   saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
-  // NOTE(T3): the orchestrator loop replaces the unconditional solo call
-  // below; until it lands, both flag states run the in-session loop.
-  void solo;
-  await runSoloImplement(note, pi, ctx, task);
+
+  // Cache the implementer unit prompt once per /implement so the orchestrator
+  // default runner can build subprocess argv without re-reading the file.
+  setUnitPrompt(await loadContent("unit-prompt.md"));
+
+  if (solo) {
+    await runSoloImplement(note, pi, ctx, task);
+    return;
+  }
+
+  const result = await runOrchestratedImplement(pi, ctx, state, task, runUnit);
+  if (result.complete) {
+    ctx.ui.notify(
+      `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
+        `${result.unitsRun} unit(s) run.`,
+      "info",
+    );
+    return;
+  }
+  ctx.ui.notify(
+    `Orchestration halted on ${result.haltedOn}: ${result.error}\n\n` +
+      `Tree state:\n${result.treeState ?? "(unavailable)"}\n\n` +
+      `Commits landed so far: ${
+        result.landedCommits.length ? result.landedCommits.join("; ") : "(none)"
+      }\n\nRun /implement again to resume from the first active behavior.`,
+    "warning",
+  );
 }
 
 /**
@@ -157,20 +163,6 @@ export async function buildTddPrompt(
     task: renderTaskContract(task),
     commitInstruction,
   });
-}
-
-/**
- * Detect the project's test command by checking for common config files.
- *
- * @param cwd - Project working directory.
- * @returns [command, args[]] tuple, or ["npm", ["test"]] as fallback.
- */
-function detectTestCommand(cwd: string): [string, string[]] {
-  if (existsSync(resolve(cwd, "vitest.config.ts"))) return ["npx", ["vitest", "run"]];
-  if (existsSync(resolve(cwd, "jest.config.ts"))) return ["npx", ["jest"]];
-  if (existsSync(resolve(cwd, "jest.config.js"))) return ["npx", ["jest"]];
-  if (existsSync(resolve(cwd, ".mocharc.yml"))) return ["npx", ["mocha"]];
-  return ["npm", ["test"]];
 }
 
 /**

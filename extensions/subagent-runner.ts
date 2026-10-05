@@ -137,7 +137,7 @@ export function createTimeoutSignal(
   return { signal: controller.signal, clear };
 }
 
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
+export function getPiInvocation(args: string[]): { command: string; args: string[] } {
   // Explicit override — lets tests (and embedders) pin a specific pi binary
   // instead of relying on script-detection heuristics.
   const piBin = process.env.PI_BIN;
