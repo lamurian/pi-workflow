@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { registerSaveTaskTool, runFinalize } from "../extensions/finalize.ts";
+import { loadContent } from "../extensions/utils.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -452,5 +453,56 @@ describe("save_task scan wiring (T3)", () => {
     assert.match(res.content[0].text, /no-evidence/);
     assert.match(res.content[0].text, /declared-not-found/);
     assert.match(notifyCalls[0]!, /warnings: 2/);
+  });
+});
+
+// ═══ finalize-prompt.md content assertions (T6) ═══
+describe("finalize-prompt.md content assertions (T6)", () => {
+  it("codifies the co-location rule: behavior = test + impl, never split", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /one behavior = test \+ implementation/i);
+    assert.match(content, /never split/i);
+    assert.match(content, /independently green-committable/i);
+  });
+
+  it("kind: 'test' means verified-by-test; test-artifact-only expectedOutput is invalid", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /verified-by-test/);
+    assert.match(content, /test artifacts? only/i);
+    assert.match(content, /red by construction/i);
+  });
+
+  it("instructs classifying save_task scan-evidence items honoring confidence tags", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /scan evidence/i);
+    assert.match(content, /confidence tag/i);
+    assert.match(content, /unverified/i);
+  });
+
+  it("contains the preserved/superseded/obsolete/out-of-scope classification", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    for (const word of ["preserved", "superseded", "obsolete", "out-of-scope"]) {
+      assert.match(content, new RegExp(word), `classification must mention ${word}`);
+    }
+  });
+
+  it("fold rule: test updates never form their own behavior", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /never (?:form )?their own behavior/i);
+  });
+
+  it("files-declaration rule: declare superseded/obsolete test paths in files", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /declare/i);
+    assert.match(content, /files/);
+  });
+
+  it("the blanket do-not-re-explore wording is gone, replaced by evidence flow", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.doesNotMatch(
+      content,
+      /Do NOT re-explore the codebase/,
+      "blanket do-not-re-explore instruction must be replaced",
+    );
   });
 });
