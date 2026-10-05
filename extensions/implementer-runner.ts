@@ -3,7 +3,7 @@ import {
   buildImplementerArgs,
   createTimeoutSignal,
   getPiInvocation,
-  getScoutTimeoutMs,
+  getImplementerTimeoutMs,
   parseImplementerReport,
   type ImplementerReport,
 } from "./subagent-runner.ts";
@@ -55,7 +55,7 @@ export async function runRawPiProcess(
   args: string[],
   cwd: string,
   signal?: AbortSignal,
-  timeoutMs: number = getScoutTimeoutMs(),
+  timeoutMs: number = getImplementerTimeoutMs(),
 ): Promise<RawProcessResult> {
   let timeoutClear: (() => void) | null = null;
 
@@ -151,7 +151,7 @@ export async function runImplementerUnit(
   taskText: string,
   cwd: string,
   signal?: AbortSignal,
-  timeoutMs: number = getScoutTimeoutMs(),
+  timeoutMs: number = getImplementerTimeoutMs(),
 ): Promise<ImplementerReport & { error?: string }> {
   const args = buildImplementerArgs(systemPrompt, taskText);
   const { stdout, stderr, exitCode } = await runRawPiProcess(args, cwd, signal, timeoutMs);

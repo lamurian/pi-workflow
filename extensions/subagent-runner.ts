@@ -226,6 +226,33 @@ export function getScoutTimeoutMs(
 }
 
 /**
+ * Default per-implementer-unit timeout in milliseconds. Implementer units
+ * read the codebase, write code, and self-check — far heavier than scouts,
+ * which is why they get a dedicated budget instead of the scout timeout.
+ */
+const DEFAULT_IMPLEMENT_TIMEOUT_MS = 600_000;
+
+/**
+ * Resolve the per-implementer-unit timeout budget, honoring the
+ * `PI_IMPLEMENT_TIMEOUT_MS` environment variable override (milliseconds).
+ * Deliberately independent of `PI_EXPLORE_TIMEOUT_MS`: the scout budget
+ * must not leak into implementation units.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns The timeout in milliseconds (&gt; 0).
+ */
+export function getImplementerTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PI_IMPLEMENT_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_IMPLEMENT_TIMEOUT_MS;
+}
+
+/**
  * Run a single scout subprocess and return the text output.
  *
  * Spawns `pi` (with lean flags) with the agent's tool set and system
@@ -366,8 +393,8 @@ export async function runScoutSubprocess(
 
 // ─── Implementer subprocess (orchestrator units) ─────────────────────────────
 
-/** Tools granted to an implementer subprocess: filesystem + bash only. */
-const IMPLEMENTER_TOOLS = "write,edit,bash";
+/** Tools granted to an implementer subprocess: read + filesystem + bash only. */
+const DEFAULT_IMPLEMENTER_TOOLS = "read,write,edit,bash";
 
 /** Structured report extracted from an implementer subprocess output. */
 export interface ImplementerReport {
@@ -378,12 +405,30 @@ export interface ImplementerReport {
 }
 
 /**
+ * Resolve the tool allowlist for implementer subprocesses.
+ *
+ * Defaults to `read,write,edit,bash`; the `PI_IMPLEMENTER_TOOLS` env var
+ * overrides the full list for environments where tool names differ (e.g.
+ * a renamed shell tool) or a tighter grant is wanted.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns Comma-separated tool names for `--tools`.
+ */
+export function getImplementerTools(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const raw = env.PI_IMPLEMENTER_TOOLS?.trim();
+  return raw ? raw : DEFAULT_IMPLEMENTER_TOOLS;
+}
+
+/**
  * Build the argv array for an implementer subprocess.
  *
  * Lean flags skip extension/skill/session loading for fast startup and
- * determinism. Tools are restricted to write/edit/bash — the unit cannot
- * commit or touch workflow state; the orchestrator owns both. Does NOT
- * pass --model so the subprocess uses the user's default model.
+ * determinism. Tools are restricted to the implementer allowlist (default
+ * `read,write,edit,bash`) — the unit cannot commit or touch workflow state;
+ * the orchestrator owns both. Does NOT pass --model so the subprocess uses
+ * the user's default model.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
  * @param taskText     - The behavior slice for this unit.
@@ -401,7 +446,7 @@ export function buildImplementerArgs(
     "--no-skills",
     "--offline",
     "--thinking", "minimal",
-    "--tools", IMPLEMENTER_TOOLS,
+    "--tools", getImplementerTools(),
   ];
   if (systemPrompt.trim()) {
     args.push("--append-system-prompt", systemPrompt);

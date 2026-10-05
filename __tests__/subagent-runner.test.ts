@@ -221,6 +221,55 @@ describe("getScoutTimeoutMs", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// T8 — getImplementerTimeoutMs — dedicated implementer budget
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("getImplementerTimeoutMs (T8)", () => {
+  it("defaults to 600000 — implementer units are far heavier than scouts", async () => {
+    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(getImplementerTimeoutMs({}), 600_000);
+  });
+
+  it("honors PI_IMPLEMENT_TIMEOUT_MS when set", async () => {
+    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(
+      getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "90000" }),
+      90_000,
+    );
+  });
+
+  it("is independent of PI_EXPLORE_TIMEOUT_MS (T8)", async () => {
+    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(
+      getImplementerTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "1000" }),
+      600_000,
+      "the scout budget must not leak into implementer units",
+    );
+  });
+
+  it("falls back to the default for invalid values", async () => {
+    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 600_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 600_000);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T8 — unit-prompt.md contract
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("content/unit-prompt.md contract (T8)", () => {
+  it("states self-checks are optional, the gate is the main process, failures return as instructions", async () => {
+    const { loadContent } = await import("../extensions/utils.ts");
+    const prompt = await loadContent("unit-prompt.md");
+    assert.match(prompt, /optional/i, "self-check test runs must be optional");
+    assert.match(prompt, /main process/i, "the commit-hook gate is owned by the main process");
+    assert.match(prompt, /return.*as instruction/i, "failures of any stage return as instructions");
+    assert.match(prompt, /never commit|do NOT run `git commit`/i, "units must not commit");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // runScoutSubprocess — integration against a real pi binary
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -276,7 +325,7 @@ describe("runScoutSubprocess integration (real pi)", () => {
 // T5 — implementer subprocess argv builder and report parser
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("buildImplementerArgs (T5)", () => {
+describe("buildImplementerArgs (T5/T8)", () => {
   const SYSTEM = "You are an implementation unit.";
   const TASK = "Implement behavior T3: add retry backoff.";
 
@@ -295,18 +344,31 @@ describe("buildImplementerArgs (T5)", () => {
     assert.equal(args[t + 1], "minimal");
   });
 
-  it("restricts --tools to write,edit,bash", async () => {
+  it("restricts --tools to read,write,edit,bash (T8)", async () => {
+    delete process.env.PI_IMPLEMENTER_TOOLS;
     const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
     const args = buildImplementerArgs(SYSTEM, TASK);
 
     const idx = args.indexOf("--tools");
     assert.notEqual(idx, -1, "--tools should be present");
-    assert.equal(args[idx + 1], "write,edit,bash");
+    assert.equal(args[idx + 1], "read,write,edit,bash");
     assert.doesNotMatch(
       args[idx + 1],
       /run_tests|mark_task_done|commit_changes|commit_amend/,
       "implementer must not receive workflow or commit tools",
     );
+  });
+
+  it("honors PI_IMPLEMENTER_TOOLS as a full override (T8)", async () => {
+    process.env.PI_IMPLEMENTER_TOOLS = "read,write";
+    try {
+      const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+      const args = buildImplementerArgs(SYSTEM, TASK);
+      const idx = args.indexOf("--tools");
+      assert.equal(args[idx + 1], "read,write", "env override must replace the default list");
+    } finally {
+      delete process.env.PI_IMPLEMENTER_TOOLS;
+    }
   });
 
   it("sources --append-system-prompt from content/unit-prompt.md", async () => {
