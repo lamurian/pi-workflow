@@ -649,6 +649,78 @@ describe("T2: HEAD-gate hook-rejection path", () => {
   });
 });
 
+// ═══ T11: resume safety — dirty-tree context on resumed units ═══
+describe("T11: resume safety", () => {
+  function resumingState(): WorkflowState {
+    return {
+      phase: "implementing",
+      specText: "topic",
+      baselineHead: "headA",
+      task: {
+        title: "Resume Task",
+        instruction: "do things",
+        files: ["src/a.ts"],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  function piWith(statusOutput: string) {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: statusOutput, stderr: "", exitCode: 0 };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("appends the dirty-tree output to the first resumed unit's task text", async () => {
+    const pi = piWith(" M src/a.ts\n?? src/new.ts\n");
+    const state = resumingState();
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ taskText: string }> = [];
+
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ taskText: unit.taskText });
+      return { summary: "done", suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 1);
+    assert.match(spawns[0]!.taskText, /Working tree is dirty \(resumed session\)/);
+    assert.match(spawns[0]!.taskText, /M src\/a\.ts/);
+    assert.match(spawns[0]!.taskText, /src\/new\.ts/);
+    assert.equal(state.phase, "idle", "resume completes the workflow");
+  });
+
+  it("appends no tree section when the tree is clean", async () => {
+    const pi = piWith("");
+    const state = resumingState();
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ taskText: string }> = [];
+
+    await runImplement("", pi, ctx, async (unit) => {
+      spawns.push({ taskText: unit.taskText });
+      return { summary: "done", suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 1);
+    assert.doesNotMatch(spawns[0]!.taskText, /Working tree is dirty/);
+  });
+});
+
 // ═══ T6: exception safety — no unhandled rejection escapes /implement ═══
 describe("T6: exception safety in runImplement", () => {
   function oneBehavior(): TaskContract {
