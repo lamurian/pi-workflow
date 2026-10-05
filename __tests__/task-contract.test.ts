@@ -94,6 +94,28 @@ describe("parseTestOutput", () => {
     assert.equal(r.failed, 1);
   });
 
+  it("parses the Node core test-runner 'ℹ pass N'/'ℹ fail N' summary", () => {
+    // Node >= 20 emits this form; without it the orchestrator sees passed: 0
+    // and the completion gate refuses a genuinely green run.
+    const out = [
+      "✔ ok (0.9ms)",
+      "ℹ tests 2",
+      "ℹ pass 2",
+      "ℹ fail 0",
+      "ℹ duration_ms 92.5",
+    ].join("\n");
+    const r = parseTestOutput(0, out);
+    assert.equal(r.passed, 2);
+    assert.equal(r.failed, 0);
+  });
+
+  it("treats a non-zero Node core run with 'ℹ fail 1' as one failure", () => {
+    const out = "✖ bad (3ms)\nℹ tests 1\nℹ pass 0\nℹ fail 1";
+    const r = parseTestOutput(1, out);
+    assert.equal(r.failed, 1);
+    assert.equal(r.passed, 0);
+  });
+
   it("parses coverage percent when present", () => {
     const r = parseTestOutput(0, "All files | 90.5 |");
     assert.equal(r.coveragePercent, 90.5);

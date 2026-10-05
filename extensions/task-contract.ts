@@ -97,8 +97,14 @@ export interface ParsedTest {
  * @returns Parsed pass/fail counts.
  */
 export function parseTestOutput(exitCode: number, stdout: string): ParsedTest {
-  const failedMatch = stdout.match(/(\d+)\s+(?:failed|failing)/i);
-  const passedMatch = stdout.match(/(\d+)\s+(?:passed|passing)/i);
+  // Match both the classic TAP/Vitest forms (`# pass 2`, `2 passing`) and
+  // the Node.js core test-runner summary lines (`ℹ pass 2`, `ℹ fail 0`).
+  const failedMatch =
+    stdout.match(/(\d+)\s+(?:failed|failing)\b/i) ??
+    stdout.match(/\bfail\s+(\d+)/i);
+  const passedMatch =
+    stdout.match(/(\d+)\s+(?:passed|passing)\b/i) ??
+    stdout.match(/\bpass\s+(\d+)/i);
 
   // Best-effort coverage: istanbul "All files" row (take last column),
   // else a "Lines: N%" / "Statements: N%" style percentage.
