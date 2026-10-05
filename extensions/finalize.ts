@@ -98,23 +98,31 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
           isError: true,
         };
       }
+      const warnings = result.warnings;
       const entering = state.phase === "discussing";
       state.task = result.task;
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
       if (entering) {
         ctx.ui.notify(
-          "Contract saved. Phase: finalizing — review the contract, run /implement when ready.",
+          `Contract saved. Phase: finalizing — review the contract, run /implement when ready. ` +
+            `(warnings: ${warnings.length})`,
           "info",
         );
       }
+      const warningBlock =
+        warnings.length > 0
+          ? "\n\nWarnings (advisory — the contract was saved):\n" +
+            warnings.map((w) => `warning: ${w}`).join("\n")
+          : "";
       return {
         content: [
           {
             type: "text",
             text:
               "Task saved. Phase: finalizing (read-only). " +
-              "Wait for the user to run /implement once the contract is approved.",
+              "Wait for the user to run /implement once the contract is approved." +
+              warningBlock,
           },
         ],
       };

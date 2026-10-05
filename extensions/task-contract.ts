@@ -2,18 +2,60 @@ import type { WorkflowState, TaskContract, Behavior } from "./state.ts";
 
 /** Normalized, validated task contract produced by validateTask. */
 export type TaskValidation =
-  | { ok: true; task: TaskContract }
+  | { ok: true; task: TaskContract; warnings: string[] }
   | { ok: false; reason: string };
+
+/** Test-artifact phrasing: expectedOutput talks about test files/cases only. */
+const TEST_ARTIFACT_PATTERN = /test (file|files|cases?|scenarios?)\b/i;
+
+/** Observable-behavior markers that make a test-kind expectedOutput valid. */
+const OBSERVABLE_MARKER_PATTERN = /\b(returns?|raises?|emits?|rejects?|persists?|validates?)\b/i;
+
+/**
+ * Deterministically collect contract-quality warnings for one behavior.
+ *
+ * Two advisory rules, both test-kind only:
+ * 1. Test-artifact-only expectedOutput (mentions test files/cases/scenarios
+ *    with no observable-behavior marker) — such a commit is red by
+ *    construction: a test without its implementation.
+ * 2. Test-deletion expectedOutput — deletion is not test-verified behavior;
+ *    the behavior should be kind: "manual".
+ *
+ * @param b - Behavior to inspect (already shape-validated).
+ * @returns Zero or two warning strings (never both rules for one behavior:
+ *          deletion is checked first and wins).
+ */
+function collectBehaviorWarnings(b: Behavior): string[] {
+  if (b.kind !== "test") return [];
+  if (/\b(deletes?|removes?)\b/i.test(b.expectedOutput) && /\btests?\b/i.test(b.expectedOutput)) {
+    return [
+      `${b.id}: expectedOutput describes test deletion — test deletion is not ` +
+        `test-verified behavior; set kind: manual for removal behaviors.`,
+    ];
+  }
+  if (
+    TEST_ARTIFACT_PATTERN.test(b.expectedOutput) &&
+    !OBSERVABLE_MARKER_PATTERN.test(b.expectedOutput)
+  ) {
+    return [
+      `${b.id}: expectedOutput describes test artifacts only — the commit ` +
+        `would be red by construction (test without implementation). ` +
+        `Merge the test and its implementation into one behavior.`,
+    ];
+  }
+  return [];
+}
 
 /**
  * Deterministically validate a raw save_task payload.
  *
  * Checks every field of the contract. On success returns a normalized
  * TaskContract with each behavior defaulted to status "active" when the
- * caller omitted it. On failure returns the first offending field.
+ * caller omitted it, plus advisory contract-quality warnings (never
+ * blocking). On failure returns the first offending field.
  *
  * @param raw - Unvalidated payload (from the save_task tool call).
- * @returns A normalized task or a rejection reason.
+ * @returns A normalized task with warnings, or a rejection reason.
  */
 export function validateTask(raw: unknown): TaskValidation {
   if (raw === null || typeof raw !== "object") {
@@ -75,6 +117,7 @@ export function validateTask(raw: unknown): TaskValidation {
       done: t.done,
       behaviors,
     },
+    warnings: behaviors.flatMap(collectBehaviorWarnings),
   };
 }
 

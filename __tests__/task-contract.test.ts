@@ -74,6 +74,80 @@ describe("validateTask", () => {
   });
 });
 
+// ═══ validateTask contract-quality warnings (T1) ═══
+describe("validateTask contract-quality warnings (T1)", () => {
+  function qualityPayload(expectedOutput: string, kind = "test") {
+    return {
+      title: "T",
+      instruction: "i",
+      files: ["src/a.ts"],
+      done: "d",
+      behaviors: [
+        {
+          id: "T1",
+          description: "Add test scenarios for validation",
+          expectedOutput,
+          kind,
+        },
+      ],
+    };
+  }
+
+  it("warns for test-artifact-only expectedOutput on a test-kind behavior", () => {
+    const r = validateTask(
+      qualityPayload("test file contains 3 cases covering edge cases"),
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0]!, /T1/, "warning must name the behavior id");
+    assert.match(r.warnings[0]!, /red by construction/);
+    assert.match(r.warnings[0]!, /test without implementation/);
+  });
+
+  it("suppresses the artifact warning when an observable marker is present", () => {
+    const r = validateTask(
+      qualityPayload(
+        "test file cases verify that the handler returns 200 with a list",
+      ),
+    );
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual(r.warnings, []);
+  });
+
+  it("warns and advises kind: manual for test-deletion expectedOutput", () => {
+    const r = validateTask(qualityPayload("delete the legacy test cases"));
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0]!, /T1/);
+    assert.match(r.warnings[0]!, /kind: manual/);
+  });
+
+  it("returns no warnings for a clean contract", () => {
+    const r = validateTask(qualityPayload("handler returns 200 + array"));
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual(r.warnings, []);
+  });
+
+  it("returns no warnings for manual-kind behaviors", () => {
+    const r = validateTask(
+      qualityPayload("test file contains 3 cases covering edge cases", "manual"),
+    );
+    assert.equal(r.ok, true);
+    if (r.ok) assert.deepEqual(r.warnings, []);
+  });
+
+  it("invalid payload still returns { ok: false, reason } with no warnings array", () => {
+    const r = validateTask({ title: "  ", instruction: "i", files: [], done: "d", behaviors: [] });
+    assert.equal(r.ok, false);
+    if (!r.ok) {
+      assert.match(r.reason, /title/);
+      assert.equal("warnings" in r, false);
+    }
+  });
+});
+
 // ═══ parseTestOutput ═══
 describe("parseTestOutput", () => {
   it("treats exit code 0 as passing and parses counts", () => {

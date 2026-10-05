@@ -128,6 +128,97 @@ describe("save_task", () => {
     assert.equal(s.task!.title, "Renamed");
   });
 
+  it("surfaces warning lines when the contract has advisory warnings (T1)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      {
+        ...VALID,
+        behaviors: [
+          {
+            id: "T1",
+            description: "Add test scenarios for validation",
+            expectedOutput: "test file contains 3 cases covering edge cases",
+            kind: "test",
+            status: "active",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true, "warnings are advisory; save still succeeds");
+    assert.match(res.content[0].text, /warning/i);
+    assert.match(res.content[0].text, /warning: T1/);
+  });
+
+  it("clean contract produces no warning lines (T1)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true);
+    assert.doesNotMatch(res.content[0].text, /warning/i);
+  });
+
+  it("appends a warning count to the phase-transition notify (T1)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await getSaveTask(pi).execute(
+      "c1",
+      {
+        ...VALID,
+        behaviors: [
+          {
+            id: "T1",
+            description: "Add test scenarios for validation",
+            expectedOutput: "test file contains 3 cases covering edge cases",
+            kind: "test",
+            status: "active",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.equal(notifyCalls.length, 1);
+    assert.match(notifyCalls[0]!, /warnings: 1/);
+  });
+
+  it("clean contract notify reports zero warnings (T1)", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.equal(notifyCalls.length, 1);
+    assert.match(notifyCalls[0]!, /warnings: 0/);
+  });
+
   it("notifies once on the discussing -> finalizing entry", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
