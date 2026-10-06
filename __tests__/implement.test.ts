@@ -5,6 +5,7 @@ import {
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
   composeCompletionReport,
+  composeHaltReport,
 } from "../extensions/implement.ts";
 import {
   readGitHead,
@@ -750,6 +751,152 @@ describe("B4: completion report as an agent turn", () => {
       /Orchestrated implementation complete/.test(m),
     );
     assert.equal(completeNotifies.length, 1, "the completion notify still fires");
+  });
+});
+
+// ═══ B5: halt report as an agent turn ═══
+describe("B5: halt report as an agent turn", () => {
+  function haltTask(): TaskContract {
+    return {
+      title: "Halt Task",
+      instruction: "do the thing",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  /** Exec mock exposing a git tree-state snapshot for the halt report. */
+  function piWithTreeState(treeState: string) {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: treeState, stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("composeHaltReport pins the halted heading, error, tree state, landed commits, resume line, and closing instruction", () => {
+    const result: OrchestratorResult = {
+      complete: false,
+      unitsRun: 7,
+      landedCommits: ["feat(core): add T1"],
+      haltedOn: "T2",
+      error: "pre-commit hook rejected the commit for T2 after 5 retries\n\nlint failed",
+      treeState: " M src/b.ts",
+    };
+
+    const report = composeHaltReport(result);
+
+    assert.match(report, /## Implementation status: halted on T2/, "halted heading names the behavior");
+    assert.match(
+      report,
+      /Error: pre-commit hook rejected the commit for T2 after 5 retries/,
+      "error detail",
+    );
+    assert.match(report, /Tree state:\n M src\/b\.ts/, "tree-state snapshot");
+    assert.match(
+      report,
+      /Commits landed so far:\n- feat\(core\): add T1/,
+      "one - <subject> line per landed commit",
+    );
+    assert.match(
+      report,
+      /Resume: run \/implement again to resume from the first active behavior\./,
+      "resume line",
+    );
+    assert.match(
+      report,
+      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
+      "closing no-action instruction",
+    );
+  });
+
+  it("composeHaltReport reports (unavailable) tree state and (none) landed commits when absent", () => {
+    const report = composeHaltReport({
+      complete: false,
+      unitsRun: 1,
+      landedCommits: [],
+      haltedOn: "T1",
+      error: "boom",
+    });
+
+    assert.match(report, /## Implementation status: halted on T1/);
+    assert.match(report, /Error: boom/);
+    assert.match(report, /Tree state:\n\(unavailable\)/, "(unavailable) when the snapshot is absent");
+    assert.match(report, /Commits landed so far:\n\(none\)/, "(none) when nothing landed");
+  });
+
+  it("an always-failing unit exhausts the budget; exactly one steer halt report is delivered; lastHalt persisted; phase stays implementing", async () => {
+    const pi = piWithTreeState(" M src/a.ts\n?? new-file.txt");
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: haltTask() };
+    const ctx = ctxWithState(state);
+    const notifies: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      notifies.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    const deliveries: Array<{ text: string; deliverAs?: string }> = [];
+    pi.sendUserMessage = ((text: string, opts: { deliverAs: string }) => {
+      deliveries.push({ text, deliverAs: opts?.deliverAs });
+    }) as ExtensionAPI["sendUserMessage"];
+
+    const spawns: string[] = [];
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: "", error: "always-fails: unit subprocess died" };
+    });
+
+    assert.equal(result.complete, false, "the always-failing run halts");
+    assert.equal(result.haltedOn, "T1", "the halt names the failed behavior");
+    assert.equal(spawns.length, 6, "initial run + exactly 5 retries exhaust the budget");
+
+    const haltNotifies = notifies.filter((m) => /Orchestration halted on T1/.test(m));
+    assert.equal(haltNotifies.length, 1, "the existing halt notification still fires");
+
+    assert.equal(deliveries.length, 1, "exactly one sendUserMessage delivery on halt");
+    const delivery = deliveries[0]!;
+    assert.equal(delivery.deliverAs, "steer", "delivered as an agent-turn steer");
+    assert.match(delivery.text, /## Implementation status: halted on T1/, "names the halted behavior");
+    assert.match(
+      delivery.text,
+      /Error: Unit T1 failed after 5 retries: always-fails: unit subprocess died/,
+      "includes the error detail",
+    );
+    assert.match(
+      delivery.text,
+      /Tree state:\nM src\/a\.ts\n\?\? new-file\.txt/,
+      "includes the tree-state snapshot",
+    );
+    assert.match(delivery.text, /Commits landed so far:\n\(none\)/, "lists (none) when nothing landed");
+    assert.match(
+      delivery.text,
+      /Resume: run \/implement again to resume from the first active behavior\./,
+      "contains the resume line",
+    );
+    assert.match(
+      delivery.text,
+      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
+      "closing no-action instruction",
+    );
+
+    assert.equal(state.phase, "implementing", "phase remains implementing so a later /implement resumes");
+    const append = pi.calls["appendEntry"] ?? [];
+    const lastSaved = append[append.length - 1] as [string, WorkflowState];
+    assert.equal(lastSaved[0], "workflow-state");
+    assert.equal(lastSaved[1].lastHalt?.behaviorId, "T1", "lastHalt names the halted behavior");
+    assert.equal(
+      lastSaved[1].lastHalt?.error,
+      "Unit T1 failed after 5 retries: always-fails: unit subprocess died",
+      "lastHalt is persisted with the same detail as the report",
+    );
   });
 });
 

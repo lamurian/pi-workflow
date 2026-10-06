@@ -161,6 +161,11 @@ export async function runImplement(
           `Run /implement again to resume from the first active behavior.`,
         "warning",
       );
+      // B5: the halt notification and lastHalt persistence already happened;
+      // additionally deliver the pinned halt report as an agent turn (explore
+      // pattern) so the outcome renders in RPC clients. state.phase stays
+      // implementing, so a later /implement resumes.
+      pi.sendUserMessage(composeHaltReport(result), { deliverAs: "steer" });
       return result;
     })
     .finally(() => {
@@ -208,6 +213,46 @@ export function composeCompletionReport(
     lines.push(`- ${behavior.id} done`);
   }
   lines.push(
+    "",
+    "No action needed: relay this status to the user. Do not run tools or modify the working tree.",
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Compose the pinned halt report for a settled orchestration.
+ *
+ * Delivered as an agent turn via `pi.sendUserMessage(report, { deliverAs:
+ * "steer" })` after the orchestrator loop has persisted lastHalt and kept
+ * state.phase implementing (the explore pattern), so the halt outcome
+ * renders as an assistant message in RPC clients. Any OrchestratorResult
+ * with haltedOn qualifies: unit failure after retries, test-guard,
+ * commit-timeout, completion-gate refusal, or a caught orchestrator crash.
+ *
+ * @param result - The settled orchestrator outcome (halted).
+ * @returns The markdown report string with the pinned shape.
+ */
+export function composeHaltReport(result: OrchestratorResult): string {
+  const lines: string[] = [
+    `## Implementation status: halted on ${result.haltedOn ?? "(unknown)"}`,
+    "",
+    `Error: ${result.error ?? "(unknown)"}`,
+    "",
+    "Tree state:",
+    result.treeState ?? "(unavailable)",
+    "",
+    "Commits landed so far:",
+  ];
+  if (result.landedCommits.length) {
+    for (const subject of result.landedCommits) {
+      lines.push(`- ${subject}`);
+    }
+  } else {
+    lines.push("(none)");
+  }
+  lines.push(
+    "",
+    "Resume: run /implement again to resume from the first active behavior.",
     "",
     "No action needed: relay this status to the user. Do not run tools or modify the working tree.",
   );
