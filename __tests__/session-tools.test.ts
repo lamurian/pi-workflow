@@ -39,7 +39,7 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
     getActiveTools: () => [...ACTIVE_TOOLS],
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
-    exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
 }

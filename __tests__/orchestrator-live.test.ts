@@ -50,12 +50,13 @@ function execShim(cwd: string) {
     command: string,
     args: string[],
     _opts?: unknown,
-  ): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
+  ): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> => {
     const res = spawnSync(command, args, { cwd, encoding: "utf8" });
     return {
       stdout: res.stdout ?? "",
       stderr: res.stderr ?? "",
-      exitCode: res.status ?? 1,
+      code: res.status ?? 1,
+      killed: false,
     };
   };
 }
