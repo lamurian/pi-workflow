@@ -62,7 +62,7 @@ export async function readGitHead(
 ): Promise<string | null> {
   try {
     const result = await pi.exec("git", ["rev-parse", "HEAD"], { cwd });
-    if ((result.exitCode ?? 1) !== 0) return null;
+    if (result.code !== 0) return null;
     const head = (result.stdout ?? "").trim();
     return head || null;
   } catch {
@@ -170,7 +170,7 @@ async function commitAndGate(
       };
     }
     const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
-    commitExitCode = res.exitCode ?? 1;
+    commitExitCode = res.code;
     commitOutput = [res.stdout ?? "", res.stderr ?? ""].filter(Boolean).join("\n");
   } catch (err) {
     const message = String((err as Error)?.message ?? err);

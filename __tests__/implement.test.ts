@@ -5,7 +5,7 @@ import {
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
-import { runOrchestratedImplement } from "../extensions/implement-loop.ts";
+import { readGitHead, runOrchestratedImplement } from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/subagent-runner.ts";
 import type {
@@ -32,7 +32,7 @@ function mockPi(activeTools: string[] = DEFAULT_ACTIVE_TOOLS): ExtensionAPI & { 
     getActiveTools: () => [...activeTools],
     getAllTools: () => activeTools.map((name) => ({ name })),
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
-    exec: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
 }
@@ -217,7 +217,7 @@ describe("T2: HEAD tracking and soft warn", () => {
     const pi = mockPi();
     pi.exec = async () => {
       if (head === null) throw new Error("not a git repository");
-      return { stdout: `${head}\n`, stderr: "", exitCode: 0 };
+      return { stdout: `${head}\n`, stderr: "", code: 0, killed: false };
     };
     return pi;
   }
@@ -324,6 +324,112 @@ describe("T2: HEAD tracking and soft warn", () => {
   });
 });
 
+// ═══ T1: git gate reads ExecResult.code ═══
+describe("T1: git gate reads ExecResult.code", () => {
+  function oneBehaviorTask(): TaskContract {
+    return {
+      title: "Code Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  it("readGitHead returns the trimmed HEAD hash when git rev-parse exits 0", async () => {
+    const pi = mockPi();
+    pi.exec = (async () => ({
+      stdout: "abc123\n",
+      stderr: "",
+      code: 0,
+      killed: false,
+    })) as ExtensionAPI["exec"];
+
+    const head = await readGitHead(pi, "/tmp/test");
+
+    assert.equal(head, "abc123", "code-0 exec yields the trimmed stdout as HEAD");
+  });
+
+  it("readGitHead returns null when the exec reports a non-zero code", async () => {
+    const pi = mockPi();
+    pi.exec = (async () => ({
+      stdout: "",
+      stderr: "fatal: not a git repository",
+      code: 128,
+      killed: false,
+    })) as ExtensionAPI["exec"];
+
+    const head = await readGitHead(pi, "/tmp/test");
+
+    assert.equal(head, null);
+  });
+
+  it("readGitHead returns null when the exec throws", async () => {
+    const pi = mockPi();
+    pi.exec = (async () => {
+      throw new Error("spawn ENOENT");
+    }) as ExtensionAPI["exec"];
+
+    const head = await readGitHead(pi, "/tmp/test");
+
+    assert.equal(head, null);
+  });
+
+  it("loop-level: code-shaped exec mock whose git commit advances HEAD completes with zero retries and no lastHalt", async () => {
+    // Regression: with the exitCode-shape bug, readGitHead always returned
+    // null, HEAD movement was never detected, and a successful commit was
+    // misclassified as no-changes → RETRY_BUDGET retries → halt.
+    const pi = mockPi();
+    const execLog: Array<{ cmd: string; args: string[] }> = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId === "T1" ? "first behavior" : "second behavior"}`,
+      };
+    });
+
+    assert.equal(result.complete, true, "successful commits must complete, not halt");
+    assert.deepEqual(spawns, ["T1", "T2"], "zero retries: exactly one spawn per active behavior");
+    assert.equal(result.unitsRun, 2);
+    assert.equal(result.landedCommits.length, 2, "both commits are recorded as landed");
+    assert.equal(state.lastHalt, undefined, "no phantom no-changes halt");
+    assert.equal(state.phase, "idle");
+    assert.ok(
+      state.task!.behaviors.every((b) => b.status === "done"),
+      "every behavior is marked done when its commit lands",
+    );
+    const commits = execLog
+      .filter((e) => e.cmd === "git" && e.args[0] === "commit")
+      .map((e) => e.args[2]);
+    assert.deepEqual(
+      commits,
+      ["feat(core): add first behavior", "feat(core): add second behavior"],
+      "one commit per behavior, with the suggested subject",
+    );
+  });
+});
+
 // ═══ T1: HEAD-gate success path ═══
 describe("T1: HEAD-gate success path", () => {
   function orchTask(): TaskContract {
@@ -350,19 +456,19 @@ describe("T1: HEAD-gate success path", () => {
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "add") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
         headCounter++;
-        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     return { pi, execLog };
   }
@@ -462,18 +568,18 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+        return { stdout: " M src/a.ts\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff") {
-        return { stdout: " src/a.ts | 2 +-\n", stderr: "", exitCode: 0 };
+        return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: HOOK_STDERR, exitCode: 1 };
+        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     return { pi, execLog };
   }
@@ -566,18 +672,18 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const pi = mockPi();
     pi.exec = (async (cmd: string, args: string[]) => {
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: "nothing to commit, working tree clean", exitCode: 1 };
+        return { stdout: "", stderr: "nothing to commit, working tree clean", code: 1, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
 
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
@@ -606,13 +712,13 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const pi = mockPi();
     pi.exec = (async (cmd: string, args: string[]) => {
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
         // Simulate pi.exec hitting the timeout budget.
         throw new Error("Command timed out after 300000ms: git commit");
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
 
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
@@ -674,16 +780,16 @@ describe("T11: resume safety", () => {
     let headCounter = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: statusOutput, stderr: "", exitCode: 0 };
+        return { stdout: statusOutput, stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
         headCounter++;
-        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     return pi;
   }
@@ -822,11 +928,11 @@ describe("T6: exception safety in runImplement", () => {
   it("halt path persists lastHalt before runImplement returns (covered with T3; smoke here)", async () => {
     const pi = mockPi();
     pi.exec = (async (cmd: string, args: string[]) => {
-      if (cmd === "git" && args[0] === "rev-parse") return { stdout: "headA\n", stderr: "", exitCode: 0 };
-      if (cmd === "git" && args[0] === "status") return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
-      if (cmd === "git" && args[0] === "diff") return { stdout: " src/a.ts | 2 +-\n", stderr: "", exitCode: 0 };
-      if (cmd === "git" && args[0] === "commit") return { stdout: "", stderr: "golangci-lint run failed", exitCode: 1 };
-      return { stdout: "", stderr: "", exitCode: 0 };
+      if (cmd === "git" && args[0] === "rev-parse") return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+      if (cmd === "git" && args[0] === "status") return { stdout: " M src/a.ts\n", stderr: "", code: 0, killed: false };
+      if (cmd === "git" && args[0] === "diff") return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
+      if (cmd === "git" && args[0] === "commit") return { stdout: "", stderr: "golangci-lint run failed", code: 1, killed: false };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehavior() };
     const ctx = ctxWithState(state);
@@ -867,18 +973,18 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: `head${++headCounter}\n`, stderr: "", exitCode: 0 };
+        return { stdout: `head${++headCounter}\n`, stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: " M src/a.ts\n", stderr: "", exitCode: 0 };
+        return { stdout: " M src/a.ts\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "committed", stderr: "", exitCode: 0 };
+        return { stdout: "committed", stderr: "", code: 0, killed: false };
       }
       if (cmd === "npm") {
-        return { stdout: "2 passed", stderr: "", exitCode: 0 };
+        return { stdout: "2 passed", stderr: "", code: 0, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     return { pi, execLog };
   }
@@ -1219,16 +1325,16 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: "headA\n", stderr: "", exitCode: 0 };
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "add") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
-        return { stdout: "D\tpkg/old_test.go\n", stderr: "", exitCode: 0 };
+        return { stdout: "D\tpkg/old_test.go\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff") {
         return {
@@ -1238,13 +1344,14 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
             "@@ -1,2 +0,0 @@\n" +
             "-func TestOld(t *testing.T) { assert.True(t, true) }\n",
           stderr: "",
-          exitCode: 0,
+          code: 0,
+          killed: false,
         };
       }
       if (cmd === "git" && args[0] === "commit") {
         throw new Error("git commit must never run when the guard trips");
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
     return { pi, execLog };
   }
@@ -1288,22 +1395,22 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
       if (cmd === "git" && args[0] === "rev-parse") {
-        return { stdout: `head${headCounter}\n`, stderr: "", exitCode: 0 };
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "status") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "add") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff") {
-        return { stdout: "", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
         headCounter++;
-        return { stdout: "[main abc] committed", stderr: "", exitCode: 0 };
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
       }
-      return { stdout: "", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
 
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: guardTask() };

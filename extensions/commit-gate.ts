@@ -111,6 +111,16 @@ export function classifyCommit(behavior: Behavior, input: GateInput): GateOutcom
       hookOutput: input.commitOutput.trim().slice(-4000),
     };
   }
+  // Hardening: git commit exited 0 means the commit was created even when
+  // HEAD could not be read (rev-parse unavailable) — a successful commit
+  // must never be misclassified as no-changes just because HEAD is null.
+  if (
+    input.commitExitCode === 0 &&
+    !input.timedOut &&
+    (input.headBefore === null || input.headAfter === null)
+  ) {
+    return { kind: "landed" };
+  }
   return {
     kind: "no-changes",
     investigation:

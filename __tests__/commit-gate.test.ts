@@ -84,6 +84,25 @@ describe("classifyCommit (T2)", () => {
     assert.match(outcome.investigation, /No changes detected for T1/);
   });
 
+  it("landed (hardening) when heads are unavailable, the commit exited 0, and the tree is clean", () => {
+    // git commit exit 0 means the commit was created even when rev-parse
+    // HEAD is unavailable — a successful commit must never be misclassified
+    // as no-changes just because HEAD could not be read.
+    const outcome = classifyCommit(
+      BEHAVIOR,
+      gateInput({
+        headBefore: null,
+        headAfter: null,
+        commitExitCode: 0,
+        commitOutput: "",
+        timedOut: false,
+        statusAfter: "",
+        diffStat: "",
+      }),
+    );
+    assert.equal(outcome.kind, "landed");
+  });
+
   it("commit-timeout wins over hook-rejection even on a dirty tree", () => {
     const outcome = classifyCommit(BEHAVIOR, gateInput({ timedOut: true, commitOutput: "timed out after 300000ms" }));
     assert.equal(outcome.kind, "commit-timeout");
