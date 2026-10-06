@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync, chmodSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImplement } from "../extensions/implement.ts";
+import type { OrchestratorResult } from "../extensions/implement-loop.ts";
 import type { TaskContract, WorkflowState } from "../extensions/state.ts";
 import type {
   ExtensionAPI,
@@ -161,6 +162,30 @@ function finalizingState(task: TaskContract): WorkflowState {
   return { phase: "finalizing", specText: "scratch feature", task };
 }
 
+/**
+ * Launch the orchestrated /implement path (B1 fire-and-forget) and await the
+ * background loop via the onBackground seam, so assertions see loop outcomes.
+ *
+ * @param pi     - ExtensionAPI reference backed by the scratch repo.
+ * @param ctx    - Extension context for the scratch repo.
+ * @param runner - Scripted unit runner injected into the loop.
+ * @param args   - Optional /implement args (defaults to "").
+ * @returns The settled orchestrator result.
+ */
+async function runImplementAwaitingLoop(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runner: Parameters<typeof runImplement>[3],
+  args = "",
+): Promise<OrchestratorResult> {
+  let settled: Promise<OrchestratorResult> | undefined;
+  await runImplement(args, pi, ctx, runner, (background) => {
+    settled = background;
+  });
+  assert.ok(settled, "onBackground seam must receive the background promise");
+  return settled;
+}
+
 describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
   it(
     "default /implement lands one conventional commit per behavior with widget progression",
@@ -183,7 +208,7 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         return { summary: "added shout helper + test", suggestedCommit: "feat: add shout helper" };
       };
 
-      await runImplement("", pi, ctx, runner);
+      await runImplementAwaitingLoop(pi, ctx, runner);
       const subjects = git(repo, "log", "--format=%s").split("\n");
       assert.deepEqual(
         subjects,
@@ -231,7 +256,7 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         return { summary: "", error: "boom: cannot finish shout helper" };
       };
 
-      await runImplement("", pi, ctx, failingRunner);
+      await runImplementAwaitingLoop(pi, ctx, failingRunner);
       assert.deepEqual(
         spawns,
         ["T1", "T2", "T2", "T2", "T2", "T2", "T2"],
@@ -266,7 +291,7 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         return { summary: "finished shout helper + test", suggestedCommit: "feat: add shout helper" };
       };
 
-      await runImplement("", pi, ctx, fixingRunner);
+      await runImplementAwaitingLoop(pi, ctx, fixingRunner);
 
       assert.deepEqual(resumeSpawns, ["T2"], "resume spawns only the first active behavior");
       assert.equal(state.phase, "idle", "resume completes the workflow");
@@ -317,7 +342,7 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
         return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat: add greet helper" };
       };
 
-      await runImplement("", pi, ctx, runner);
+      await runImplementAwaitingLoop(pi, ctx, runner);
 
       // Hook fails attempt 1 → fix subagent spawned once with the investigation;
       // attempt 2 passes → commit lands, behavior done, workflow idle.

@@ -5,7 +5,12 @@ import {
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
 } from "../extensions/implement.ts";
-import { readGitHead, runOrchestratedImplement } from "../extensions/implement-loop.ts";
+import {
+  readGitHead,
+  runOrchestratedImplement,
+  type OrchestratorResult,
+  type UnitRunner,
+} from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/subagent-runner.ts";
 import type {
@@ -76,6 +81,31 @@ function finalizingState(): WorkflowState {
 function getTool(pi: ExtensionAPI & { calls: Record<string, unknown[]> }, name: string) {
   const entries = (pi.calls["registerTool"] ?? []) as Array<[{ name: string; execute: Function }]>;
   return entries.find(([d]) => d.name === name)?.[0];
+}
+
+/**
+ * Run the orchestrated /implement path (B1 fire-and-forget): launch through
+ * runImplement, capture the background promise via the onBackground seam,
+ * and await settlement before returning so assertions see loop outcomes.
+ *
+ * @param pi     - ExtensionAPI reference (mock with recorded calls).
+ * @param ctx    - Extension context carrying the workflow state.
+ * @param runner - Unit runner injected into the orchestrator loop.
+ * @param args   - Optional /implement args (defaults to "").
+ * @returns The settled orchestrator result.
+ */
+async function runOrchestratedViaSeam(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  runner: UnitRunner,
+  args = "",
+): Promise<OrchestratorResult> {
+  let settled: Promise<OrchestratorResult> | undefined;
+  await runImplement(args, pi, ctx, runner, (background) => {
+    settled = background;
+  });
+  assert.ok(settled, "onBackground seam must receive the background promise");
+  return settled;
 }
 
 // ═══ runImplement ═══
@@ -166,6 +196,96 @@ describe("runImplement", () => {
     assert.equal(notifyCalls.length, 1, "runImplement should notify exactly once");
     assert.match(notifyCalls[0], /Starting TDD implementation/);
     assert.match(notifyCalls[0], /behavior by behavior/);
+  });
+});
+
+// ═══ B1: fire-and-forget orchestration launch ═══
+describe("B1: fire-and-forget orchestration launch", () => {
+  function twoBehaviorTask(): TaskContract {
+    return {
+      title: "Fire Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("resolves while the first unit is pending, emits the start notification, continues in the background", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const timeline: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      timeline.push(`notify:${msg}`);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    // First unit is deferred: it cannot finish until the test releases it.
+    let releaseFirstUnit!: () => void;
+    const firstUnitGate = new Promise<void>((resolve) => {
+      releaseFirstUnit = resolve;
+    });
+    const runner = async (unit: { behaviorId: string }): Promise<ImplementerReport> => {
+      timeline.push(`unit:${unit.behaviorId}`);
+      if (unit.behaviorId === "T1") await firstUnitGate;
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    };
+
+    let settled!: Promise<OrchestratorResult>;
+    await runImplement("", pi, ctx, runner, (background) => {
+      settled = background;
+    });
+
+    // runImplement resolved while T1 is still pending on the gate.
+    assert.ok(settled, "onBackground seam received the background promise");
+    assert.ok(!timeline.includes("unit:T2"), "runImplement returned before the deferred unit completed");
+    const saves = pi.calls["appendEntry"] ?? [];
+    const lastSave = saves[saves.length - 1] as [string, WorkflowState];
+    assert.equal(lastSave[0], "workflow-state", "state persisted before return");
+    assert.equal(lastSave[1].phase, "implementing", "implementing phase persisted before return");
+    assert.equal(state.phase, "implementing");
+
+    const starts = timeline.filter(
+      (e) => e.startsWith("notify:") && /Orchestration started in background/.test(e),
+    );
+    assert.equal(starts.length, 1, "exactly one start notification");
+    assert.match(starts[0]!, /2 unit\(s\) active/, "start notification carries the active unit count");
+
+    const savesBefore = (pi.calls["appendEntry"] ?? []).length;
+    releaseFirstUnit();
+    const result = await settled;
+
+    assert.equal(result.complete, true, "the background run completes after the deferred unit");
+    const landed = timeline.filter((e) => e.startsWith("notify:") && /landed/i.test(e));
+    assert.equal(landed.length, 2, "landed-commit notifications still fire after settlement");
+    assert.ok(landed.some((e) => e.includes("T1")) && landed.some((e) => e.includes("T2")));
+    const savesAfter = (pi.calls["appendEntry"] ?? []).length;
+    assert.ok(savesAfter > savesBefore, "per-unit state persistence continues in the background");
+    assert.equal(state.phase, "idle", "the loop returns the workflow to idle on its own");
+    assert.ok(state.task!.behaviors.every((b) => b.status === "done"));
   });
 });
 
@@ -495,7 +615,7 @@ describe("T1: HEAD-gate success path", () => {
     const calls: string[] = [];
     const maxActiveRef = { value: 0 };
 
-    await runImplement("", pi, ctx, recordingRunner(calls, maxActiveRef));
+    await runOrchestratedViaSeam(pi, ctx, recordingRunner(calls, maxActiveRef));
 
     assert.deepEqual(calls, ["T1", "T2"], "one spawn per active behavior, in order, removed skipped");
     assert.equal(maxActiveRef.value, 1, "units must run strictly sequentially");
@@ -552,7 +672,7 @@ describe("T1: HEAD-gate success path", () => {
       };
     };
 
-    await runImplement("", pi, ctx, runner);
+    await runOrchestratedViaSeam(pi, ctx, runner);
 
     const unitIdx = (id: string) => timeline.indexOf(`unit:${id}`);
     const notifyIdx = (needle: string) =>
@@ -640,7 +760,7 @@ describe("T2: HEAD-gate hook-rejection path", () => {
 
     // Initial unit succeeds; the fix subagent crashes → loop halts via the
     // exception-safety path, leaving the behavior active with no commit.
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       if (spawns.length === 1) {
         return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
@@ -675,7 +795,7 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const ctx = ctxWithState(state);
     const spawns: Array<{ behaviorId: string; taskText: string }> = [];
 
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
     });
@@ -726,7 +846,7 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const ctx = ctxWithState(state);
     const spawns: Array<{ taskText: string }> = [];
 
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ taskText: unit.taskText });
       return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
     });
@@ -765,7 +885,7 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     };
     const spawns: Array<{ taskText: string }> = [];
 
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ taskText: unit.taskText });
       return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
     });
@@ -836,7 +956,7 @@ describe("T11: resume safety", () => {
     const ctx = ctxWithState(state);
     const spawns: Array<{ taskText: string }> = [];
 
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ taskText: unit.taskText });
       return { summary: "done", suggestedCommit: "feat(core): add first behavior" };
     });
@@ -854,7 +974,7 @@ describe("T11: resume safety", () => {
     const ctx = ctxWithState(state);
     const spawns: Array<{ taskText: string }> = [];
 
-    await runImplement("", pi, ctx, async (unit) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit) => {
       spawns.push({ taskText: unit.taskText });
       return { summary: "done", suggestedCommit: "feat(core): add first behavior" };
     });
@@ -940,7 +1060,7 @@ describe("T6: exception safety in runImplement", () => {
     };
 
     // No rejection expected: the safety wrapper must absorb the crash.
-    await runImplement("", pi, ctx, async () => {
+    await runOrchestratedViaSeam(pi, ctx, async () => {
       throw new Error("subprocess exploded");
     });
 
@@ -973,7 +1093,7 @@ describe("T6: exception safety in runImplement", () => {
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehavior() };
     const ctx = ctxWithState(state);
 
-    await runImplement("", pi, ctx, async () => ({
+    await runOrchestratedViaSeam(pi, ctx, async () => ({
       summary: "attempt",
       suggestedCommit: "feat(core): add first behavior",
     }));
@@ -1053,7 +1173,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
 
-    await runImplement("", pi, ctx, failingThenSucceedingRunner(spawns, "T1", "boom: cannot write file"));
+    await runOrchestratedViaSeam(pi, ctx, failingThenSucceedingRunner(spawns, "T1", "boom: cannot write file"));
 
     assert.equal(spawns.length, 2, "one retry after the first failure");
     assert.match(
@@ -1080,8 +1200,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     };
     const spawns: Spawn[] = [];
 
-    await runImplement(
-      "",
+    await runOrchestratedViaSeam(
       pi,
       ctx,
       async (unit: Spawn): Promise<ImplementerReport & { error?: string }> => {
@@ -1131,7 +1250,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
 
-    await runImplement("", pi, ctx, async (unit: Spawn) => {
+    await runOrchestratedViaSeam(pi, ctx, async (unit: Spawn) => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       return {
         summary: `implemented ${unit.behaviorId}`,

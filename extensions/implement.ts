@@ -15,6 +15,7 @@ import {
   runOrchestratedImplement,
   setUnitPrompt,
   readGitHead,
+  type OrchestratorResult,
   type UnitRunner,
 } from "./implement-loop.ts";
 
@@ -51,16 +52,25 @@ export function hasCommitTool(pi: ExtensionAPI): boolean {
  * to implementing. By default runs the orchestrator loop; pass `--solo` to
  * hand the agent an in-session TDD prompt instead.
  *
- * @param args    - Optional `--solo` flag plus engineer's note.
- * @param pi      - ExtensionAPI reference.
- * @param ctx     - Extension context.
- * @param runUnit - Optional unit runner override (tests inject a mock).
+ * The orchestrated loop is fire-and-forget: it launches as a background
+ * task, /implement emits a start notification and returns immediately so
+ * the RPC prompt response beats the client's control-plane deadline. The
+ * completion/halt notifications fire when the background task settles.
+ *
+ * @param args        - Optional `--solo` flag plus engineer's note.
+ * @param pi          - ExtensionAPI reference.
+ * @param ctx         - Extension context.
+ * @param runUnit     - Optional unit runner override (tests inject a mock).
+ * @param onBackground - Optional seam invoked with the background promise
+ *   right after launch (production handlers ignore it; tests capture it to
+ *   await settlement deterministically).
  */
 export async function runImplement(
   args: string,
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   runUnit?: UnitRunner,
+  onBackground?: (settled: Promise<OrchestratorResult>) => void,
 ): Promise<void> {
   const state = loadState(ctx);
   if (!state || (state.phase !== "finalizing" && state.phase !== "implementing")) {
@@ -97,24 +107,38 @@ export async function runImplement(
     return;
   }
 
-  const result = await runOrchestratedImplementSafely(pi, ctx, state, task, runUnit);
-  if (result.complete) {
-    ctx.ui.notify(
-      `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
-        `${result.unitsRun} unit(s) run.`,
-      "info",
-    );
-    return;
-  }
+  // Fire-and-forget: launch the loop as a background task so this handler
+  // returns immediately (the RPC prompt response must beat the client's
+  // deadline). The catch-to-lastHalt logic stays inside the background task.
+  const activeCount = task.behaviors.filter((b) => b.status === "active").length;
+  const settled = runOrchestratedImplementSafely(pi, ctx, state, task, runUnit).then(
+    (result) => {
+      if (result.complete) {
+        ctx.ui.notify(
+          `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
+            `${result.unitsRun} unit(s) run.`,
+          "info",
+        );
+        return result;
+      }
+      ctx.ui.notify(
+        `Orchestration halted on ${result.haltedOn}: ${result.error}\n\n` +
+          `Tree state:\n${result.treeState ?? "(unavailable)"}\n\n` +
+          `Commits landed so far: ${
+            result.landedCommits.length ? result.landedCommits.join("; ") : "(none)"
+          }\n\n` +
+          `Handoff persisted to session state (lastHalt). ` +
+          `Run /implement again to resume from the first active behavior.`,
+        "warning",
+      );
+      return result;
+    },
+  );
+  onBackground?.(settled);
   ctx.ui.notify(
-    `Orchestration halted on ${result.haltedOn}: ${result.error}\n\n` +
-      `Tree state:\n${result.treeState ?? "(unavailable)"}\n\n` +
-      `Commits landed so far: ${
-        result.landedCommits.length ? result.landedCommits.join("; ") : "(none)"
-      }\n\n` +
-      `Handoff persisted to session state (lastHalt). ` +
-      `Run /implement again to resume from the first active behavior.`,
-    "warning",
+    `Orchestration started in background: ${activeCount} unit(s) active. ` +
+      `Progress arrives as status + notifications; the final report posts as an agent message when the run settles.`,
+    "info",
   );
 }
 
