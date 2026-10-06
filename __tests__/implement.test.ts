@@ -437,6 +437,187 @@ describe("B2: in-flight guard", () => {
   });
 });
 
+// ═══ B3: live footer status (key "implement") ═══
+describe('B3: live footer status (key "implement")', () => {
+  function statusTask(behaviorIds: string[]): TaskContract {
+    return {
+      title: "Status Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: behaviorIds.map((id, i) => ({
+        id,
+        description: `behavior ${i + 1}`,
+        expectedOutput: `e${i + 1}`,
+        kind: "test" as const,
+        status: "active" as const,
+      })),
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  const HOOK_STDERR = "golangci-lint run failed\ninternal error\nexit status 1";
+
+  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  function piWithRejectingHook() {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: " M src/a.ts\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  /**
+   * Capture ctx.ui.setStatus and ctx.ui.notify into parallel timelines.
+   *
+   * setStatus is captured per key; note that updateUi (state.ts) legitimately
+   * writes the shared "workflow" key through the same method, so callers
+   * assert on the "implement" key sequence and on frame-vs-key separation.
+   *
+   * @param ctx - Extension context whose ui methods are wrapped in place.
+   * @returns The captured setStatus pairs and notify messages.
+   */
+  function captureUi(ctx: ExtensionContext): {
+    statuses: Array<[string, string | undefined]>;
+    notifies: string[];
+  } {
+    const statuses: Array<[string, string | undefined]> = [];
+    const notifies: string[] = [];
+    ctx.ui.setStatus = ((key: string, value: string | undefined) => {
+      statuses.push([key, value]);
+    }) as unknown as ExtensionContext["ui"]["setStatus"];
+    ctx.ui.notify = ((msg: string) => {
+      notifies.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+    return { statuses, notifies };
+  }
+
+  /** The "implement"-key values, in capture order. */
+  function implementFrames(statuses: Array<[string, string | undefined]>): Array<string | undefined> {
+    return statuses.filter(([key]) => key === "implement").map(([, value]) => value);
+  }
+
+  it("clean units emit implementing -> committing -> landed per position; final call clears 'implement'", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: statusTask(["T1", "T2"]),
+    };
+    const ctx = ctxWithState(state);
+    const { statuses, notifies } = captureUi(ctx);
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => ({
+      summary: `implemented ${unit.behaviorId}`,
+      suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+    }));
+
+    assert.equal(result.complete, true, "the clean run completes");
+    assert.deepEqual(
+      implementFrames(statuses),
+      [
+        "✦ T1 (1/2): implementing…",
+        "✦ T1 (1/2): committing…",
+        "✦ T1 (1/2): landed",
+        "✦ T2 (2/2): implementing…",
+        "✦ T2 (2/2): committing…",
+        "✦ T2 (2/2): landed",
+        undefined,
+      ],
+      "implement frames: implementing -> committing -> landed per unit position, final call clears the key",
+    );
+    const last = statuses[statuses.length - 1]!;
+    assert.deepEqual(
+      last,
+      ["implement", undefined],
+      "the final setStatus call after loop end clears key 'implement'",
+    );
+    // updateUi (state.ts) writes the shared "workflow" key with phase
+    // indicators (undefined or "◉ …"); the loop's own ✦ frames must never
+    // land on that key.
+    const workflowValues = statuses
+      .filter(([key]) => key === "workflow")
+      .map(([, value]) => value);
+    assert.ok(
+      workflowValues.every((v) => v === undefined || v.startsWith("◉")),
+      `no captured call writes an 'implement' loop frame under the 'workflow' key, got: ${JSON.stringify(statuses)}`,
+    );
+    const landed = notifies.filter((m) => /landed/i.test(m));
+    assert.equal(landed.length, 2, "landed-commit notifications still appear in the notify timeline");
+  });
+
+  it("a hook-rejected retry emits retry frames carrying the attempt number, then clears on halt", async () => {
+    const pi = piWithRejectingHook();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: statusTask(["T1"]),
+    };
+    const ctx = ctxWithState(state);
+    const { statuses } = captureUi(ctx);
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => ({
+      summary: `attempt for ${unit.behaviorId}`,
+      suggestedCommit: "feat(core): add first behavior",
+    }));
+
+    assert.equal(result.complete, false, "persistent hook rejection halts the loop");
+    assert.equal(result.haltedOn, "T1");
+    const frames = implementFrames(statuses);
+    assert.ok(frames.includes("✦ T1 (1/1): implementing…"), "unit-start frame emitted");
+    assert.ok(frames.includes("✦ T1 (1/1): committing…"), "committing frame emitted before commit attempts");
+    const retryFrames = frames.filter((f): f is string => f !== undefined && f.includes("retry"));
+    assert.deepEqual(
+      retryFrames,
+      [
+        "✦ T1 (1/1): retry 1/5…",
+        "✦ T1 (1/1): retry 2/5…",
+        "✦ T1 (1/1): retry 3/5…",
+        "✦ T1 (1/1): retry 4/5…",
+        "✦ T1 (1/1): retry 5/5…",
+      ],
+      "each retry iteration emits its frame carrying the attempt number",
+    );
+    assert.deepEqual(
+      frames[frames.length - 1],
+      undefined,
+      "the final implement-frame after halt clears key 'implement'",
+    );
+    const workflowFrames = statuses.filter(
+      ([key, value]) => key === "workflow" && value !== undefined && value.includes("✦"),
+    );
+    assert.deepEqual(workflowFrames, [], "the loop never writes a frame under the 'workflow' key");
+  });
+});
+
 // ═══ T1: capability-conditional commit instruction ═══
 describe("T1: capability-conditional commit instruction", () => {
   it("buildTddPrompt(task, true) instructs commit_changes after each mark, no behavior id", async () => {

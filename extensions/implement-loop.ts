@@ -279,6 +279,7 @@ export async function runOrchestratedImplement(
     };
     saveState(pi, state);
     updateUi(state, ctx);
+    ctx.ui.setStatus("implement", undefined);
     return result;
   };
 
@@ -289,6 +290,7 @@ export async function runOrchestratedImplement(
       saveState(pi, state);
       updateUi(null, ctx);
     }
+    ctx.ui.setStatus("implement", undefined);
     return result;
   }
 
@@ -310,6 +312,10 @@ export async function runOrchestratedImplement(
     // Progress visibility: a unit subprocess can run for minutes with captured
     // stdio — announce start and landing so a healthy run never looks frozen.
     ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
+    // B3: live footer status under the distinct "implement" key; the
+    // "workflow" key from state.ts updateUi is never written by these frames.
+    const position = `${unitIndex + 1}/${totalUnits}`;
+    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`);
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
       taskText: buildUnitTask(behavior, task) + resumeTreeContext,
@@ -325,6 +331,7 @@ export async function runOrchestratedImplement(
         if (retry > RETRY_BUDGET) {
           return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
         }
+        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
         taskText = buildRetryTask(behavior, task, attempt, retry);
         attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
         result.unitsRun++;
@@ -332,11 +339,13 @@ export async function runOrchestratedImplement(
       }
 
       const subject = pickCommitSubject(attempt, behavior);
+      ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
       const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry);
 
       if (commit.outcome === null) {
         landedCommits.push(subject);
         behavior.status = "done";
+        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): landed`);
         state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
         state.lastHalt = undefined;
         saveState(pi, state);
@@ -372,6 +381,7 @@ export async function runOrchestratedImplement(
         return halt(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
       }
 
+      ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
       taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
       attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
       result.unitsRun++;
@@ -385,6 +395,7 @@ export async function runOrchestratedImplement(
   state.phase = "idle";
   saveState(pi, state);
   updateUi(null, ctx);
+  ctx.ui.setStatus("implement", undefined);
   result.complete = true;
   return result;
 }
