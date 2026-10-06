@@ -535,6 +535,42 @@ describe("T1: HEAD-gate success path", () => {
     }
   });
 
+  it("emits per-unit progress before each run and a landed notification per commit (T3)", async () => {
+    const { pi } = piWithGit();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };
+    const ctx = ctxWithState(state);
+    const timeline: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      timeline.push(`notify:${msg}`);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    const runner = async (unit: { behaviorId: string }): Promise<ImplementerReport> => {
+      timeline.push(`unit:${unit.behaviorId}`);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId === "T1" ? "first behavior" : "second behavior"}`,
+      };
+    };
+
+    await runImplement("", pi, ctx, runner);
+
+    const unitIdx = (id: string) => timeline.indexOf(`unit:${id}`);
+    const notifyIdx = (needle: string) =>
+      timeline.findIndex((e) => e.startsWith("notify:") && e.includes(needle));
+
+    assert.ok(unitIdx("T1") >= 0 && unitIdx("T2") >= 0, "both units ran");
+    assert.ok(notifyIdx("T1") >= 0, "T1 progress notification emitted");
+    assert.ok(notifyIdx("T2") >= 0, "T2 progress notification emitted");
+    assert.ok(notifyIdx("T1") < unitIdx("T1"), "T1 progress precedes its unit run");
+    assert.ok(notifyIdx("T2") < unitIdx("T2"), "T2 progress precedes its unit run");
+    const landed = timeline.filter((e) => e.startsWith("notify:") && /landed/i.test(e));
+    assert.equal(landed.length, 2, "one landed-commit notification per behavior");
+    assert.ok(
+      landed.some((e) => e.includes("T1")) && landed.some((e) => e.includes("T2")),
+      "landed notifications name the behavior",
+    );
+  });
+
   it("--solo restores the in-session steer loop", async () => {
     const { pi, execLog } = piWithGit();
     const state: WorkflowState = { phase: "finalizing", specText: "topic", task: orchTask() };

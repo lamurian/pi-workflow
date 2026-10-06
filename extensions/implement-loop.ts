@@ -243,7 +243,8 @@ export function getCommitTimeoutMs(
  * no-changes (same budget). Commit-process timeouts halt as infrastructure
  * failures. Every halt persists lastHalt into workflow state so failures are
  * diagnosable from the session log. Already-done behaviors are skipped, so
- * re-running resumes cleanly.
+ * re-running resumes cleanly. Progress notifications (unit start + landed
+ * commit) keep a multi-minute run visibly alive in the UI.
  *
  * @param pi      - ExtensionAPI reference.
  * @param ctx     - Extension context (cwd, UI).
@@ -303,7 +304,12 @@ export async function runOrchestratedImplement(
     }
   }
 
-  for (const behavior of units) {
+  const totalUnits = units.length;
+  for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
+    const behavior = units[unitIndex]!;
+    // Progress visibility: a unit subprocess can run for minutes with captured
+    // stdio — announce start and landing so a healthy run never looks frozen.
+    ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
       taskText: buildUnitTask(behavior, task) + resumeTreeContext,
@@ -335,6 +341,7 @@ export async function runOrchestratedImplement(
         state.lastHalt = undefined;
         saveState(pi, state);
         updateUi(state, ctx);
+        ctx.ui.notify(`Landed commit for ${behavior.id}: ${subject}`, "info");
         break;
       }
 
