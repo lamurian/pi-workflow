@@ -145,6 +145,10 @@ export async function runImplement(
             `${result.unitsRun} unit(s) run.`,
           "info",
         );
+        // B4: the loop has already set state.phase to idle and persisted it
+        // before returning; deliver the pinned completion report as an agent
+        // turn (explore pattern) so the outcome renders in RPC clients.
+        pi.sendUserMessage(composeCompletionReport(result, task), { deliverAs: "steer" });
         return result;
       }
       ctx.ui.notify(
@@ -170,6 +174,44 @@ export async function runImplement(
       `Progress arrives as status + notifications; the final report posts as an agent message when the run settles.`,
     "info",
   );
+}
+
+/**
+ * Compose the pinned completion report for a settled orchestration.
+ *
+ * Delivered as an agent turn via `pi.sendUserMessage(report, { deliverAs:
+ * "steer" })` after the orchestrator loop has set state.phase to idle and
+ * persisted it (the explore pattern), so the outcome renders as an
+ * assistant message in RPC clients even though the original /implement
+ * prompt request is long done.
+ *
+ * @param result - The settled orchestrator outcome (complete).
+ * @param task   - The task contract (provides the done behavior ids).
+ * @returns The markdown report string with the pinned shape.
+ */
+export function composeCompletionReport(
+  result: OrchestratorResult,
+  task: TaskContract,
+): string {
+  const lines: string[] = [
+    "## Implementation status: complete",
+    "",
+    `Units run: ${result.unitsRun}`,
+    "",
+    "Commits landed:",
+  ];
+  for (const subject of result.landedCommits) {
+    lines.push(`- ${subject}`);
+  }
+  lines.push("", "Behaviors:");
+  for (const behavior of task.behaviors.filter((b) => b.status === "done")) {
+    lines.push(`- ${behavior.id} done`);
+  }
+  lines.push(
+    "",
+    "No action needed: relay this status to the user. Do not run tools or modify the working tree.",
+  );
+  return lines.join("\n");
 }
 
 /**

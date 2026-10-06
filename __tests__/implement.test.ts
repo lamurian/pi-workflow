@@ -4,6 +4,7 @@ import {
   runImplement,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
+  composeCompletionReport,
 } from "../extensions/implement.ts";
 import {
   readGitHead,
@@ -615,6 +616,140 @@ describe('B3: live footer status (key "implement")', () => {
       ([key, value]) => key === "workflow" && value !== undefined && value.includes("✦"),
     );
     assert.deepEqual(workflowFrames, [], "the loop never writes a frame under the 'workflow' key");
+  });
+});
+
+// ═══ B4: completion report as an agent turn ═══
+describe("B4: completion report as an agent turn", () => {
+  function completeState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Report Task",
+        instruction: "do the thing",
+        files: ["src/a.ts"],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
+          { id: "T2", description: "second", expectedOutput: "e2", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("composeCompletionReport pins the complete heading, counts, commit lines, done ids, and closing instruction", () => {
+    const task = completeState().task!;
+    for (const behavior of task.behaviors) behavior.status = "done";
+    const result: OrchestratorResult = {
+      complete: true,
+      unitsRun: 2,
+      landedCommits: ["feat(core): add T1", "feat(core): add T2"],
+    };
+
+    const report = composeCompletionReport(result, task);
+
+    assert.match(report, /## Implementation status: complete/, "complete heading");
+    assert.match(report, /Units run: 2/, "units-run count");
+    assert.match(
+      report,
+      /Commits landed:\n- feat\(core\): add T1\n- feat\(core\): add T2/,
+      "one - <subject> line per landed commit",
+    );
+    assert.match(report, /Behaviors:\n- T1 done\n- T2 done/, "done behavior id entries");
+    assert.match(
+      report,
+      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
+      "closing no-action instruction",
+    );
+  });
+
+  it("a complete run delivers exactly one steer report after idle persistence; the completion notify still fires", async () => {
+    const pi = piWithAdvancingHead();
+    const state = completeState();
+    const ctx = ctxWithState(state);
+    const notifies: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      notifies.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    // Record each delivery's options and the persisted workflow phase at
+    // delivery time (last workflow-state entry in the appendEntry calls).
+    const deliveries: Array<{
+      text: string;
+      deliverAs?: string;
+      persistedPhase: string | undefined;
+    }> = [];
+    pi.sendUserMessage = ((text: string, opts: { deliverAs: string }) => {
+      const entries = (pi.calls["appendEntry"] ?? []) as Array<
+        [string, { phase?: string }]
+      >;
+      let persistedPhase: string | undefined;
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const entry = entries[i];
+        if (entry[0] === "workflow-state" && entry[1]?.phase) {
+          persistedPhase = entry[1].phase;
+          break;
+        }
+      }
+      deliveries.push({ text, deliverAs: opts?.deliverAs, persistedPhase });
+    }) as ExtensionAPI["sendUserMessage"];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => ({
+      summary: `implemented ${unit.behaviorId}`,
+      suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+    }));
+
+    assert.equal(result.complete, true, "the clean run completes");
+    assert.equal(deliveries.length, 1, "exactly one sendUserMessage delivery on completion");
+    const delivery = deliveries[0]!;
+    assert.equal(delivery.deliverAs, "steer", "delivered as an agent-turn steer");
+    assert.match(delivery.text, /## Implementation status: complete/, "complete heading");
+    assert.match(delivery.text, /Units run: 2/, "units-run count");
+    assert.ok(
+      delivery.text.includes("- feat(core): add T1"),
+      "report lists the first landed commit subject",
+    );
+    assert.ok(
+      delivery.text.includes("- feat(core): add T2"),
+      "report lists the second landed commit subject",
+    );
+    assert.ok(
+      delivery.text.includes("- T1 done") && delivery.text.includes("- T2 done"),
+      "report lists the done behavior ids",
+    );
+    assert.match(
+      delivery.text,
+      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
+      "closing no-action instruction",
+    );
+    assert.equal(
+      delivery.persistedPhase,
+      "idle",
+      "state.phase is idle and persisted before the report is delivered",
+    );
+    assert.equal(state.phase, "idle");
+    const completeNotifies = notifies.filter((m) =>
+      /Orchestrated implementation complete/.test(m),
+    );
+    assert.equal(completeNotifies.length, 1, "the completion notify still fires");
   });
 });
 
