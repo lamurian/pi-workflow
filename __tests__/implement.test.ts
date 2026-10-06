@@ -289,6 +289,154 @@ describe("B1: fire-and-forget orchestration launch", () => {
   });
 });
 
+// ═══ B2: in-flight guard ═══
+describe("B2: in-flight guard", () => {
+  const REFUSAL_WARNING =
+    "An orchestrated implementation is already in flight. Wait for it to settle (watch status/notifications), then re-run /implement to resume.";
+
+  function twoBehaviorState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Guard Task",
+        instruction: "do the thing",
+        files: ["src/a.ts"],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
+          { id: "T2", description: "second", expectedOutput: "e2", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("refuses a second /implement while one is in flight; a fresh run launches after settlement", async () => {
+    const pi = piWithAdvancingHead();
+    const state = twoBehaviorState();
+    const ctx = ctxWithState(state);
+    const timeline: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      timeline.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    // Hold the first run in flight: its first unit blocks on the gate, then
+    // keeps failing so the run halts (phase stays implementing for resume).
+    let releaseFirstUnit!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirstUnit = resolve;
+    });
+    const firstSpawns: string[] = [];
+    const firstRunner = async (
+      unit: { behaviorId: string },
+    ): Promise<ImplementerReport & { error?: string }> => {
+      firstSpawns.push(unit.behaviorId);
+      if (unit.behaviorId === "T1" && firstSpawns.filter((id) => id === "T1").length === 1) {
+        await gate;
+      }
+      return { summary: "", error: `boom: ${unit.behaviorId} failed` };
+    };
+
+    let settled!: Promise<OrchestratorResult>;
+    await runImplement("", pi, ctx, firstRunner, (background) => {
+      settled = background;
+    });
+    assert.ok(settled, "onBackground seam received the background promise");
+    assert.equal(state.phase, "implementing");
+
+    // Let the background loop reach the deferred unit so it is genuinely
+    // parked in flight before the second call arrives.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(firstSpawns.includes("T1"), "first run is held in flight on T1");
+
+    // Second call while the first run is in flight.
+    const stateSnapshot = JSON.parse(JSON.stringify(state));
+    const savesBefore = (pi.calls["appendEntry"] ?? []).length;
+    const spawnsBefore = firstSpawns.length;
+    timeline.length = 0;
+
+    const secondSpawns: string[] = [];
+    let secondSettled: Promise<OrchestratorResult> | undefined;
+    await runImplement(
+      "",
+      pi,
+      ctx,
+      async (unit) => {
+        secondSpawns.push(unit.behaviorId);
+        return { summary: "x", suggestedCommit: "feat: x" };
+      },
+      (background) => {
+        secondSettled = background;
+      },
+    );
+
+    assert.deepEqual(timeline, [REFUSAL_WARNING], "second call emits exactly the refusal warning");
+    assert.equal(secondSettled, undefined, "no background task launched for the refused call");
+    assert.equal(secondSpawns.length, 0, "no units spawned by the refused call");
+    assert.equal(firstSpawns.length, spawnsBefore, "the in-flight loop is untouched");
+    assert.equal(
+      (pi.calls["appendEntry"] ?? []).length,
+      savesBefore,
+      "no state persisted by the refused call",
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(state)), stateSnapshot, "workflow state unchanged");
+
+    // Release the first run: it exhausts the retry budget and halts.
+    releaseFirstUnit();
+    const result = await settled;
+    assert.equal(result.complete, false, "first run halts after the runner keeps failing");
+    assert.ok(result.haltedOn, "first run records a halt");
+    assert.equal(state.phase, "implementing", "halt keeps the phase implementing for resume");
+
+    // Third call after settlement launches a new loop that runs units normally.
+    timeline.length = 0;
+    const thirdSpawns: string[] = [];
+    let thirdSettled!: Promise<OrchestratorResult>;
+    await runImplement(
+      "",
+      pi,
+      ctx,
+      async (unit) => {
+        thirdSpawns.push(unit.behaviorId);
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+        };
+      },
+      (background) => {
+        thirdSettled = background;
+      },
+    );
+
+    assert.ok(thirdSettled, "post-settlement call launches a background task");
+    assert.ok(
+      timeline.some((m) => /Orchestration started in background/.test(m)),
+      "post-settlement call emits the start notification",
+    );
+    const thirdResult = await thirdSettled;
+    assert.equal(thirdResult.complete, true, "the new run completes");
+    assert.ok(thirdSpawns.includes("T1"), "the new run spawns units normally");
+    assert.equal(state.phase, "idle", "the new run completes the workflow");
+  });
+});
+
 // ═══ T1: capability-conditional commit instruction ═══
 describe("T1: capability-conditional commit instruction", () => {
   it("buildTddPrompt(task, true) instructs commit_changes after each mark, no behavior id", async () => {

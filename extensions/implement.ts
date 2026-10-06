@@ -36,6 +36,20 @@ export function parseImplementArgs(args: string): { solo: boolean; note: string 
 }
 
 /**
+ * Module-level in-flight guard for the orchestrated /implement path.
+ *
+ * Fire-and-forget removed the accidental re-entry protection (the blocked
+ * turn used to prevent a second slash command), so this explicit flag
+ * refuses a second /implement while a background orchestration is running.
+ */
+let orchestrationInFlight = false;
+
+/** Pinned refusal warning emitted while a background run holds the guard. */
+const IN_FLIGHT_WARNING =
+  "An orchestrated implementation is already in flight. " +
+  "Wait for it to settle (watch status/notifications), then re-run /implement to resume.";
+
+/**
  * Detect whether the `commit_changes` tool is registered in this session.
  *
  * @param pi - ExtensionAPI reference.
@@ -57,6 +71,12 @@ export function hasCommitTool(pi: ExtensionAPI): boolean {
  * the RPC prompt response beats the client's control-plane deadline. The
  * completion/halt notifications fire when the background task settles.
  *
+ * A module-level guard refuses a second invocation while a background
+ * orchestration is in flight: it emits a pinned warning and returns without
+ * launching a second loop or touching state. The flag is set at launch and
+ * cleared in a finally when the background task settles, so a later
+ * /implement resumes normally.
+ *
  * @param args        - Optional `--solo` flag plus engineer's note.
  * @param pi          - ExtensionAPI reference.
  * @param ctx         - Extension context.
@@ -72,6 +92,11 @@ export async function runImplement(
   runUnit?: UnitRunner,
   onBackground?: (settled: Promise<OrchestratorResult>) => void,
 ): Promise<void> {
+  // In-flight guard: refuse re-entry before any state load or mutation.
+  if (orchestrationInFlight) {
+    ctx.ui.notify(IN_FLIGHT_WARNING, "warning");
+    return;
+  }
   const state = loadState(ctx);
   if (!state || (state.phase !== "finalizing" && state.phase !== "implementing")) {
     ctx.ui.notify(
@@ -111,8 +136,9 @@ export async function runImplement(
   // returns immediately (the RPC prompt response must beat the client's
   // deadline). The catch-to-lastHalt logic stays inside the background task.
   const activeCount = task.behaviors.filter((b) => b.status === "active").length;
-  const settled = runOrchestratedImplementSafely(pi, ctx, state, task, runUnit).then(
-    (result) => {
+  orchestrationInFlight = true;
+  const settled = runOrchestratedImplementSafely(pi, ctx, state, task, runUnit)
+    .then((result) => {
       if (result.complete) {
         ctx.ui.notify(
           `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
@@ -132,8 +158,12 @@ export async function runImplement(
         "warning",
       );
       return result;
-    },
-  );
+    })
+    .finally(() => {
+      // Cleared when the background task settles (complete, halt, or crash)
+      // so a later /implement resumes normally.
+      orchestrationInFlight = false;
+    });
   onBackground?.(settled);
   ctx.ui.notify(
     `Orchestration started in background: ${activeCount} unit(s) active. ` +
