@@ -29,7 +29,7 @@ function mockPi(
     sendUserMessage: record("sendUserMessage") as ExtensionAPI["sendUserMessage"],
     getActiveTools: () => [...activeTools],
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
-    exec: execImpl ?? (async () => ({ stdout: "", stderr: "", exitCode: 0 })),
+    exec: execImpl ?? (async () => ({ stdout: "", stderr: "", code: 0, killed: false })),
     calls,
   } as unknown as ExtensionAPI & { calls: typeof calls };
 }
@@ -339,8 +339,9 @@ describe("save_task scan wiring (T3)", () => {
     return dir;
   }
 
-  function execReturning(stdout: string, exitCode = 0): ExtensionAPI["exec"] {
-    return async () => ({ stdout, stderr: "", exitCode });
+  /** Mirrors pi's real ExecResult: { stdout, stderr, code, killed }. */
+  function execReturning(stdout: string, code = 0): ExtensionAPI["exec"] {
+    return async () => ({ stdout, stderr: "", code, killed: false });
   }
 
   it("appends per-entry evidence with method+confidence and cross-check warnings", async () => {
@@ -393,6 +394,22 @@ describe("save_task scan wiring (T3)", () => {
 
   it("degrades to scan unavailable when the find listing is empty", async () => {
     const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(""));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /Task saved/);
+    assert.match(res.content[0].text, /scan unavailable/);
+  });
+
+  it("degrades to scan unavailable when find exits non-zero", async () => {
+    // Regression for the ExecResult.code fix: a non-zero code must yield
+    // null (scan unavailable) even when stdout carries a listing.
+    const listing = ["./src/a.ts"].join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing, 1));
     registerSaveTaskTool(pi);
     const s = discussingState();
     const ctx = ctxWithState(s);

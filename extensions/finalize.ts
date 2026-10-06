@@ -53,7 +53,7 @@ export async function runContractScan(
     const findArgs = [".", "-type", "f"];
     for (const ex of SCAN_EXCLUDES) findArgs.push("-not", "-path", `*/${ex}/*`);
     const res = await pi.exec("find", findArgs, { cwd, timeout: SCAN_BUDGET_MS });
-    if ((res.exitCode ?? 1) !== 0) return null;
+    if (res.code !== 0) return null;
     const listing = (res.stdout ?? "")
       .split("\n")
       .map((l) => l.trim().replace(/^\.\//, ""))
