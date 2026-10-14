@@ -471,11 +471,13 @@ export function buildImplementerArgs(
  * Extract the last assistant text from JSON-mode event output.
  *
  * Malformed JSON lines (e.g. from a killed process) are skipped.
+ * Exported so unit diagnostics can use it as retry context instead of
+ * raw JSONL.
  *
  * @param stdout - Raw JSONL output from the subprocess.
  * @returns The last assistant message text, or "" when none parsed.
  */
-function lastAssistantText(stdout: string): string {
+export function lastAssistantText(stdout: string): string {
   let last = "";
   for (const line of stdout.split("\n")) {
     if (!line.trim()) continue;

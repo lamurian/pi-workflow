@@ -673,4 +673,118 @@ describe("runImplementerUnit diagnostics (T7)", () => {
       else process.env.PI_BIN = prev;
     }
   });
+
+  it("flags timeouts and leads the error with the last assistant text, not raw JSONL", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = await fakePi("sleep 60\n");
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 400);
+      assert.equal(res.timedOut, true, "timeout must be flagged structurally");
+      assert.match(res.error ?? "", /halfway there/, "error context must be the assistant text");
+      assert.doesNotMatch(
+        res.error ?? "",
+        /"type":"message_end"/,
+        "raw JSONL must not be the primary error context on timeout",
+      );
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("non-timeout failures carry no timedOut flag and keep the current error shape", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = await fakePi("exit 3\n");
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 5_000);
+      assert.equal(res.timedOut, undefined, "non-timeout failures must not be flagged");
+      assert.match(res.error ?? "", /halfway there/, "stdout tail context is unchanged");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("classifies exit-0 without a JSON report block as a missingReport failure", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const prev = process.env.PI_BIN;
+    // Assistant prose (a handover plea) but no ```json block, clean exit.
+    process.env.PI_BIN = await fakePi("exit 0\n");
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 5_000);
+      assert.equal(res.missingReport, true, "prose-only turn must be flagged as missingReport");
+      assert.match(res.error ?? "", /ended without the required JSON report/);
+      assert.match(res.error ?? "", /halfway there/, "the final assistant text must be quoted");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("classifies a broken JSON report block as missingReport too", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const { writeFileSync, chmodSync, mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "pi-fake-"));
+    const fake = join(dir, "fake-pi.sh");
+    const event = JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: 'Tried.\n```json\n{"summary": "broken\n```' }],
+      },
+    });
+    writeFileSync(fake, "#!/bin/sh\n" + `printf '%s\\n' '${event}'\n` + "exit 0\n");
+    chmodSync(fake, 0o755);
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = fake;
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 5_000);
+      assert.equal(res.missingReport, true, "a broken report block must be flagged");
+      assert.match(res.error ?? "", /ended without the required JSON report/);
+      assert.match(res.error ?? "", /Tried\./, "the final assistant text must be quoted");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("keeps exit-0 with a valid JSON report block a success", async () => {
+    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
+    const { writeFileSync, chmodSync, mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "pi-fake-"));
+    const fake = join(dir, "fake-pi.sh");
+    const event = JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "text",
+            text:
+              'Done.\n```json\n{"summary": "added header", "suggestedCommit": "feat(ui): add header"}\n```',
+          },
+        ],
+      },
+    });
+    writeFileSync(fake, "#!/bin/sh\n" + `printf '%s\\n' '${event}'\n` + "exit 0\n");
+    chmodSync(fake, 0o755);
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = fake;
+    try {
+      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 5_000);
+      assert.equal(res.error, undefined, "a compliant report must not be an error");
+      assert.equal(res.missingReport, undefined);
+      assert.equal(res.summary, "added header");
+      assert.equal(res.suggestedCommit, "feat(ui): add header");
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
 });

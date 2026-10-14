@@ -4,6 +4,7 @@ import {
   createTimeoutSignal,
   getPiInvocation,
   getImplementerTimeoutMs,
+  lastAssistantText,
   parseImplementerReport,
   type ImplementerReport,
 } from "./subagent-runner.ts";
@@ -130,21 +131,47 @@ export async function runRawPiProcess(
 // ─── Unit runner ───────────────────────────────────────────────────────────────
 
 /**
+ * Check that a final assistant message contains a parseable JSON report
+ * block (fenced ```json with a string `summary`).
+ *
+ * Mirrors parseImplementerReport's success criterion: a missing, broken,
+ * or summary-less block means the unit did not comply with the mandatory
+ * report format — even though parseImplementerReport tolerantly falls
+ * back to the whole message text.
+ *
+ * @param text - Final assistant message text (may be empty).
+ * @returns True when a valid report block exists.
+ */
+function hasParseableReport(text: string): boolean {
+  const match = text.match(/```json\s*([\s\S]*?)```/);
+  if (!match) return false;
+  try {
+    const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
+    return typeof parsed.summary === "string";
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run one implementer unit subprocess and parse its structured report.
  *
  * Spawns `pi` with the implementer's lean argv, then parses the final
  * assistant message into `{ summary, suggestedCommit }`. A non-zero exit
  * yields an `error` field rather than throwing, so the orchestrator can
- * apply its retry policy uniformly. The error carries the captured stderr
- * (including named timeouts and spawn errors) plus a tail of stdout so the
- * retry prompt receives real diagnostic context.
+ * apply its retry policy uniformly. Timeouts are detected structurally
+ * (`timedOut: true`) and their error context is the last assistant text —
+ * not raw JSONL — so a retry prompt receives actionable diagnostics.
+ * An exit-0 turn without a parseable JSON report block (e.g. a prose
+ * handover plea) is a failure too (`missingReport: true`), never a
+ * silent success.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
  * @param taskText     - The behavior slice for this unit.
  * @param cwd          - Working directory for the subprocess.
  * @param signal       - Optional parent abort signal.
  * @param timeoutMs    - Per-process timeout in ms.
- * @returns Parsed report, plus `error` when the unit failed.
+ * @returns Parsed report, plus `error`/`timedOut`/`missingReport` on failure.
  */
 export async function runImplementerUnit(
   systemPrompt: string,
@@ -152,17 +179,43 @@ export async function runImplementerUnit(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs: number = getImplementerTimeoutMs(),
-): Promise<ImplementerReport & { error?: string }> {
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean }> {
   const args = buildImplementerArgs(systemPrompt, taskText);
   const { stdout, stderr, exitCode } = await runRawPiProcess(args, cwd, signal, timeoutMs);
   const report = parseImplementerReport(stdout);
   if (exitCode !== 0) {
+    // runRawPiProcess appends "timed out after <ms>ms" on a timeout kill —
+    // the same marker the orchestrator's retry prompt keys off.
+    const isTimeout = /timed out after \d+ms/.test(stderr);
+    if (isTimeout) {
+      const assistant = lastAssistantText(stdout);
+      const rawTail = assistant ? "" : stdout.trim().slice(-400);
+      const parts = [
+        stderr.trim() || `implementer timed out after ${timeoutMs}ms`,
+        assistant ? `--- last assistant text ---\n${assistant}` : "",
+        rawTail ? `--- raw stdout tail ---\n${rawTail}` : "",
+      ].filter(Boolean);
+      return { ...report, error: parts.join("\n\n"), timedOut: true };
+    }
     const stdoutTail = stdout.trim().slice(-2000);
     const parts = [
       stderr.trim() || `implementer exited with code ${exitCode}`,
       stdoutTail ? `--- unit stdout tail ---\n${stdoutTail}` : "",
     ].filter(Boolean);
     return { ...report, error: parts.join("\n\n") };
+  }
+  const finalText = lastAssistantText(stdout);
+  if (!hasParseableReport(finalText)) {
+    const detail = finalText
+      ? `--- final assistant text ---\n${finalText}`
+      : "(no assistant output captured)";
+    return {
+      ...report,
+      error:
+        "implementer ended without the required JSON report block " +
+        "(a prose handover plea is not a report).\n\n" + detail,
+      missingReport: true,
+    };
   }
   return report;
 }
