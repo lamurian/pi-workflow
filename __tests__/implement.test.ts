@@ -2316,3 +2316,100 @@ describe("blockedCommands: mustRunNow pause-halt", () => {
     );
   });
 });
+
+describe("blockedCommands: deferrable collection", () => {
+  function twoBehaviorTask(): TaskContract {
+    return {
+      title: "Code Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  function execRecordingPi(): {
+    pi: ExtensionAPI & { calls: Record<string, unknown[]> };
+    execLog: Array<{ cmd: string; args: string[] }>;
+  } {
+    const pi = mockPi();
+    const execLog: Array<{ cmd: string; args: string[] }> = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  it("lands the commit and collects deferrable entries into deferredCommands", async () => {
+    const { pi } = execRecordingPi();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const ctx = ctxWithState(state);
+    const deferrable = [
+      { command: "npx prettier --check src", reason: "sandbox blocks write to cache", mustRunNow: false },
+    ];
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) =>
+      unit.behaviorId === "T1"
+        ? {
+            summary: "implemented, one check deferred",
+            suggestedCommit: "feat(core): add first behavior",
+            blockedCommands: deferrable,
+          }
+        : {
+            summary: "implemented T2",
+            suggestedCommit: "feat(core): add second behavior",
+          },
+    );
+
+    assert.equal(result.complete, true, "deferrable entries never block landing");
+    assert.deepEqual(state.task!.behaviors.map((b) => b.status), ["done", "done"]);
+    assert.deepEqual(result.deferredCommands, deferrable, "deferrable entries are collected");
+    assert.equal(result.pendingCommand, undefined, "deferrable entries never pause-halt");
+  });
+
+  it("a unit report without blockedCommands yields empty deferredCommands", async () => {
+    const { pi } = execRecordingPi();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const ctx = ctxWithState(state);
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => ({
+      summary: `implemented ${unit.behaviorId}`,
+      suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+    }));
+
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.deferredCommands, [], "no blockedCommands yields an empty list");
+  });
+
+  it("composeCompletionReport lists deferred commands with run-outside-sandbox guidance", () => {
+    const task = twoBehaviorTask();
+    task.behaviors.forEach((b) => (b.status = "done"));
+    const result: OrchestratorResult = {
+      complete: true,
+      unitsRun: 2,
+      landedCommits: ["feat(core): add first behavior"],
+      deferredCommands: [
+        { command: "npx prettier --check src", reason: "sandbox blocks cache write", mustRunNow: false },
+      ],
+    };
+
+    const report = composeCompletionReport(result, task);
+
+    assert.match(report, /Deferred commands/i, "deferred section present");
+    assert.match(report, /npx prettier --check src/, "the deferred command is named verbatim");
+    assert.match(report, /outside the sandbox/i, "run-outside-sandbox guidance present");
+    assert.match(report, /sandbox blocks cache write/, "the reason is carried");
+  });
+});

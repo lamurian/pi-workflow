@@ -12,7 +12,7 @@ import {
   runImplementerUnit,
   type UnitTask,
 } from "./implementer-runner.ts";
-import type { ImplementerReport } from "./subagent-runner.ts";
+import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
 import {
   RETRY_BUDGET,
   buildFixTask,
@@ -46,6 +46,8 @@ export interface OrchestratorResult {
   treeState?: string;
   /** Sandbox-blocked command the user must run before resuming (pause-halt). */
   pendingCommand?: PendingCommand;
+  /** Deferrable sandbox-blocked commands reported by units (informational). */
+  deferredCommands?: BlockedCommand[];
 }
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
@@ -269,7 +271,7 @@ export async function runOrchestratedImplement(
   const cwd = ctx.cwd;
   const landedCommits: string[] = [];
   const units = task.behaviors.filter((b) => b.status === "active");
-  const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits };
+  const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits, deferredCommands: [] };
 
   const halt = async (
     behaviorId: string,
@@ -365,6 +367,12 @@ export async function runOrchestratedImplement(
             `Run it outside the sandbox, then /implement resumes.`,
           pendingCommand,
         );
+      }
+
+      // Deferrable entries never block landing: the commit gate runs as
+      // usual and the commands are reported to the user at completion.
+      for (const entry of attempt.blockedCommands ?? []) {
+        result.deferredCommands!.push(entry);
       }
 
       const subject = pickCommitSubject(attempt, behavior);

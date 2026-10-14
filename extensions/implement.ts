@@ -188,7 +188,9 @@ export async function runImplement(
  * "steer" })` after the orchestrator loop has set state.phase to idle and
  * persisted it (the explore pattern), so the outcome renders as an
  * assistant message in RPC clients even though the original /implement
- * prompt request is long done.
+ * prompt request is long done. A result with deferredCommands renders a
+ * "Deferred commands" section (manual, run outside the sandbox) after the
+ * behavior list.
  *
  * @param result - The settled orchestrator outcome (complete).
  * @param task   - The task contract (provides the done behavior ids).
@@ -211,6 +213,16 @@ export function composeCompletionReport(
   lines.push("", "Behaviors:");
   for (const behavior of task.behaviors.filter((b) => b.status === "done")) {
     lines.push(`- ${behavior.id} done`);
+  }
+  if (result.deferredCommands?.length) {
+    lines.push(
+      "",
+      "Deferred commands (manual — run outside the sandbox if you want their effects; " +
+        "they do not block landing):",
+    );
+    for (const entry of result.deferredCommands) {
+      lines.push(`- ${entry.command}${entry.reason ? ` (${entry.reason})` : ""}`);
+    }
   }
   lines.push(
     "",
