@@ -2413,3 +2413,97 @@ describe("blockedCommands: deferrable collection", () => {
     assert.match(report, /sandbox blocks cache write/, "the reason is carried");
   });
 });
+
+describe("blockedCommands: resume assumes the pending command was run", () => {
+  function twoBehaviorTask(): TaskContract {
+    return {
+      title: "Code Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  function execRecordingPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("splices the assumed-run note into the pending behavior's task only, then clears pendingCommand", async () => {
+    const pi = execRecordingPi();
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "topic",
+      task: twoBehaviorTask(),
+      lastHalt: {
+        behaviorId: "T2",
+        error: "Unit T2 reported a sandbox-blocked command that must run now: cd src && npx vitest run",
+        at: new Date().toISOString(),
+        pendingCommand: { command: "cd src && npx vitest run", reason: "sandbox blocks cd chaining" },
+      },
+    };
+    const ctx = ctxWithState(state);
+    const taskTexts: Record<string, string> = {};
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => {
+      taskTexts[unit.behaviorId] = unit.taskText;
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    });
+
+    assert.equal(result.complete, true, "resume run completes");
+    const pendingText = taskTexts["T2"]!;
+    assert.match(pendingText, /Previously blocked command/, "section header present");
+    assert.match(pendingText, /cd src && npx vitest run/, "the command is named verbatim");
+    assert.match(pendingText, /assumed run|Assume it has been executed/, "assumed-run wording");
+    assert.match(pendingText, /Do NOT attempt to run it yourself/, "no-attempt instruction");
+    assert.match(pendingText, /verify its effects by other means/i, "verify-by-other-means instruction");
+    assert.match(pendingText, /report .*if .*effects.*missing|If its effects are missing/i, "re-report instruction");
+    assert.ok(!/Previously blocked command/.test(taskTexts["T1"]!), "T1 must not inherit the note");
+    assert.equal(state.lastHalt?.pendingCommand, undefined, "pendingCommand cleared after splice");
+  });
+
+  it("a resume without pendingCommand splices no note", async () => {
+    const pi = execRecordingPi();
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "topic",
+      task: twoBehaviorTask(),
+      lastHalt: {
+        behaviorId: "T2",
+        error: "pre-commit hook rejected the commit for T2 after 5 retries",
+        at: new Date().toISOString(),
+      },
+    };
+    const ctx = ctxWithState(state);
+    const taskTexts: Record<string, string> = {};
+
+    await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => {
+      taskTexts[unit.behaviorId] = unit.taskText;
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    });
+
+    assert.ok(!/Previously blocked command/.test(taskTexts["T1"]!));
+    assert.ok(!/Previously blocked command/.test(taskTexts["T2"]!));
+  });
+});

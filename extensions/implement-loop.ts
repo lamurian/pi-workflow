@@ -320,6 +320,27 @@ export async function runOrchestratedImplement(
   }
 
   const totalUnits = units.length;
+  // Resume after a mustRunNow pause-halt: the user was asked to run the
+  // blocked command outside the sandbox. Assume it was executed — the
+  // unit must not attempt it (its sandbox still blocks it). Capture the
+  // note before the loop (a landed commit clears state.lastHalt), attach
+  // it only to the behavior that halted, then clear it so later behaviors
+  // never inherit it.
+  let pendingNote: { behaviorId: string; note: string } | undefined;
+  if (state.lastHalt?.pendingCommand) {
+    const pending = state.lastHalt.pendingCommand;
+    pendingNote = {
+      behaviorId: state.lastHalt.behaviorId,
+      note:
+        `\n\n## Previously blocked command — assumed run\n` +
+        `The user was asked to run this command outside the sandbox:\n\n` +
+        "```\n" + pending.command + "\n```\n\n" +
+        (pending.reason ? `It was blocked: ${pending.reason}.\n\n` : "") +
+        `Assume it has been executed. Do NOT attempt to run it yourself — your sandbox still blocks it. ` +
+        `Verify its effects by other means (read files, run allowed checks). ` +
+        `If its effects are missing, report that in your JSON report instead of retrying the command.`,
+    };
+  }
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
     // Progress visibility: a unit subprocess can run for minutes with captured
@@ -329,9 +350,18 @@ export async function runOrchestratedImplement(
     // "workflow" key from state.ts updateUi is never written by these frames.
     const position = `${unitIndex + 1}/${totalUnits}`;
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`);
+    let taskPrefix = "";
+    if (pendingNote && pendingNote.behaviorId === behavior.id) {
+      taskPrefix = pendingNote.note;
+      pendingNote = undefined;
+      if (state.lastHalt?.pendingCommand) {
+        state.lastHalt.pendingCommand = undefined;
+        saveState(pi, state);
+      }
+    }
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
-      taskText: buildUnitTask(behavior, task) + resumeTreeContext,
+      taskText: taskPrefix + buildUnitTask(behavior, task) + resumeTreeContext,
     };
     resumeTreeContext = "";
 
