@@ -44,6 +44,14 @@ export interface TaskContract {
   behaviors: Behavior[];
 }
 
+/** A sandbox-blocked command the user must run before a unit can proceed. */
+export interface PendingCommand {
+  /** The exact command to run outside the sandbox. */
+  command: string;
+  /** Why the unit needs it (optional). */
+  reason?: string;
+}
+
 /** Persisted handoff for a halted or crashed orchestration attempt. */
 export interface LastHalt {
   /** The behavior that failed. */
@@ -54,6 +62,8 @@ export interface LastHalt {
   treeState?: string;
   /** Commit subjects landed before the halt. */
   landedCommits?: string[];
+  /** Sandbox-blocked command the user must run before resuming. */
+  pendingCommand?: PendingCommand;
   /** ISO timestamp of the halt. */
   at: string;
 }

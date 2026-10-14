@@ -2204,3 +2204,115 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     assert.ok(addIdx < diffIdx && diffIdx < commitIdx, "staged diff inspected between add and commit");
   });
 });
+
+describe("blockedCommands: mustRunNow pause-halt", () => {
+  function twoBehaviorTask(): TaskContract {
+    return {
+      title: "Code Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  function execRecordingPi(): {
+    pi: ExtensionAPI & { calls: Record<string, unknown[]> };
+    execLog: Array<{ cmd: string; args: string[] }>;
+  } {
+    const pi = mockPi();
+    const execLog: Array<{ cmd: string; args: string[] }> = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  it("a mustRunNow report halts immediately: no commit, behavior stays active, pendingCommand persisted", async () => {
+    const { pi, execLog } = execRecordingPi();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const ctx = ctxWithState(state);
+    let spawns = 0;
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async () => {
+      spawns++;
+      return {
+        summary: "implemented but blocked on a sandbox command",
+        suggestedCommit: "feat(core): add first behavior",
+        blockedCommands: [
+          { command: "cd src && npx vitest run", reason: "sandbox blocks cd chaining", mustRunNow: true },
+        ],
+      };
+    });
+
+    assert.equal(result.complete, false, "a mustRunNow halt is not a completion");
+    assert.equal(result.haltedOn, "T1", "halts on the blocked behavior");
+    assert.equal(spawns, 1, "no retry spawn after a mustRunNow halt");
+    assert.equal(result.unitsRun, 1, "no retry-budget consumption");
+    assert.ok(
+      !execLog.some((e) => e.cmd === "git" && e.args[0] === "commit"),
+      "no commit attempt for a mustRunNow halt",
+    );
+    assert.equal(state.task!.behaviors[0]!.status, "active", "behavior stays active for resume");
+    assert.equal(state.task!.behaviors[1]!.status, "active", "later behaviors untouched");
+    assert.deepEqual(
+      state.lastHalt?.pendingCommand,
+      { command: "cd src && npx vitest run", reason: "sandbox blocks cd chaining" },
+      "pendingCommand persisted on lastHalt",
+    );
+    assert.equal(result.pendingCommand?.command, "cd src && npx vitest run");
+  });
+
+  it("a unit report without blockedCommands never sets pendingCommand", async () => {
+    const { pi } = execRecordingPi();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const ctx = ctxWithState(state);
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => ({
+      summary: `implemented ${unit.behaviorId}`,
+      suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+    }));
+
+    assert.equal(result.complete, true);
+    assert.equal(result.pendingCommand, undefined, "no pendingCommand without blockedCommands");
+    assert.equal(state.lastHalt, undefined);
+  });
+
+  it("composeHaltReport renders an Action required section naming the pending command, before the resume line", () => {
+    const result: OrchestratorResult = {
+      complete: false,
+      unitsRun: 1,
+      landedCommits: [],
+      haltedOn: "T5",
+      error: "unit reported a sandbox-blocked command that must run now",
+      treeState: " M src/a.ts",
+      pendingCommand: {
+        command: "cd src && npx vitest run App.test.tsx",
+        reason: "sandbox blocks cd chaining",
+      },
+    };
+
+    const report = composeHaltReport(result);
+
+    assert.match(report, /Action required/, "action section present");
+    assert.match(report, /cd src && npx vitest run App\.test\.tsx/, "the command is named verbatim");
+    assert.match(report, /sandbox blocks cd chaining/, "the reason is carried");
+    assert.match(report, /run \/implement again to resume/i, "resume instruction present");
+    assert.ok(
+      report.indexOf("Action required") < report.indexOf("Resume:"),
+      "action section precedes the resume line",
+    );
+  });
+});

@@ -5,6 +5,7 @@ import {
   type WorkflowState,
   type TaskContract,
   type Behavior,
+  type PendingCommand,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
@@ -43,6 +44,8 @@ export interface OrchestratorResult {
   error?: string;
   /** `git status --short` snapshot captured at halt time. */
   treeState?: string;
+  /** Sandbox-blocked command the user must run before resuming (pause-halt). */
+  pendingCommand?: PendingCommand;
 }
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
@@ -240,7 +243,9 @@ export function getCommitTimeoutMs(
  * with the unit's suggested subject — the project's pre-commit hooks fire and
  * own verification. HEAD before/after classifies the attempt: landed (done),
  * hook-rejected (investigation + fix subagent, RETRY_BUDGET retries), or
- * no-changes (same budget). Commit-process timeouts halt as infrastructure
+ * no-changes (same budget). A mustRunNow blockedCommands report pauses
+ * immediately (no commit, no retry consumption) with pendingCommand on the
+ * halt handoff. Commit-process timeouts halt as infrastructure
  * failures. Every halt persists lastHalt into workflow state so failures are
  * diagnosable from the session log. Already-done behaviors are skipped, so
  * re-running resumes cleanly. Progress notifications (unit start + landed
@@ -266,15 +271,21 @@ export async function runOrchestratedImplement(
   const units = task.behaviors.filter((b) => b.status === "active");
   const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits };
 
-  const halt = async (behaviorId: string, error: string) => {
+  const halt = async (
+    behaviorId: string,
+    error: string,
+    pendingCommand?: PendingCommand,
+  ) => {
     result.haltedOn = behaviorId;
     result.error = error;
     result.treeState = await readTreeState(pi, cwd);
+    if (pendingCommand) result.pendingCommand = pendingCommand;
     state.lastHalt = {
       behaviorId,
       error,
       treeState: result.treeState,
       landedCommits: [...landedCommits],
+      ...(pendingCommand ? { pendingCommand } : {}),
       at: new Date().toISOString(),
     };
     saveState(pi, state);
@@ -336,6 +347,24 @@ export async function runOrchestratedImplement(
         attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
         result.unitsRun++;
         continue;
+      }
+
+      // mustRunNow: the unit cannot proceed without the user running a
+      // sandbox-blocked command. Pause immediately — no commit attempt, no
+      // retry-budget consumption; the behavior stays active for resume.
+      const mustRun = attempt.blockedCommands?.find((entry) => entry.mustRunNow);
+      if (mustRun) {
+        const pendingCommand: PendingCommand = {
+          command: mustRun.command,
+          ...(mustRun.reason ? { reason: mustRun.reason } : {}),
+        };
+        return halt(
+          behavior.id,
+          `Unit ${behavior.id} reported a sandbox-blocked command that must run now: ` +
+            `${mustRun.command}${mustRun.reason ? ` (${mustRun.reason})` : ""}. ` +
+            `Run it outside the sandbox, then /implement resumes.`,
+          pendingCommand,
+        );
       }
 
       const subject = pickCommitSubject(attempt, behavior);
