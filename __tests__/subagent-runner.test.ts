@@ -458,6 +458,97 @@ describe("parseImplementerReport (T5)", () => {
   });
 });
 
+describe("parseImplementerReport blockedCommands", () => {
+  function assistantEvent(text: string): string {
+    return JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+  }
+
+  function reportWith(json: string): string {
+    return assistantEvent(`Done.\n\`\`\`json\n${json}\n\`\`\``);
+  }
+
+  it("parses valid blockedCommands entries alongside summary and suggestedCommit", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = reportWith(
+      JSON.stringify({
+        summary: "implemented header, blocked on verification",
+        suggestedCommit: "feat(ui): add AppHeader",
+        blockedCommands: [
+          { command: "npx vitest run src/App.test.tsx", reason: "sandbox blocks cd chaining", mustRunNow: true },
+          { command: "npx prettier --check src", mustRunNow: false },
+        ],
+      }),
+    );
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "implemented header, blocked on verification");
+    assert.equal(report.suggestedCommit, "feat(ui): add AppHeader");
+    assert.deepEqual(report.blockedCommands, [
+      { command: "npx vitest run src/App.test.tsx", reason: "sandbox blocks cd chaining", mustRunNow: true },
+      { command: "npx prettier --check src", mustRunNow: false },
+    ]);
+  });
+
+  it("returns no blockedCommands when the report omits the field", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = reportWith(JSON.stringify({ summary: "plain report", suggestedCommit: "feat: x" }));
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "plain report");
+    assert.equal(report.blockedCommands, undefined);
+  });
+
+  it("drops the whole field when blockedCommands is not an array", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = reportWith(
+      JSON.stringify({ summary: "s", blockedCommands: { command: "ls", mustRunNow: true } }),
+    );
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "s");
+    assert.equal(report.blockedCommands, undefined);
+  });
+
+  it("drops malformed entries but keeps valid ones, never throws", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const stdout = reportWith(
+      JSON.stringify({
+        summary: "s",
+        blockedCommands: [
+          "npx vitest run",
+          { reason: "no command", mustRunNow: true },
+          { command: 42, mustRunNow: true },
+          { command: "ls -la" },
+          { command: "grep foo", mustRunNow: "yes" },
+          null,
+          { command: "npm test", mustRunNow: true },
+        ],
+      }),
+    );
+
+    const report = parseImplementerReport(stdout);
+
+    assert.equal(report.summary, "s");
+    assert.deepEqual(report.blockedCommands, [{ command: "npm test", mustRunNow: true }]);
+  });
+
+  it("keeps the empty-output and broken-block fallback contracts unchanged", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    assert.deepEqual(parseImplementerReport(""), { summary: "" });
+    const broken = reportWith('{"summary": "broken');
+    const report = parseImplementerReport(broken);
+    assert.match(report.summary, /Done\./);
+    assert.equal(report.blockedCommands, undefined);
+  });
+});
+
 
 describe("runScoutSubprocess kill handling", () => {
   it("rejects with the abort reason when killed by signal", async () => {
