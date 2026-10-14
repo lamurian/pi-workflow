@@ -23,12 +23,21 @@ import {
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
+/** Result of one unit attempt: the parsed report plus failure diagnostics. */
+export type UnitAttempt = ImplementerReport & {
+  error?: string;
+  /** True when the unit subprocess was killed by the wall-clock timeout. */
+  timedOut?: boolean;
+  /** True when the unit exited 0 without the mandatory JSON report block. */
+  missingReport?: boolean;
+};
+
 /** Injectable unit runner: execute one behavior, return its report. */
 export type UnitRunner = (
   unit: UnitTask,
   cwd: string,
   signal?: AbortSignal,
-) => Promise<ImplementerReport & { error?: string }>;
+) => Promise<UnitAttempt>;
 
 /** Result of the orchestrator loop. */
 export interface OrchestratorResult {
@@ -525,6 +534,16 @@ export function buildUnitTask(behavior: Behavior, task: TaskContract): string {
 /**
  * Build the retry task text for a unit-reported failure (pre-commit stage).
  *
+ * Three branches keyed off structured flags on the prior attempt:
+ * - `timedOut` → infrastructure timeout at the wall clock, not a check
+ *   failure; the retry inspects the on-disk work first, fixes one blocker,
+ *   and reports even if verification is incomplete (context = last
+ *   assistant text from the runner, not raw JSONL).
+ * - `missingReport` → the unit ended without the mandatory JSON report;
+ *   it runs headless, so blocked commands go in blockedCommands, never as
+ *   a prose request to a user that does not exist mid-run.
+ * - default → unchanged failure + retry wording (byte-compatible).
+ *
  * @param behavior - The behavior being retried.
  * @param task     - The full task contract.
  * @param prior    - The failed outcome from the previous attempt.
@@ -534,10 +553,37 @@ export function buildUnitTask(behavior: Behavior, task: TaskContract): string {
 export function buildRetryTask(
   behavior: Behavior,
   task: TaskContract,
-  prior: ImplementerReport & { error?: string },
+  prior: UnitAttempt,
   attempt: number,
 ): string {
   const failure = prior.error ?? prior.summary ?? "unknown failure";
+  if (prior.timedOut) {
+    return (
+      `## Previous attempt was killed at the time limit (retry ${attempt}/${RETRY_BUDGET})\n` +
+      `The previous run hit the hard wall-clock timeout (PI_IMPLEMENT_TIMEOUT_MS, 600 s default) and was ` +
+      `killed mid-investigation — this was an infrastructure timeout, not a check failure.\n\n` +
+      `Your work from that run is likely already on disk. Do NOT redo it from scratch: inspect git status ` +
+      `and git diff first, then fix exactly one blocking issue. ` +
+      `Emit the JSON report even if verification is incomplete.\n\n` +
+      `## Last assistant text before the kill\n` +
+      failure +
+      `\n\n## Original task\n` +
+      buildUnitTask(behavior, task) +
+      "\n\nFix the reported issues and re-verify."
+    );
+  }
+  if (prior.missingReport) {
+    return (
+      `## Previous attempt ended without the required JSON report (retry ${attempt}/${RETRY_BUDGET})\n` +
+      `You run headless in a sandbox — no user is available mid-run. A blocked command must be reported ` +
+      `via blockedCommands in the JSON report, never as a prose request to the user.\n\n` +
+      `## Previous final message\n` +
+      failure +
+      `\n\n## Original task\n` +
+      buildUnitTask(behavior, task) +
+      "\n\nFix the reported issues and re-verify."
+    );
+  }
   return (
     `## Previous attempt failed (retry ${attempt}/${RETRY_BUDGET})\n` +
     failure +

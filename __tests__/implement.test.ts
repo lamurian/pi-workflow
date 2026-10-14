@@ -10,6 +10,7 @@ import {
 import {
   readGitHead,
   runOrchestratedImplement,
+  buildRetryTask,
   type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
@@ -2505,5 +2506,87 @@ describe("blockedCommands: resume assumes the pending command was run", () => {
 
     assert.ok(!/Previously blocked command/.test(taskTexts["T1"]!));
     assert.ok(!/Previously blocked command/.test(taskTexts["T2"]!));
+  });
+});
+
+describe("buildRetryTask: timeout and missingReport branches", () => {
+  function fixture(): {
+    behavior: Parameters<typeof buildRetryTask>[0];
+    task: TaskContract;
+  } {
+    const task: TaskContract = {
+      title: "Header Task",
+      instruction: "add a header",
+      files: ["src/App.tsx"],
+      done: "tests green",
+      behaviors: [
+        {
+          id: "T5",
+          description: "header renders",
+          expectedOutput: "AppHeader shown",
+          kind: "test",
+          status: "active",
+        },
+      ],
+    };
+    return { behavior: task.behaviors[0]!, task };
+  }
+
+  it("timedOut prior renders the wall-clock branch: not a check failure, diff-first, report even if unverified", () => {
+    const { behavior, task } = fixture();
+    const prior = {
+      summary: "investigating the uncaught exception",
+      error:
+        "timed out after 600000ms\n\n--- last assistant text ---\nchecking whether AppHeader causes the App.test.tsx uncaught exception",
+      timedOut: true,
+    };
+
+    const text = buildRetryTask(behavior, task, prior, 1);
+
+    assert.match(text, /wall.clock|time limit/i, "wall-clock wording present");
+    assert.match(text, /infrastructure timeout, not a check failure/i, "classified as infrastructure");
+    assert.match(text, /git status and git diff first|inspect .*diff first/i, "diff-first instruction");
+    assert.match(text, /do NOT redo it from scratch/i, "no-redo instruction");
+    assert.match(text, /fix exactly one blocking issue/i, "one-blocker instruction");
+    assert.match(
+      text,
+      /emit the JSON report even if verification is incomplete/i,
+      "report-even-if-unverified instruction",
+    );
+    assert.match(
+      text,
+      /checking whether AppHeader causes the App\.test\.tsx uncaught exception/,
+      "context is the last assistant text",
+    );
+    assert.match(text, /Implement ONE behavior: T5\./, "original task text preserved");
+  });
+
+  it("missingReport prior renders the headless branch: no user mid-run, blockedCommands not prose", () => {
+    const { behavior, task } = fixture();
+    const prior = {
+      summary: "Please run npx vitest run manually",
+      error:
+        "implementer ended without the required JSON report block (a prose handover plea is not a report).\n\n" +
+        "--- final assistant text ---\nPlease run npx vitest run outside the sandbox for me.",
+      missingReport: true,
+    };
+
+    const text = buildRetryTask(behavior, task, prior, 2);
+
+    assert.match(text, /headless/i, "headless wording present");
+    assert.match(text, /no user is available mid-run/i, "no-user statement present");
+    assert.match(text, /blockedCommands/, "points at the structured channel");
+    assert.match(text, /never as a prose request/i, "no-prose-plea rule present");
+    assert.match(text, /Please run npx vitest run outside the sandbox for me\./, "prior message quoted");
+    assert.match(text, /Implement ONE behavior: T5\./, "original task text preserved");
+  });
+
+  it("a plain failure prior keeps the default wording byte-compatible", () => {
+    const { behavior, task } = fixture();
+    const prior = { summary: "", error: "boom: cannot write file" };
+
+    const text = buildRetryTask(behavior, task, prior, 3);
+
+    assert.match(text, /^## Previous attempt failed \(retry 3\/5\)\nboom: cannot write file\n\n## Original task\n/);
   });
 });
