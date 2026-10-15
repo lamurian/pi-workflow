@@ -217,6 +217,15 @@ export function composeCompletionReport(
   for (const behavior of task.behaviors.filter((b) => b.status === "done")) {
     lines.push(`- ${behavior.id} done`);
   }
+  if (result.pendingManualChecks?.length) {
+    lines.push(
+      "",
+      "Manual verification required (verification timed out — confirm these in the app after the run):",
+    );
+    for (const check of result.pendingManualChecks) {
+      lines.push(`- ${check.behaviorId}: ${check.description}`);
+    }
+  }
   if (result.deferredCommands?.length) {
     lines.push(
       "",

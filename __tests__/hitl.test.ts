@@ -1,4 +1,4 @@
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import type {
@@ -15,12 +15,15 @@ import {
   handleWorkflowInput,
   getHitlWindow,
   setHitlWindow,
+  type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import {
   setActiveUnitClient,
 } from "../extensions/implementer-runner.ts";
-import { registerImplementerActivityRenderer } from "../extensions/implement.ts";
+import { registerImplementerActivityRenderer, composeCompletionReport } from "../extensions/implement.ts";
+import { getHitlTimeoutMs } from "../extensions/implement-loop.ts";
+import { saveState, loadState } from "../extensions/state.ts";
 import type { RpcUnitClient, RpcImage } from "../extensions/rpc-unit-client.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 
@@ -596,5 +599,187 @@ describe("T4: steering during the verification pause", () => {
       pi.onUnsubscribed.includes("input"),
       "the input handler is unregistered when the run settles",
     );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T5 — HITL timeout clock and manual-check deferral
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("T5: HITL clock and deferral", () => {
+  it("getHitlTimeoutMs honors PI_HITL_TIMEOUT_MS and is independent of PI_IMPLEMENT_TIMEOUT_MS", () => {
+    assert.equal(getHitlTimeoutMs({}), 900_000, "15-minute default");
+    assert.equal(getHitlTimeoutMs({ PI_HITL_TIMEOUT_MS: "5000" }), 5_000);
+    assert.equal(
+      getHitlTimeoutMs({ PI_HITL_TIMEOUT_MS: "5000", PI_IMPLEMENT_TIMEOUT_MS: "600000" }),
+      5_000,
+      "the HITL clock does not read the model-activity budget",
+    );
+    assert.equal(getHitlTimeoutMs({ PI_HITL_TIMEOUT_MS: "nonsense" }), 900_000, "invalid falls back");
+    assert.equal(getHitlTimeoutMs({ PI_HITL_TIMEOUT_MS: "-1" }), 900_000, "non-positive falls back");
+  });
+
+  function manualOnlyTask(): TaskContract {
+    return {
+      title: "Manual Only",
+      instruction: "x",
+      files: ["src/a.ts"],
+      done: "green",
+      behaviors: [
+        { id: "T1", description: "visual check", expectedOutput: "e", kind: "manual", status: "active" },
+      ],
+    };
+  }
+
+  /** Flush fake-timer microtask chains until `check` passes. */
+  async function flushUntil(check: () => boolean, maxTicks = 50): Promise<boolean> {
+    for (let i = 0; i < maxTicks; i++) {
+      if (check()) return true;
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    return check();
+  }
+
+  it("a pause that times out commits anyway and defers the behavior to pendingManualChecks", async () => {
+    const prev = process.env.PI_HITL_TIMEOUT_MS;
+    process.env.PI_HITL_TIMEOUT_MS = "5000";
+    vi.useFakeTimers();
+    try {
+      const pi = piWithAdvancingHead();
+      const ctx = ctxWithUiSpies();
+      const state: WorkflowState = { phase: "implementing", specText: "t", task: manualOnlyTask() };
+      const record = { shutdowns: 0 };
+      const runner: UnitRunner = async (unit) => ({
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: "feat(core): visual check",
+        client: fakeManualClient(record),
+      });
+
+      const loop = runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+      assert.ok(
+        await flushUntil(() => ctx.notifyCalls.some(([m]) => /awaiting manual verification/.test(m))),
+        "the pause opens",
+      );
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const result = await loop;
+
+      assert.ok(
+        ctx.notifyCalls.some(([m, kind]) => /verification timed out/.test(m) && kind === "warning"),
+        "the timeout warns that the behavior is committed anyway",
+      );
+      assert.equal(result.complete, true, "the run still settles complete");
+      assert.equal(state.task!.behaviors[0]!.status, "done", "the behavior is committed through the gate");
+      assert.equal(commitCount(pi), 1, "hooks-gated commit happened on timeout");
+      assert.deepEqual(
+        result.pendingManualChecks?.map((c) => c.behaviorId),
+        ["T1"],
+        "the deferral rides OrchestratorResult",
+      );
+      assert.deepEqual(
+        state.pendingManualChecks?.map((c) => c.behaviorId),
+        ["T1"],
+        "the deferral is persisted in workflow state",
+      );
+      assert.equal(getHitlWindow(), undefined, "no window is left open");
+      assert.equal(record.shutdowns, 1, "the kept-alive child is shut down");
+    } finally {
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.PI_HITL_TIMEOUT_MS;
+      else process.env.PI_HITL_TIMEOUT_MS = prev;
+    }
+  });
+
+  it("a successful steer resets the HITL clock; approval after the original deadline still avoids deferral", async () => {
+    const prev = process.env.PI_HITL_TIMEOUT_MS;
+    process.env.PI_HITL_TIMEOUT_MS = "5000";
+    vi.useFakeTimers();
+    try {
+      const pi = piWithAdvancingHead();
+      const ctx = ctxWithUiSpies();
+      const state: WorkflowState = { phase: "implementing", specText: "t", task: manualOnlyTask() };
+      const record = { shutdowns: 0, steers: [] as Array<{ message: string }> };
+      const client = fakeManualClient(record);
+      const runner: UnitRunner = async () => {
+        setActiveUnitClient(client); // mirrors runImplementerUnit's registry behavior
+        return {
+          summary: "implemented T1",
+          suggestedCommit: "feat(core): visual check",
+          client,
+        };
+      };
+
+      const loop = runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+      assert.ok(
+        await flushUntil(() => ctx.notifyCalls.some(([m]) => /awaiting manual verification/.test(m))),
+        "the pause opens",
+      );
+
+      await vi.advanceTimersByTimeAsync(4_000);
+      runSteer("still checking", pi, ctx); // resets the clock: fires at 9000 now.
+      await vi.advanceTimersByTimeAsync(4_000); // original deadline (5000) has passed.
+      assert.ok(getHitlWindow(), "the pause survives past the original deadline after a steer");
+
+      runApprove(pi, ctx);
+      const result = await loop;
+      assert.equal(result.complete, true);
+      assert.equal(result.pendingManualChecks?.length ?? 0, 0, "no deferral after an active pause");
+      assert.equal(record.steers.length, 1, "the steer reached the child");
+    } finally {
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.PI_HITL_TIMEOUT_MS;
+      else process.env.PI_HITL_TIMEOUT_MS = prev;
+    }
+  });
+
+  it("composeCompletionReport renders the manual-verification section only when checks are pending", () => {
+    const task: TaskContract = {
+      title: "T",
+      instruction: "x",
+      files: ["a.ts"],
+      done: "green",
+      behaviors: [{ id: "T1", description: "d", expectedOutput: "e", kind: "test", status: "done" }],
+    };
+    const base: OrchestratorResult = { complete: true, unitsRun: 1, landedCommits: ["feat: x"] };
+    const without = composeCompletionReport(base, task);
+    assert.ok(!without.includes("Manual verification required"), "no section when nothing is pending");
+
+    const withChecks = composeCompletionReport(
+      { ...base, pendingManualChecks: [{ behaviorId: "T2", description: "gutter alignment" }] },
+      task,
+    );
+    assert.match(withChecks, /Manual verification required/, "the section renders when pending");
+    assert.match(withChecks, /T2/, "the pending behavior id is listed");
+    assert.match(withChecks, /gutter alignment/, "the pending behavior description is listed");
+    assert.match(withChecks, /confirm/i, "the section asks for confirmation in the app");
+  });
+
+  it("saveState/loadState round-trips pendingManualChecks; legacy states load cleanly", async () => {
+    const pi = mockPi();
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "t",
+      pendingManualChecks: [{ behaviorId: "T2", description: "gutter alignment" }],
+    };
+    saveState(pi, state);
+    const branch = (pi.calls["appendEntry"] ?? []).map(([customType, data]) => ({
+      type: "custom",
+      customType,
+      data,
+    }));
+    const ctx = {
+      sessionManager: { getBranch: () => branch },
+    } as unknown as ExtensionContext;
+    const loaded = loadState(ctx);
+    assert.deepEqual(loaded?.pendingManualChecks, state.pendingManualChecks, "round-trips the field");
+
+    const legacyCtx = {
+      sessionManager: {
+        getBranch: () => [
+          { type: "custom", customType: "workflow-state", data: { phase: "implementing", specText: "t" } },
+        ],
+      },
+    } as unknown as ExtensionContext;
+    assert.equal(loadState(legacyCtx)?.pendingManualChecks, undefined, "legacy states load cleanly");
   });
 });

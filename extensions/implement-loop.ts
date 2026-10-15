@@ -7,6 +7,7 @@ import {
   type TaskContract,
   type Behavior,
   type PendingCommand,
+  type PendingManualCheck,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
@@ -64,6 +65,8 @@ export interface OrchestratorResult {
   pendingCommand?: PendingCommand;
   /** Deferrable sandbox-blocked commands reported by units (informational). */
   deferredCommands?: BlockedCommand[];
+  /** Manual behaviors whose verification timed out — committed but unconfirmed. */
+  pendingManualChecks?: PendingManualCheck[];
 }
 
 // ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
@@ -215,6 +218,60 @@ export interface HitlWindow {
 
 let hitlWindow: HitlWindow | undefined;
 
+/** Rearm callback for the HITL clock (set while a timed pause is open). */
+let hitlRearm: (() => void) | undefined;
+
+/** Pending HITL timer, if armed. */
+let hitlTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Outcome of a verification pause: approval (false) or clock expiry (true). */
+export interface PauseOutcome {
+  /** True when the HITL clock expired before the user approved. */
+  timedOut: boolean;
+}
+
+/** Default HITL clock: 15 minutes of human time per pause. */
+const DEFAULT_HITL_TIMEOUT_MS = 900_000;
+
+/**
+ * Resolve the HITL (human-verification) timeout budget.
+ *
+ * Independent of PI_IMPLEMENT_TIMEOUT_MS: that one bounds model activity,
+ * this one bounds waiting for a human. Invalid or non-positive values fall
+ * back to the default.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns The timeout in milliseconds (&gt; 0).
+ */
+export function getHitlTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PI_HITL_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_HITL_TIMEOUT_MS;
+}
+
+/** Clear the HITL timer and its rearm hook. */
+function disarmHitlClock(): void {
+  if (hitlTimer) clearTimeout(hitlTimer);
+  hitlTimer = undefined;
+  hitlRearm = undefined;
+}
+
+/**
+ * Reset the HITL clock after user activity (a successful steer).
+ *
+ * No-op when no timed pause is open. Restarting on activity keeps an
+ * engaged user from ever hitting the deferral while still bounding an
+ * abandoned pause.
+ */
+export function resetHitlClock(): void {
+  hitlRearm?.();
+}
+
 /**
  * Get the open verification pause, if any.
  *
@@ -254,30 +311,51 @@ export function runApprove(_pi: ExtensionAPI, ctx: ExtensionContext): void {
     return;
   }
   hitlWindow = undefined;
+  disarmHitlClock();
   ctx.ui.notify(`${window.behaviorId} approved — committing.`, "info");
   window.approve();
 }
 
 /**
- * Open a verification pause for a manual behavior and wait for approval.
+ * Open a verification pause for a manual behavior and wait for approval
+ * or the HITL clock (PI_HITL_TIMEOUT_MS).
  *
  * Notifies the guidance line, sets the awaiting-verification status frame,
- * and registers the window that /approve resolves. The commit is deferred
- * until the returned promise settles.
+ * registers the window that /approve resolves, and arms the HITL clock.
+ * The commit is deferred until the returned promise settles — either by
+ * approval (`timedOut: false`) or clock expiry (`timedOut: true`, with a
+ * warning notify). Successful steers reset the clock.
  *
  * @param ctx       - Extension context (UI access).
  * @param behavior  - The manual behavior awaiting verification.
- * @returns A promise that resolves when the user approves.
+ * @returns A promise resolving with how the pause ended.
  */
 function openVerificationPause(
   ctx: ExtensionContext,
   behavior: Behavior,
-): Promise<void> {
-  return new Promise<void>((resolve) => {
+): Promise<PauseOutcome> {
+  return new Promise<PauseOutcome>((resolve) => {
+    const settle = (outcome: PauseOutcome) => {
+      hitlWindow = undefined;
+      disarmHitlClock();
+      resolve(outcome);
+    };
+    const arm = () => {
+      if (hitlTimer) clearTimeout(hitlTimer);
+      hitlTimer = setTimeout(() => {
+        ctx.ui.notify(
+          `${behavior.id} verification timed out — committing anyway; listed for manual check`,
+          "warning",
+        );
+        settle({ timedOut: true });
+      }, getHitlTimeoutMs());
+    };
+    hitlRearm = arm;
+    arm();
     hitlWindow = {
       behaviorId: behavior.id,
       description: behavior.description,
-      approve: resolve,
+      approve: () => settle({ timedOut: false }),
     };
     ctx.ui.notify(
       `${behavior.id} awaiting manual verification — type feedback (auto-forwarded) or /steer <msg>, /approve`,
@@ -311,6 +389,7 @@ export function runSteer(message: string, pi: ExtensionAPI, ctx: ExtensionContex
     return;
   }
   client.steer(message.trim(), readImageAttachments(message));
+  resetHitlClock();
   ctx.ui.setStatus("implement", `✦ ${window.behaviorId}: feedback forwarded`);
 }
 
@@ -374,6 +453,7 @@ export function handleWorkflowInput(
   if (!window || !client || !client.isAlive()) return { action: "continue" };
   if (event.text.trim().startsWith("/")) return { action: "continue" };
   client.steer(event.text, (event.images ?? []) as RpcImage[]);
+  resetHitlClock();
   return { action: "handled" };
 }
 
@@ -606,7 +686,13 @@ export async function runOrchestratedImplement(
   const cwd = ctx.cwd;
   const landedCommits: string[] = [];
   const units = task.behaviors.filter((b) => b.status === "active");
-  const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits, deferredCommands: [] };
+  const result: OrchestratorResult = {
+    complete: false,
+    unitsRun: 0,
+    landedCommits,
+    deferredCommands: [],
+    pendingManualChecks: [],
+  };
 
   // Steering (T4): while a verification pause is open, plain user input at
   // the main prompt is consumed and forwarded to the live child; slash
@@ -754,9 +840,12 @@ export async function runOrchestratedImplement(
 
       // Manual behaviors pause before commit for human verification (T3).
       // The kept-alive child stays available for mid-pause steering; once
-      // the pause closes (approve), it is shut down and the commit runs.
+      // the pause closes (approve or HITL timeout), it is shut down and the
+      // commit runs. A timeout defers the behavior to pendingManualChecks
+      // after the commit lands (T5).
+      let pauseOutcome: PauseOutcome | undefined;
       if (behavior.kind === "manual" && attempt.client) {
-        await openVerificationPause(ctx, behavior);
+        pauseOutcome = await openVerificationPause(ctx, behavior);
         await attempt.client.shutdown(2_000);
         if (getActiveUnitClient() === attempt.client) setActiveUnitClient(undefined);
       }
@@ -768,6 +857,14 @@ export async function runOrchestratedImplement(
       if (commit.outcome === null) {
         landedCommits.push(subject);
         behavior.status = "done";
+        if (pauseOutcome?.timedOut) {
+          const check: PendingManualCheck = {
+            behaviorId: behavior.id,
+            description: behavior.description,
+          };
+          state.pendingManualChecks = [...(state.pendingManualChecks ?? []), check];
+          result.pendingManualChecks = [...(result.pendingManualChecks ?? []), check];
+        }
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): landed`);
         state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
         state.lastHalt = undefined;

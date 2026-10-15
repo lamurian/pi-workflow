@@ -68,6 +68,14 @@ export interface LastHalt {
   at: string;
 }
 
+/** A manual behavior deferred for post-run human confirmation (T5). */
+export interface PendingManualCheck {
+  /** Behavior id, e.g. "T2". */
+  behaviorId: string;
+  /** The behavior's contract description. */
+  description: string;
+}
+
 /** Serializable workflow state persisted via pi.appendEntry(). */
 export interface WorkflowState {
   /** Current workflow phase. */
@@ -83,6 +91,12 @@ export interface WorkflowState {
    * session log so failures are diagnosable after the fact.
    */
   lastHalt?: LastHalt;
+  /**
+   * Manual behaviors whose verification pause timed out: committed through
+   * the gate but requiring human confirmation in the app after the run.
+   * Optional: absent on sessions persisted before this field existed.
+   */
+  pendingManualChecks?: PendingManualCheck[];
   /**
    * HEAD hash recorded when /implement started. Optional: absent on
    * sessions persisted before this field existed, and when git is
