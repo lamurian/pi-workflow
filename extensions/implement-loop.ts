@@ -13,6 +13,7 @@ import {
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
+import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import {
   RETRY_BUDGET,
   buildFixTask,
@@ -30,6 +31,8 @@ export type UnitAttempt = ImplementerReport & {
   timedOut?: boolean;
   /** True when the unit exited 0 without the mandatory JSON report block. */
   missingReport?: boolean;
+  /** Live rpc client handle; present only for manual-kind behaviors (T3). */
+  client?: RpcUnitClient;
 };
 
 /** Injectable unit runner: execute one behavior, return its report. */

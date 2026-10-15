@@ -436,23 +436,20 @@ export function getImplementerTools(
 /**
  * Build the argv array for an implementer subprocess.
  *
- * Lean flags skip extension/skill/session loading for fast startup and
- * determinism. Tools are restricted to the implementer allowlist (default
- * `read,write,edit,bash`) — the unit cannot commit or touch workflow state;
- * the orchestrator owns both. Does NOT pass --model so the subprocess uses
- * the user's default model.
+ * Spawns a long-lived `pi --mode rpc` child: the task text travels over
+ * stdin as a JSONL `prompt` command (never in argv), keeping stdin open
+ * for later steering. Lean flags skip extension/skill/session loading for
+ * fast startup and determinism. Tools are restricted to the implementer
+ * allowlist (default `read,write,edit,bash`) — the unit cannot commit or
+ * touch workflow state; the orchestrator owns both. Does NOT pass --model
+ * so the subprocess uses the user's default model.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
- * @param taskText     - The behavior slice for this unit.
  * @returns Array of CLI arguments for the implementer subprocess.
  */
-export function buildImplementerArgs(
-  systemPrompt: string,
-  taskText: string,
-): string[] {
+export function buildImplementerArgs(systemPrompt: string): string[] {
   const args: string[] = [
-    "--mode", "json",
-    "-p",
+    "--mode", "rpc",
     "--no-session",
     "--no-extensions",
     "--no-skills",
@@ -463,7 +460,6 @@ export function buildImplementerArgs(
   if (systemPrompt.trim()) {
     args.push("--append-system-prompt", systemPrompt);
   }
-  args.push(taskText);
   return args;
 }
 

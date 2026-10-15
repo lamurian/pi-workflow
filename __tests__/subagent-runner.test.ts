@@ -325,16 +325,16 @@ describe("runScoutSubprocess integration (real pi)", () => {
 // T5 — implementer subprocess argv builder and report parser
 // ═══════════════════════════════════════════════════════════════════════════════
 
-describe("buildImplementerArgs (T5/T8)", () => {
+describe("buildImplementerArgs (rpc transport)", () => {
   const SYSTEM = "You are an implementation unit.";
   const TASK = "Implement behavior T3: add retry backoff.";
 
-  it("includes the lean flag set", async () => {
+  it("includes the lean flag set in rpc mode", async () => {
     const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
-    const args = buildImplementerArgs(SYSTEM, TASK);
+    const args = buildImplementerArgs(SYSTEM);
 
-    assert.ok(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "json");
-    assert.ok(args.includes("-p"), "should be non-interactive");
+    assert.ok(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "rpc");
+    assert.ok(!args.includes("-p"), "rpc mode is long-lived; the one-shot -p flag is gone");
     assert.ok(args.includes("--no-session"));
     assert.ok(args.includes("--no-extensions"));
     assert.ok(args.includes("--no-skills"));
@@ -347,7 +347,7 @@ describe("buildImplementerArgs (T5/T8)", () => {
   it("restricts --tools to read,write,edit,bash (T8)", async () => {
     delete process.env.PI_IMPLEMENTER_TOOLS;
     const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
-    const args = buildImplementerArgs(SYSTEM, TASK);
+    const args = buildImplementerArgs(SYSTEM);
 
     const idx = args.indexOf("--tools");
     assert.notEqual(idx, -1, "--tools should be present");
@@ -363,7 +363,7 @@ describe("buildImplementerArgs (T5/T8)", () => {
     process.env.PI_IMPLEMENTER_TOOLS = "read,write";
     try {
       const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
-      const args = buildImplementerArgs(SYSTEM, TASK);
+      const args = buildImplementerArgs(SYSTEM);
       const idx = args.indexOf("--tools");
       assert.equal(args[idx + 1], "read,write", "env override must replace the default list");
     } finally {
@@ -376,17 +376,22 @@ describe("buildImplementerArgs (T5/T8)", () => {
     const { loadContent } = await import("../extensions/utils.ts");
     const unitPrompt = await loadContent("unit-prompt.md");
 
-    const args = buildImplementerArgs(unitPrompt, TASK);
+    const args = buildImplementerArgs(unitPrompt);
 
     const idx = args.indexOf("--append-system-prompt");
     assert.notEqual(idx, -1);
     assert.equal(args[idx + 1], unitPrompt, "must pass the literal unit prompt text");
   });
 
-  it("appends the unit task text as the final positional argument", async () => {
+  it("passes no positional task prompt (the task travels over stdin)", async () => {
     const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
-    const args = buildImplementerArgs(SYSTEM, TASK);
-    assert.equal(args[args.length - 1], TASK);
+    const args = buildImplementerArgs(SYSTEM);
+    assert.ok(!args.includes(TASK), "task text must not appear anywhere in argv");
+    assert.equal(
+      args[args.length - 1],
+      SYSTEM,
+      "argv ends with the appended system prompt, not a positional task",
+    );
   });
 });
 

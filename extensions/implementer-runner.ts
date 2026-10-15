@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import {
-  buildImplementerArgs,
   createTimeoutSignal,
   getPiInvocation,
   getImplementerTimeoutMs,
@@ -8,6 +7,7 @@ import {
   parseImplementerReport,
   type ImplementerReport,
 } from "./subagent-runner.ts";
+import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -156,21 +156,23 @@ function hasParseableReport(text: string): boolean {
 /**
  * Run one implementer unit subprocess and parse its structured report.
  *
- * Spawns `pi` with the implementer's lean argv, then parses the final
- * assistant message into `{ summary, suggestedCommit }`. A non-zero exit
- * yields an `error` field rather than throwing, so the orchestrator can
- * apply its retry policy uniformly. Timeouts are detected structurally
- * (`timedOut: true`) and their error context is the last assistant text —
- * not raw JSONL — so a retry prompt receives actionable diagnostics.
- * An exit-0 turn without a parseable JSON report block (e.g. a prose
- * handover plea) is a failure too (`missingReport: true`), never a
- * silent success.
+ * Spawns a long-lived `pi --mode rpc` child and delivers the task as a
+ * JSONL `prompt` command on stdin (never argv), keeping stdin open for
+ * later steering. Completion is a parsed report block seen on stdout —
+ * not process exit — after which the child is shut down gracefully
+ * (`abort` + stdin close, SIGKILL fallback). A child that exits before
+ * any report yields `error` with the same stdout-tail diagnostics as the
+ * one-shot transport. The PI_IMPLEMENT_TIMEOUT_MS model-activity wall
+ * clock still SIGKILLs a working child; timeouts are detected
+ * structurally (`timedOut: true`) and their error context is the last
+ * assistant text. An exit-0 child without a parseable JSON report block
+ * is a failure too (`missingReport: true`), never a silent success.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
  * @param taskText     - The behavior slice for this unit.
  * @param cwd          - Working directory for the subprocess.
  * @param signal       - Optional parent abort signal.
- * @param timeoutMs    - Per-process timeout in ms.
+ * @param timeoutMs    - Per-process wall-clock timeout in ms.
  * @returns Parsed report, plus `error`/`timedOut`/`missingReport` on failure.
  */
 export async function runImplementerUnit(
@@ -180,23 +182,67 @@ export async function runImplementerUnit(
   signal?: AbortSignal,
   timeoutMs: number = getImplementerTimeoutMs(),
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean }> {
-  const args = buildImplementerArgs(systemPrompt, taskText);
-  const { stdout, stderr, exitCode } = await runRawPiProcess(args, cwd, signal, timeoutMs);
-  const report = parseImplementerReport(stdout);
-  if (exitCode !== 0) {
-    // runRawPiProcess appends "timed out after <ms>ms" on a timeout kill —
-    // the same marker the orchestrator's retry prompt keys off.
-    const isTimeout = /timed out after \d+ms/.test(stderr);
-    if (isTimeout) {
-      const assistant = lastAssistantText(stdout);
-      const rawTail = assistant ? "" : stdout.trim().slice(-400);
-      const parts = [
-        stderr.trim() || `implementer timed out after ${timeoutMs}ms`,
-        assistant ? `--- last assistant text ---\n${assistant}` : "",
-        rawTail ? `--- raw stdout tail ---\n${rawTail}` : "",
-      ].filter(Boolean);
-      return { ...report, error: parts.join("\n\n"), timedOut: true };
+  const client = spawnRpcUnitClient({ systemPrompt, cwd });
+
+  let timedOut = false;
+  let reportSeen = false;
+  let exitCode = 0;
+
+  let settleWait: () => void = () => {};
+  const waitDone = new Promise<void>((resolve) => {
+    settleWait = resolve;
+  });
+
+  const checkReport = () => {
+    if (!reportSeen && hasParseableReport(lastAssistantText(client.rawStdout()))) {
+      reportSeen = true;
+      settleWait();
     }
+  };
+
+  const unsubEvents = client.onEvent(() => checkReport());
+  const unsubExit = client.onExit((info) => {
+    exitCode = info.code;
+    if (!reportSeen) settleWait();
+  });
+
+  const killNow = () => {
+    timedOut = true;
+    client.kill();
+  };
+  const timer = timeoutMs > 0 ? setTimeout(killNow, timeoutMs) : undefined;
+  const onAbort = () => killNow();
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+
+  client.prompt(taskText);
+  await waitDone;
+  if (timer) clearTimeout(timer);
+  signal?.removeEventListener("abort", onAbort);
+  unsubEvents();
+  unsubExit();
+
+  // Completion (report seen) or exit/kill: graceful shutdown, then classify.
+  await client.shutdown(2_000);
+
+  const stdout = client.rawStdout();
+  const stderr = client.stderrText();
+  const report = parseImplementerReport(stdout);
+  if (timedOut) {
+    const assistant = lastAssistantText(stdout);
+    const rawTail = assistant ? "" : stdout.trim().slice(-400);
+    const marker = `timed out after ${timeoutMs}ms`;
+    const head = stderr.trim() ? `${stderr.trim()}\n${marker}` : marker;
+    const parts = [
+      head,
+      assistant ? `--- last assistant text ---\n${assistant}` : "",
+      rawTail ? `--- raw stdout tail ---\n${rawTail}` : "",
+    ].filter(Boolean);
+    return { ...report, error: parts.join("\n\n"), timedOut: true };
+  }
+  if (!reportSeen && exitCode !== 0) {
     const stdoutTail = stdout.trim().slice(-2000);
     const parts = [
       stderr.trim() || `implementer exited with code ${exitCode}`,
