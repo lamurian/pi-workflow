@@ -13,7 +13,9 @@ import {
   runImplement,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
+  registerImplementerActivityRenderer,
 } from "./implement.ts";
+import { runImplStatus } from "./implement-loop.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -71,6 +73,10 @@ export default function (pi: ExtensionAPI): void {
   registerMarkTaskDoneTool(pi);
   registerCompleteImplementationTool(pi);
 
+  // Zero-token activity relay rendering (T2). Fire-and-forget: degrades to
+  // unrendered (but persisted) entries when pi-tui is not resolvable.
+  void registerImplementerActivityRenderer(pi);
+
   // ── Phase-based tool gate ──────────────────────────────────
   // Gated phases (discussing, finalizing) block write-capable tools
   // with a phase-aware message. Tools stay in the active set so the
@@ -123,6 +129,16 @@ export default function (pi: ExtensionAPI): void {
       "Valid only after /finalize. Usage: /implement [note]",
     handler: async (args, ctx) => {
       await runImplement(args, pi, ctx);
+    },
+  });
+
+  // ── /impl-status ───────────────────────────────────────────
+  pi.registerCommand("impl-status", {
+    description:
+      "Relay a summary from the live implementer subprocess. " +
+      "Only available while an orchestrated /implement run is in flight.",
+    handler: async (_args, ctx) => {
+      await runImplStatus(pi, ctx);
     },
   });
 

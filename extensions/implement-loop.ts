@@ -10,6 +10,7 @@ import {
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
   runImplementerUnit,
+  getActiveUnitClient,
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
@@ -40,6 +41,7 @@ export type UnitRunner = (
   unit: UnitTask,
   cwd: string,
   signal?: AbortSignal,
+  onEvent?: (event: Record<string, unknown>) => void,
 ) => Promise<UnitAttempt>;
 
 /** Result of the orchestrator loop. */
@@ -60,6 +62,141 @@ export interface OrchestratorResult {
   pendingCommand?: PendingCommand;
   /** Deferrable sandbox-blocked commands reported by units (informational). */
   deferredCommands?: BlockedCommand[];
+}
+
+// ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
+
+/** Data persisted for one relayed implementer activity entry. */
+export interface ImplementerActivityData {
+  /** Behavior the activity belongs to, e.g. "T2". */
+  behaviorId: string;
+  /** Activity flavor: a completed turn, an assistant message, or a status query. */
+  kind: "turn" | "assistant" | "status";
+  /** Compact text (already truncated by the producer where relevant). */
+  text: string;
+  /** ISO timestamp of the relay. */
+  at: string;
+}
+
+/** Transcript-line budget for formatImplementerActivity. */
+const RELAY_TEXT_LIMIT = 200;
+
+/** Milestone-text budget for notify lines. */
+const RELAY_NOTIFY_LIMIT = 120;
+
+/**
+ * Format one activity entry as a compact transcript line.
+ *
+ * @param data - The persisted activity entry.
+ * @returns A single line: `<behaviorId> <kind>: <text>`, truncated with "…".
+ */
+export function formatImplementerActivity(data: ImplementerActivityData): string {
+  const text =
+    data.text.length > RELAY_TEXT_LIMIT
+      ? data.text.slice(0, RELAY_TEXT_LIMIT) + "…"
+      : data.text;
+  return `${data.behaviorId} ${data.kind}: ${text}`;
+}
+
+/** Extract concatenated text blocks from a message content array. */
+function extractTextContent(content: unknown): string {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter(
+      (block): block is { type: string; text: string } =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}
+
+/** Best-effort compact description of a completed turn. */
+function summarizeTurn(event: Record<string, unknown>): string {
+  const message = event.message as { content?: unknown } | undefined;
+  const blocks = Array.isArray(message?.content) ? message.content : [];
+  const tools = blocks.filter(
+    (block) =>
+      typeof block === "object" &&
+      block !== null &&
+      /tool/i.test(String((block as { type?: unknown }).type ?? "")),
+  );
+  return tools.length > 0 ? "working with tools…" : "responding…";
+}
+
+/** Persist one activity entry (custom entries are never sent to the LLM). */
+function persistActivity(pi: ExtensionAPI, data: ImplementerActivityData): void {
+  pi.appendEntry("implementer-activity", data);
+}
+
+/**
+ * Relay one implementer stdout event into the main session at zero token cost.
+ *
+ * turn_end drives the footer status line; assistant message_end events emit a
+ * compact milestone notification. Both are persisted as `implementer-activity`
+ * custom entries (not sent to the model). User-role messages and other event
+ * types are ignored.
+ *
+ * @param pi         - ExtensionAPI reference.
+ * @param ctx        - Extension context (UI access).
+ * @param behaviorId - Behavior the child is implementing.
+ * @param position   - Loop position string, e.g. "1/2".
+ * @param event      - One parsed stdout event from the child.
+ */
+export function relayImplementerEvent(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  behaviorId: string,
+  position: string,
+  event: Record<string, unknown>,
+): void {
+  if (event.type === "turn_end") {
+    const compact = summarizeTurn(event);
+    ctx.ui.setStatus("implement", `✦ ${behaviorId} (${position}): ${compact}`);
+    persistActivity(pi, { behaviorId, kind: "turn", text: compact, at: new Date().toISOString() });
+    return;
+  }
+  if (event.type === "message_end") {
+    const message = event.message as { role?: string; content?: unknown } | undefined;
+    if (message?.role !== "assistant") return;
+    const text = extractTextContent(message.content);
+    if (!text) return;
+    const compact = text.length > RELAY_NOTIFY_LIMIT ? text.slice(0, RELAY_NOTIFY_LIMIT - 1) + "…" : text;
+    ctx.ui.notify(`${behaviorId}: ${compact}`, "info");
+    persistActivity(pi, { behaviorId, kind: "assistant", text: compact, at: new Date().toISOString() });
+  }
+}
+
+/**
+ * `/impl-status`: relay a compact summary from the live implementer child.
+ *
+ * Queries the child over RPC (`get_last_assistant_text`) and surfaces the
+ * answer via notify plus a persisted activity entry. Refuses with a warning
+ * when no implementer subprocess is running.
+ *
+ * @param pi  - ExtensionAPI reference (for appendEntry).
+ * @param ctx - Extension context (UI access).
+ */
+export async function runImplStatus(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const client = getActiveUnitClient();
+  if (!client || !client.isAlive()) {
+    ctx.ui.notify(
+      "/impl-status is only available while an implementer subprocess is running " +
+        "(during an orchestrated /implement run, before it settles).",
+      "warning",
+    );
+    return;
+  }
+  const res = await client.command({ type: "get_last_assistant_text" }, 5_000);
+  const data = res.success ? (res.data as { text?: unknown } | undefined) : undefined;
+  const text =
+    typeof data?.text === "string" && data.text.trim() ? data.text.trim() : "(no assistant text yet)";
+  const compact = text.length > RELAY_TEXT_LIMIT ? text.slice(0, RELAY_TEXT_LIMIT - 1) + "…" : text;
+  ctx.ui.notify(`Implementer status: ${compact}`, "info");
+  persistActivity(pi, { behaviorId: "(status)", kind: "status", text: compact, at: new Date().toISOString() });
 }
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
@@ -277,8 +414,8 @@ export async function runOrchestratedImplement(
   ctx: ExtensionContext,
   state: WorkflowState,
   task: TaskContract,
-  runUnit: UnitRunner = (unit, cwd, signal) =>
-    runImplementerUnit(loadUnitPrompt(), unit.taskText, cwd, signal),
+  runUnit: UnitRunner = (unit, cwd, signal, onEvent) =>
+    runImplementerUnit(loadUnitPrompt(), unit.taskText, cwd, signal, undefined, onEvent),
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
   const landedCommits: string[] = [];
@@ -377,7 +514,9 @@ export async function runOrchestratedImplement(
     };
     resumeTreeContext = "";
 
-    let attempt = await runUnit(baseTask, cwd);
+    const relay = (event: Record<string, unknown>) =>
+      relayImplementerEvent(pi, ctx, behavior.id, position, event);
+    let attempt = await runUnit(baseTask, cwd, undefined, relay);
     result.unitsRun++;
     let taskText = baseTask.taskText;
 
@@ -388,7 +527,7 @@ export async function runOrchestratedImplement(
         }
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
         taskText = buildRetryTask(behavior, task, attempt, retry);
-        attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
+        attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd, undefined, relay);
         result.unitsRun++;
         continue;
       }
@@ -462,7 +601,7 @@ export async function runOrchestratedImplement(
 
       ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
       taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
-      attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd);
+      attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd, undefined, relay);
       result.unitsRun++;
     }
   }

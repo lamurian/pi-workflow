@@ -8,6 +8,35 @@ import {
   type ImplementerReport,
 } from "./subagent-runner.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
+import type { RpcUnitClient } from "./rpc-unit-client.ts";
+
+// ─── Active client registry ────────────────────────────────────────────────────
+
+/**
+ * The single live implementer child, if any (one unit runs at a time).
+ *
+ * Exposed for /impl-status queries, HITL steering, and orphan-safety
+ * shutdown. Test seam: setActiveUnitClient injects a fake client.
+ */
+let activeUnitClient: RpcUnitClient | undefined;
+
+/**
+ * Get the live implementer child client, when one is running.
+ *
+ * @returns The active client, or undefined when no unit is running.
+ */
+export function getActiveUnitClient(): RpcUnitClient | undefined {
+  return activeUnitClient;
+}
+
+/**
+ * Set (or clear with undefined) the live implementer child client.
+ *
+ * @param client - The client handle to track, or undefined to clear.
+ */
+export function setActiveUnitClient(client: RpcUnitClient | undefined): void {
+  activeUnitClient = client;
+}
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -173,6 +202,7 @@ function hasParseableReport(text: string): boolean {
  * @param cwd          - Working directory for the subprocess.
  * @param signal       - Optional parent abort signal.
  * @param timeoutMs    - Per-process wall-clock timeout in ms.
+ * @param onEvent      - Optional sink for live stdout events (zero-token relay).
  * @returns Parsed report, plus `error`/`timedOut`/`missingReport` on failure.
  */
 export async function runImplementerUnit(
@@ -181,8 +211,10 @@ export async function runImplementerUnit(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs: number = getImplementerTimeoutMs(),
+  onEvent?: (event: Record<string, unknown>) => void,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean }> {
   const client = spawnRpcUnitClient({ systemPrompt, cwd });
+  setActiveUnitClient(client);
 
   let timedOut = false;
   let reportSeen = false;
@@ -200,7 +232,10 @@ export async function runImplementerUnit(
     }
   };
 
-  const unsubEvents = client.onEvent(() => checkReport());
+  const unsubEvents = client.onEvent((event) => {
+    onEvent?.(event);
+    checkReport();
+  });
   const unsubExit = client.onExit((info) => {
     exitCode = info.code;
     if (!reportSeen) settleWait();
@@ -226,6 +261,7 @@ export async function runImplementerUnit(
 
   // Completion (report seen) or exit/kill: graceful shutdown, then classify.
   await client.shutdown(2_000);
+  if (getActiveUnitClient() === client) setActiveUnitClient(undefined);
 
   const stdout = client.rawStdout();
   const stderr = client.stderrText();

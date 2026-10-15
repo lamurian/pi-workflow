@@ -15,6 +15,9 @@ import {
   runOrchestratedImplement,
   setUnitPrompt,
   readGitHead,
+  runImplStatus,
+  formatImplementerActivity,
+  type ImplementerActivityData,
   type OrchestratorResult,
   type UnitRunner,
 } from "./implement-loop.ts";
@@ -385,6 +388,50 @@ export async function buildTddPrompt(
     task: renderTaskContract(task),
     commitInstruction,
   });
+}
+
+/**
+ * Register the transcript renderer for relayed implementer activity entries.
+ *
+ * Custom entries (pi.appendEntry) are not sent to the LLM, so the relay costs
+ * zero main-process tokens; this renderer only affects how they look in the
+ * transcript. pi-tui is imported lazily inside a try/catch: when it cannot be
+ * resolved (e.g. unit tests), registration degrades gracefully — entries are
+ * still persisted, just not custom-rendered.
+ *
+ * @param pi - ExtensionAPI reference.
+ * @returns True when the renderer was registered, false when degraded.
+ */
+export async function registerImplementerActivityRenderer(pi: ExtensionAPI): Promise<boolean> {
+  try {
+    if (typeof pi.registerEntryRenderer !== "function") return false;
+    const piTui = (await import("@earendil-works/pi-tui")) as {
+      Box: new (
+        w: number,
+        h: number,
+        bg?: (text: string) => string,
+      ) => { addChild: (child: unknown) => void };
+      Text: new (text: string, x?: number, y?: number) => unknown;
+    };
+    pi.registerEntryRenderer<ImplementerActivityData>(
+      "implementer-activity",
+      (entry, { expanded }, theme) => {
+        const data = entry.data;
+        if (!data) return undefined;
+        const box = new piTui.Box(1, 1, (text: string) => theme.bg("customMessageBg", text));
+        box.addChild(
+          new piTui.Text(`${theme.fg("dim", `[${data.behaviorId}]`)} ${formatImplementerActivity(data)}`, 0, 0),
+        );
+        if (expanded) {
+          box.addChild(new piTui.Text(theme.fg("dim", data.at), 0, 0));
+        }
+        return box as never;
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
