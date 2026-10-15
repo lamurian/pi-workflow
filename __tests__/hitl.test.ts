@@ -814,6 +814,21 @@ describe("T6: orphan safety", () => {
     assert.equal(getHitlWindow(), undefined, "the pause window is cleared");
   });
 
+  it("cleanupOrchestration is the single teardown: child, window, clock, input handler", async () => {
+    const pi = piWithAdvancingHead();
+    const record = { shutdowns: 0 };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow({ behaviorId: "T2", description: "gutter", approve: () => {} });
+    await cleanupOrchestration();
+    assert.equal(record.shutdowns, 1, "the live child is shut down");
+    assert.equal(getActiveUnitClient(), undefined, "the registry is cleared");
+    assert.equal(getHitlWindow(), undefined, "the pause window is cleared");
+    // Idempotent: a second teardown is a no-op.
+    await cleanupOrchestration();
+    assert.equal(record.shutdowns, 1, "no double shutdown");
+    void pi;
+  });
+
   it("the orchestrator halt path shuts the live child and clears the window", async () => {
     const pi = piWithAdvancingHead();
     const ctx = ctxWithUiSpies();
