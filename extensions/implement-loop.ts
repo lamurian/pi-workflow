@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import {
   saveState,
   updateUi,
@@ -15,7 +16,7 @@ import {
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
-import type { RpcUnitClient } from "./rpc-unit-client.ts";
+import type { RpcUnitClient, RpcImage } from "./rpc-unit-client.ts";
 import {
   RETRY_BUDGET,
   buildFixTask,
@@ -286,6 +287,96 @@ function openVerificationPause(
   });
 }
 
+/**
+ * `/steer`: explicit text path into the verification pause.
+ *
+ * Forwards the message to the live child (best-effort: image file paths in
+ * the args are read and attached) and emits the feedback status frame.
+ * Refuses with a warning outside an open pause.
+ *
+ * @param message - The feedback text, possibly with image file path tokens.
+ * @param pi      - ExtensionAPI reference.
+ * @param ctx     - Extension context (UI access).
+ */
+export function runSteer(message: string, pi: ExtensionAPI, ctx: ExtensionContext): void {
+  void pi;
+  const window = hitlWindow;
+  const client = getActiveUnitClient();
+  if (!window || !client || !client.isAlive()) {
+    ctx.ui.notify(
+      "/steer is only valid during a verification pause — while a kind:\"manual\" " +
+        "behavior awaits your check and its implementer subprocess is alive.",
+      "warning",
+    );
+    return;
+  }
+  client.steer(message.trim(), readImageAttachments(message));
+  ctx.ui.setStatus("implement", `✦ ${window.behaviorId}: feedback forwarded`);
+}
+
+/** Guess an image mimeType from a file extension. */
+function imageMimeType(path: string): string | undefined {
+  const ext = path.toLowerCase().split(".").pop();
+  switch (ext) {
+    case "png":
+      return "image/png";
+    case "jpg":
+    case "jpeg":
+      return "image/jpeg";
+    case "gif":
+      return "image/gif";
+    case "webp":
+      return "image/webp";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Best-effort read of image file paths mentioned in a steer message.
+ *
+ * Whitespace-separated tokens with an image extension are read as base64
+ * and attached; unreadable files are silently skipped (the text still
+ * reaches the child either way).
+ *
+ * @param message - The steer message text.
+ * @returns Attached images, possibly empty.
+ */
+function readImageAttachments(message: string): RpcImage[] {
+  const images: RpcImage[] = [];
+  for (const token of message.split(/\s+/)) {
+    const mimeType = imageMimeType(token);
+    if (!mimeType) continue;
+    try {
+      const data = readFileSync(token).toString("base64");
+      images.push({ type: "image", data, mimeType });
+    } catch {
+      // Unreadable path: skip; the message text still forwards.
+    }
+  }
+  return images;
+}
+
+/**
+ * Input policy for the orchestrated run: while a verification pause is open,
+ * plain user text (plus pasted images) is consumed and forwarded to the live
+ * child as a steer command; slash commands always reach the main agent, and
+ * with no open window every input passes through.
+ *
+ * @param event - The user input event.
+ * @returns `{ action: "handled" }` when forwarded; otherwise continue.
+ */
+export function handleWorkflowInput(
+  event: { text: string; images?: Array<{ type: string; data: string; mimeType: string }> },
+): { action: "handled" } | { action: "continue" } {
+  const window = hitlWindow;
+  const client = getActiveUnitClient();
+  if (!window || !client || !client.isAlive()) return { action: "continue" };
+  if (event.text.trim().startsWith("/")) return { action: "continue" };
+  client.steer(event.text, (event.images ?? []) as RpcImage[]);
+  return { action: "handled" };
+}
+
 // ─── Git helpers ───────────────────────────────────────────────────────────────
 
 /**
@@ -517,11 +608,19 @@ export async function runOrchestratedImplement(
   const units = task.behaviors.filter((b) => b.status === "active");
   const result: OrchestratorResult = { complete: false, unitsRun: 0, landedCommits, deferredCommands: [] };
 
+  // Steering (T4): while a verification pause is open, plain user input at
+  // the main prompt is consumed and forwarded to the live child; slash
+  // commands and everything outside a pause pass through. Unregistered on
+  // every exit path (halt closure + normal completion).
+  let offInput: (() => void) | undefined;
+
   const halt = async (
     behaviorId: string,
     error: string,
     pendingCommand?: PendingCommand,
   ) => {
+    offInput?.();
+    offInput = undefined;
     result.haltedOn = behaviorId;
     result.error = error;
     result.treeState = await readTreeState(pi, cwd);
@@ -552,6 +651,7 @@ export async function runOrchestratedImplement(
   }
 
   const resuming = state.phase === "implementing";
+  offInput = pi.on("input", async (event) => handleWorkflowInput(event));
   let resumeTreeContext = "";
   if (resuming) {
     const tree = await readTreeState(pi, cwd);
@@ -715,6 +815,8 @@ export async function runOrchestratedImplement(
   if (refusal) {
     return halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`);
   }
+  offInput?.();
+  offInput = undefined;
   state.phase = "idle";
   saveState(pi, state);
   updateUi(null, ctx);

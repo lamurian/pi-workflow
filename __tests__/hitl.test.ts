@@ -11,7 +11,10 @@ import {
   formatImplementerActivity,
   runOrchestratedImplement,
   runApprove,
+  runSteer,
+  handleWorkflowInput,
   getHitlWindow,
+  setHitlWindow,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import {
@@ -26,16 +29,31 @@ import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /** Recorded ExtensionAPI mock with ui spies attached by the caller. */
-function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
+function mockPi(): ExtensionAPI & {
+  calls: Record<string, unknown[]>;
+  onUnsubscribed: string[];
+} {
   const calls: Record<string, unknown[]> = {};
+  const onUnsubscribed: string[] = [];
   const record = (name: string) => {
     calls[name] = [];
     return (...args: unknown[]) => {
       calls[name]!.push(args);
     };
   };
+  const on = ((name: string, handler: unknown) => {
+    calls["on"] = calls["on"] ?? [];
+    calls["on"]!.push([name, handler]);
+    let active = true;
+    return () => {
+      if (active) {
+        active = false;
+        onUnsubscribed.push(name);
+      }
+    };
+  }) as unknown as ExtensionAPI["on"];
   return {
-    on: record("on") as ExtensionAPI["on"],
+    on,
     registerCommand: record("registerCommand") as ExtensionAPI["registerCommand"],
     registerTool: record("registerTool") as ExtensionAPI["registerTool"],
     registerEntryRenderer: record("registerEntryRenderer") as ExtensionAPI["registerEntryRenderer"],
@@ -46,7 +64,11 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
     setActiveTools: record("setActiveTools") as ExtensionAPI["setActiveTools"],
     exec: async () => ({ stdout: "", stderr: "", code: 0, killed: false }),
     calls,
-  } as unknown as ExtensionAPI & { calls: Record<string, unknown[]> };
+    onUnsubscribed,
+  } as unknown as ExtensionAPI & {
+    calls: Record<string, unknown[]>;
+    onUnsubscribed: string[];
+  };
 }
 
 /** Context with recorded notify/setStatus so tests can assert UI traffic. */
@@ -121,8 +143,8 @@ function commitCount(pi: { execLog: string[] }): number {
   return pi.execLog.filter((entry) => entry.startsWith("git commit")).length;
 }
 
-/** Fake kept-alive client for manual behaviors, with a shutdown counter. */
-function fakeManualClient(record: { shutdowns: number }): RpcUnitClient {
+/** Fake kept-alive client for manual behaviors, with spy counters. */
+function fakeManualClient(record: { shutdowns: number; steers?: Array<{ message: string; images?: RpcImage[] }> }): RpcUnitClient {
   return {
     isAlive: () => true,
     shutdown: async () => {
@@ -132,7 +154,9 @@ function fakeManualClient(record: { shutdowns: number }): RpcUnitClient {
     send: () => {},
     command: async () => ({ type: "response", success: true, id: "x" }),
     prompt: () => {},
-    steer: (_message: string, _images?: RpcImage[]) => {},
+    steer: (message: string, images?: RpcImage[]) => {
+      record.steers?.push(images ? { message, images } : { message });
+    },
     onEvent: () => () => {},
     onExit: () => () => {},
     rawStdout: () => "",
@@ -433,5 +457,144 @@ describe("T3: manual verification pause", () => {
     assert.match(text, /manual/i, "the prompt covers manual behaviors");
     assert.match(text, /verif/i, "the prompt describes the verification pause");
     assert.match(text, /steer/i, "the prompt mentions mid-pause steering");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T4 — steering during the verification pause
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("T4: steering during the verification pause", () => {
+  type SteerRecord = { shutdowns: number; steers: Array<{ message: string; images?: RpcImage[] }> };
+
+  /** Open window + live child; returns the spy record and a cleanup fn. */
+  function openPause(): { record: SteerRecord; cleanup: () => void } {
+    const record: SteerRecord = { shutdowns: 0, steers: [] };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow({ behaviorId: "T2", description: "gutter", approve: () => {} });
+    return {
+      record,
+      cleanup: () => {
+        setHitlWindow(undefined);
+        setActiveUnitClient(undefined);
+      },
+    };
+  }
+
+  it("plain input with an open window is consumed and forwarded as steer with images", () => {
+    const { record, cleanup } = openPause();
+    try {
+      const result = handleWorkflowInput({
+        type: "input",
+        text: "the toolbar sits 12px too far left",
+        images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+        source: "interactive",
+      });
+      assert.deepEqual(result, { action: "handled" }, "plain input is consumed, not passed on");
+      assert.equal(record.steers.length, 1, "one steer reaches the child");
+      assert.equal(record.steers[0]!.message, "the toolbar sits 12px too far left");
+      assert.equal(record.steers[0]!.images?.length, 1, "pasted images ride the steer");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("slash commands pass through even with an open window", () => {
+    const { record, cleanup } = openPause();
+    try {
+      const result = handleWorkflowInput({ type: "input", text: "/task", source: "interactive" });
+      assert.deepEqual(result, { action: "continue" }, "slash commands reach the main agent");
+      assert.equal(record.steers.length, 0, "nothing is forwarded to the child");
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("with no open window every input passes through", () => {
+    const record: SteerRecord = { shutdowns: 0, steers: [] };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow(undefined);
+    try {
+      const result = handleWorkflowInput({
+        type: "input",
+        text: "how is the run going?",
+        source: "interactive",
+      });
+      assert.deepEqual(result, { action: "continue" });
+      assert.equal(record.steers.length, 0, "nothing is forwarded outside a pause");
+    } finally {
+      setActiveUnitClient(undefined);
+    }
+  });
+
+  it("/steer forwards to the live child and emits the feedback status frame", () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const { record, cleanup } = openPause();
+    try {
+      runSteer("try 16px offset instead", pi, ctx);
+      assert.equal(record.steers.length, 1, "the message reaches the child");
+      assert.equal(record.steers[0]!.message, "try 16px offset instead");
+      assert.ok(
+        ctx.statusCalls.some(
+          ([key, value]) =>
+            key === "implement" &&
+            /T2/.test(value ?? "") &&
+            /feedback forwarded/.test(value ?? ""),
+        ),
+        "the status frame announces forwarded feedback",
+      );
+    } finally {
+      cleanup();
+    }
+  });
+
+  it("/steer outside a pause refuses and writes nothing", () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const record: SteerRecord = { shutdowns: 0, steers: [] };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow(undefined);
+    try {
+      runSteer("hello?", pi, ctx);
+      assert.equal(record.steers.length, 0, "nothing reaches the child");
+      assert.equal(ctx.notifyCalls.length, 1, "one refusal notification");
+      const [msg, kind] = ctx.notifyCalls[0]!;
+      assert.match(msg, /\/steer/, "the refusal names the command");
+      assert.match(msg, /verification pause/, "the refusal names the valid period");
+      assert.equal(kind, "warning");
+    } finally {
+      setActiveUnitClient(undefined);
+    }
+  });
+
+  it("the orchestrator registers the input handler at start and unregisters at settle", async () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "t",
+      task: {
+        title: "Input Task",
+        instruction: "x",
+        files: ["src/a.ts"],
+        done: "green",
+        behaviors: [
+          { id: "T1", description: "a behavior", expectedOutput: "e", kind: "test", status: "active" },
+        ],
+      },
+    };
+    const runner: UnitRunner = async () => ({ summary: "ok", suggestedCommit: "feat(core): land it" });
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.equal(result.complete, true);
+    const ons = (pi.calls["on"] ?? []) as Array<[string, unknown]>;
+    assert.ok(
+      ons.some(([name]) => name === "input"),
+      "an input handler is registered for the orchestration",
+    );
+    assert.ok(
+      pi.onUnsubscribed.includes("input"),
+      "the input handler is unregistered when the run settles",
+    );
   });
 });

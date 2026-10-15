@@ -15,7 +15,7 @@ import {
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
 } from "./implement.ts";
-import { runImplStatus, runApprove } from "./implement-loop.ts";
+import { runImplStatus, runApprove, runSteer } from "./implement-loop.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -149,6 +149,16 @@ export default function (pi: ExtensionAPI): void {
       "Only valid during a manual verification pause.",
     handler: async (_args, ctx) => {
       runApprove(pi, ctx);
+    },
+  });
+
+  // ── /steer ────────────────────────────────────────────────
+  pi.registerCommand("steer", {
+    description:
+      "Forward feedback to the implementer subprocess. " +
+      "Only valid during a manual verification pause. Usage: /steer <message>",
+    handler: async (args, ctx) => {
+      runSteer(args, pi, ctx);
     },
   });
 
