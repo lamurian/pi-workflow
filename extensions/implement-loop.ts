@@ -11,6 +11,7 @@ import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
   runImplementerUnit,
   getActiveUnitClient,
+  setActiveUnitClient,
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
@@ -197,6 +198,92 @@ export async function runImplStatus(pi: ExtensionAPI, ctx: ExtensionContext): Pr
   const compact = text.length > RELAY_TEXT_LIMIT ? text.slice(0, RELAY_TEXT_LIMIT - 1) + "…" : text;
   ctx.ui.notify(`Implementer status: ${compact}`, "info");
   persistActivity(pi, { behaviorId: "(status)", kind: "status", text: compact, at: new Date().toISOString() });
+}
+
+// ─── Manual verification pause (T3) ───────────────────────────────────────────
+
+/** An open manual-verification pause (one at a time; the loop runs one unit). */
+export interface HitlWindow {
+  /** Behavior awaiting verification, e.g. "T2". */
+  behaviorId: string;
+  /** The behavior's contract description (for persistence/steering context). */
+  description: string;
+  /** Resolves the pause promise when the user approves. */
+  approve: () => void;
+}
+
+let hitlWindow: HitlWindow | undefined;
+
+/**
+ * Get the open verification pause, if any.
+ *
+ * @returns The current window, or undefined when no pause is open.
+ */
+export function getHitlWindow(): HitlWindow | undefined {
+  return hitlWindow;
+}
+
+/**
+ * Set (or clear with undefined) the open verification pause.
+ *
+ * @param window - The window handle, or undefined to clear.
+ */
+export function setHitlWindow(window: HitlWindow | undefined): void {
+  hitlWindow = window;
+}
+
+/**
+ * `/approve`: close the open verification pause so the loop may commit.
+ *
+ * With an open window: clears it and resolves the pause promise (the loop
+ * then shuts the child down and commits through the gate). Outside a pause:
+ * refuses with a warning and changes nothing.
+ *
+ * @param _pi - ExtensionAPI reference (unused; kept for symmetry/telemetry).
+ * @param ctx - Extension context (UI access).
+ */
+export function runApprove(_pi: ExtensionAPI, ctx: ExtensionContext): void {
+  const window = hitlWindow;
+  if (!window) {
+    ctx.ui.notify(
+      "/approve is only valid during a manual verification pause — while a " +
+        'kind:"manual" behavior awaits your check.',
+      "warning",
+    );
+    return;
+  }
+  hitlWindow = undefined;
+  ctx.ui.notify(`${window.behaviorId} approved — committing.`, "info");
+  window.approve();
+}
+
+/**
+ * Open a verification pause for a manual behavior and wait for approval.
+ *
+ * Notifies the guidance line, sets the awaiting-verification status frame,
+ * and registers the window that /approve resolves. The commit is deferred
+ * until the returned promise settles.
+ *
+ * @param ctx       - Extension context (UI access).
+ * @param behavior  - The manual behavior awaiting verification.
+ * @returns A promise that resolves when the user approves.
+ */
+function openVerificationPause(
+  ctx: ExtensionContext,
+  behavior: Behavior,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    hitlWindow = {
+      behaviorId: behavior.id,
+      description: behavior.description,
+      approve: resolve,
+    };
+    ctx.ui.notify(
+      `${behavior.id} awaiting manual verification — type feedback (auto-forwarded) or /steer <msg>, /approve`,
+      "info",
+    );
+    ctx.ui.setStatus("implement", `✦ ${behavior.id}: awaiting verification`);
+  });
 }
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
@@ -415,7 +502,15 @@ export async function runOrchestratedImplement(
   state: WorkflowState,
   task: TaskContract,
   runUnit: UnitRunner = (unit, cwd, signal, onEvent) =>
-    runImplementerUnit(loadUnitPrompt(), unit.taskText, cwd, signal, undefined, onEvent),
+    runImplementerUnit(
+      loadUnitPrompt(),
+      unit.taskText,
+      cwd,
+      signal,
+      undefined,
+      onEvent,
+      unit.kind === "manual",
+    ),
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
   const landedCommits: string[] = [];
@@ -511,6 +606,7 @@ export async function runOrchestratedImplement(
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
       taskText: taskPrefix + buildUnitTask(behavior, task) + resumeTreeContext,
+      kind: behavior.kind,
     };
     resumeTreeContext = "";
 
@@ -527,7 +623,7 @@ export async function runOrchestratedImplement(
         }
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
         taskText = buildRetryTask(behavior, task, attempt, retry);
-        attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd, undefined, relay);
+        attempt = await runUnit({ behaviorId: behavior.id, taskText, kind: behavior.kind }, cwd, undefined, relay);
         result.unitsRun++;
         continue;
       }
@@ -554,6 +650,15 @@ export async function runOrchestratedImplement(
       // usual and the commands are reported to the user at completion.
       for (const entry of attempt.blockedCommands ?? []) {
         result.deferredCommands!.push(entry);
+      }
+
+      // Manual behaviors pause before commit for human verification (T3).
+      // The kept-alive child stays available for mid-pause steering; once
+      // the pause closes (approve), it is shut down and the commit runs.
+      if (behavior.kind === "manual" && attempt.client) {
+        await openVerificationPause(ctx, behavior);
+        await attempt.client.shutdown(2_000);
+        if (getActiveUnitClient() === attempt.client) setActiveUnitClient(undefined);
       }
 
       const subject = pickCommitSubject(attempt, behavior);
@@ -601,7 +706,7 @@ export async function runOrchestratedImplement(
 
       ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
       taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
-      attempt = await runUnit({ behaviorId: behavior.id, taskText }, cwd, undefined, relay);
+      attempt = await runUnit({ behaviorId: behavior.id, taskText, kind: behavior.kind }, cwd, undefined, relay);
       result.unitsRun++;
     }
   }

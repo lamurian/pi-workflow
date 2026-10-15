@@ -22,7 +22,7 @@ For a behavior with `kind: "test"`:
 3. **Self-check:** run the project's test command via bash until green. Skip only if the sandbox blocks it.
 4. Stop. Do not start other behaviors.
 
-For `manual` behaviors: implement, verify by inspection or a scripted check, and describe how you verified.
+For `manual` behaviors: implement, verify by inspection or a scripted check, and describe how you verified. After emitting your report you END YOUR RUN and await human verification — the orchestrator keeps your process alive and pauses before committing. The user may steer feedback to you mid-pause; when steered, address exactly that feedback and end the turn with an updated JSON report again. The human decides when the behavior is approved — never assume approval, and never commit.
 
 ## Sandbox blocks: hand over, don't fight
 

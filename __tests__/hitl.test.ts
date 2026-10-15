@@ -1,5 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -9,6 +10,8 @@ import {
   runImplStatus,
   formatImplementerActivity,
   runOrchestratedImplement,
+  runApprove,
+  getHitlWindow,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import {
@@ -74,6 +77,67 @@ function ctxWithUiSpies(): ExtensionContext & {
     statusCalls: Array<[string, string | undefined]>;
     notifyCalls: Array<[string, string | undefined]>;
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Shared helpers
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Poll until `check` passes or `ms` elapses. */
+async function waitFor(check: () => boolean, ms = 3_000): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (check()) return true;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return check();
+}
+
+/** Exec mock where git commit advances HEAD; records exec invocations. */
+function piWithAdvancingHead(): ExtensionAPI & {
+  calls: Record<string, unknown[]>;
+  execLog: string[];
+} {
+  const pi = mockPi() as ExtensionAPI & { calls: Record<string, unknown[]>; execLog: string[] };
+  const execLog: string[] = [];
+  let headCounter = 0;
+  pi.exec = (async (cmd: string, args: string[]) => {
+    execLog.push(`${cmd} ${args.join(" ")}`);
+    if (cmd === "git" && args[0] === "rev-parse") {
+      return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+    }
+    if (cmd === "git" && args[0] === "commit") {
+      headCounter++;
+      return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+    }
+    return { stdout: "", stderr: "", code: 0, killed: false };
+  }) as ExtensionAPI["exec"];
+  pi.execLog = execLog;
+  return pi;
+}
+
+/** Count of `git commit` invocations recorded by piWithAdvancingHead. */
+function commitCount(pi: { execLog: string[] }): number {
+  return pi.execLog.filter((entry) => entry.startsWith("git commit")).length;
+}
+
+/** Fake kept-alive client for manual behaviors, with a shutdown counter. */
+function fakeManualClient(record: { shutdowns: number }): RpcUnitClient {
+  return {
+    isAlive: () => true,
+    shutdown: async () => {
+      record.shutdowns++;
+    },
+    kill: () => {},
+    send: () => {},
+    command: async () => ({ type: "response", success: true, id: "x" }),
+    prompt: () => {},
+    steer: (_message: string, _images?: RpcImage[]) => {},
+    onEvent: () => () => {},
+    onExit: () => () => {},
+    rawStdout: () => "",
+    stderrText: () => "",
+  } as unknown as RpcUnitClient;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -270,5 +334,104 @@ describe("T2: relay entry renderer", () => {
         "a successful registration targets the implementer-activity entry type",
       );
     }
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T3 — manual-only verification pause with /approve
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("T3: manual verification pause", () => {
+  function twoKindTask(): TaskContract {
+    return {
+      title: "Mixed Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "test behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "visual gutter alignment", expectedOutput: "e2", kind: "manual", status: "active" },
+      ],
+    };
+  }
+
+  it("manual behavior pauses before commit; /approve closes the pause, commits, and the loop completes; test behaviors still auto-commit", async () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const state: WorkflowState = { phase: "implementing", specText: "t", task: twoKindTask() };
+    const record = { shutdowns: 0 };
+    const client = fakeManualClient(record);
+    const runner: UnitRunner = async (unit) => {
+      const report = {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): land ${unit.behaviorId.toLowerCase()}`,
+      };
+      return unit.behaviorId === "T2" ? { ...report, client } : report;
+    };
+
+    const loop = runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.ok(
+      await waitFor(() => ctx.notifyCalls.some(([m]) => /T2 awaiting manual verification/.test(m))),
+      "the pause opens with the verification guidance notify",
+    );
+    assert.equal(commitCount(pi), 1, "only the test behavior committed before approval");
+    assert.equal(state.task!.behaviors[1]!.status, "active", "T2 is not done before approval");
+    assert.ok(getHitlWindow(), "the hitl window is open during the pause");
+    assert.equal(getHitlWindow()!.behaviorId, "T2");
+    assert.ok(
+      ctx.statusCalls.some(([key, value]) => key === "implement" && /awaiting verification/.test(value ?? "")),
+      "the status frame announces the pause",
+    );
+
+    runApprove(pi, ctx);
+    const result = await loop;
+
+    assert.equal(result.complete, true, "approval lets the run settle complete");
+    assert.equal(commitCount(pi), 2, "approval triggers the deferred commit");
+    assert.equal(state.task!.behaviors[1]!.status, "done", "T2 is done after approval");
+    assert.equal(getHitlWindow(), undefined, "the window is cleared after approval");
+    assert.equal(record.shutdowns, 1, "the kept-alive child is shut down once the pause closes");
+  });
+
+  it("/approve outside a pause refuses with a warning and no side effects", () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    runApprove(pi, ctx);
+    assert.equal(ctx.notifyCalls.length, 1, "exactly one refusal notification");
+    const [msg, kind] = ctx.notifyCalls[0]!;
+    assert.match(msg, /\/approve/, "the refusal names the command");
+    assert.match(msg, /manual verification pause/, "the refusal names the valid period");
+    assert.equal(kind, "warning");
+    assert.equal(commitCount(pi), 0, "no commit is attempted");
+  });
+
+  it("mustRunNow on a manual unit halts before any pause", async () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const state: WorkflowState = { phase: "implementing", specText: "t", task: twoKindTask() };
+    const runner: UnitRunner = async (unit) => {
+      if (unit.behaviorId === "T2") {
+        return {
+          summary: "blocked",
+          blockedCommands: [{ command: "npx playwright install", mustRunNow: true }],
+        };
+      }
+      return { summary: "ok", suggestedCommit: "feat(core): land t1" };
+    };
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.equal(result.haltedOn, "T2", "the loop halts on the blocked unit");
+    assert.ok(result.pendingCommand, "the pending command rides the halt");
+    assert.ok(
+      !ctx.notifyCalls.some(([m]) => /awaiting manual verification/.test(m)),
+      "no pause opens for a blocked unit",
+    );
+    assert.equal(getHitlWindow(), undefined, "no window is left open");
+  });
+
+  it("content/unit-prompt.md describes the manual pause and mid-pause steering", async () => {
+    const text = await readFile(new URL("../content/unit-prompt.md", import.meta.url), "utf8");
+    assert.match(text, /manual/i, "the prompt covers manual behaviors");
+    assert.match(text, /verif/i, "the prompt describes the verification pause");
+    assert.match(text, /steer/i, "the prompt mentions mid-pause steering");
   });
 });

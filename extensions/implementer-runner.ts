@@ -56,6 +56,8 @@ export interface UnitTask {
   behaviorId: string;
   /** Full task text rendered for the subprocess. */
   taskText: string;
+  /** Behavior kind; manual units keep their child alive for the HITL pause. */
+  kind?: "test" | "manual";
 }
 
 // ─── Raw subprocess execution ──────────────────────────────────────────────────
@@ -203,7 +205,12 @@ function hasParseableReport(text: string): boolean {
  * @param signal       - Optional parent abort signal.
  * @param timeoutMs    - Per-process wall-clock timeout in ms.
  * @param onEvent      - Optional sink for live stdout events (zero-token relay).
- * @returns Parsed report, plus `error`/`timedOut`/`missingReport` on failure.
+ * @param keepAlive    - Manual-kind units: skip the post-report shutdown so the
+ *                       orchestrator can pause for human verification with the
+ *                       child still alive. Only honored on the success path;
+ *                       failures always shut the child down.
+ * @returns Parsed report, plus `client` when kept alive and
+ *          `error`/`timedOut`/`missingReport` on failure.
  */
 export async function runImplementerUnit(
   systemPrompt: string,
@@ -212,7 +219,8 @@ export async function runImplementerUnit(
   signal?: AbortSignal,
   timeoutMs: number = getImplementerTimeoutMs(),
   onEvent?: (event: Record<string, unknown>) => void,
-): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean }> {
+  keepAlive = false,
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
   const client = spawnRpcUnitClient({ systemPrompt, cwd });
   setActiveUnitClient(client);
 
@@ -259,14 +267,25 @@ export async function runImplementerUnit(
   unsubEvents();
   unsubExit();
 
-  // Completion (report seen) or exit/kill: graceful shutdown, then classify.
-  await client.shutdown(2_000);
-  if (getActiveUnitClient() === client) setActiveUnitClient(undefined);
+  // Completion (report seen) or exit/kill: graceful shutdown (unless the
+  // orchestrator keeps the child alive for a manual verification pause),
+  // then classify.
+  if (!keepAlive) {
+    await client.shutdown(2_000);
+    if (getActiveUnitClient() === client) setActiveUnitClient(undefined);
+  }
+  const releaseIfKept = async () => {
+    if (keepAlive) {
+      await client.shutdown(2_000);
+      if (getActiveUnitClient() === client) setActiveUnitClient(undefined);
+    }
+  };
 
   const stdout = client.rawStdout();
   const stderr = client.stderrText();
   const report = parseImplementerReport(stdout);
   if (timedOut) {
+    await releaseIfKept();
     const assistant = lastAssistantText(stdout);
     const rawTail = assistant ? "" : stdout.trim().slice(-400);
     const marker = `timed out after ${timeoutMs}ms`;
@@ -279,6 +298,7 @@ export async function runImplementerUnit(
     return { ...report, error: parts.join("\n\n"), timedOut: true };
   }
   if (!reportSeen && exitCode !== 0) {
+    await releaseIfKept();
     const stdoutTail = stdout.trim().slice(-2000);
     const parts = [
       stderr.trim() || `implementer exited with code ${exitCode}`,
@@ -288,6 +308,7 @@ export async function runImplementerUnit(
   }
   const finalText = lastAssistantText(stdout);
   if (!hasParseableReport(finalText)) {
+    await releaseIfKept();
     const detail = finalText
       ? `--- final assistant text ---\n${finalText}`
       : "(no assistant output captured)";
@@ -298,6 +319,9 @@ export async function runImplementerUnit(
         "(a prose handover plea is not a report).\n\n" + detail,
       missingReport: true,
     };
+  }
+  if (keepAlive && client.isAlive()) {
+    return { ...report, client };
   }
   return report;
 }

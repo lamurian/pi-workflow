@@ -15,7 +15,7 @@ import {
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
 } from "./implement.ts";
-import { runImplStatus } from "./implement-loop.ts";
+import { runImplStatus, runApprove } from "./implement-loop.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -139,6 +139,16 @@ export default function (pi: ExtensionAPI): void {
       "Only available while an orchestrated /implement run is in flight.",
     handler: async (_args, ctx) => {
       await runImplStatus(pi, ctx);
+    },
+  });
+
+  // ── /approve ──────────────────────────────────────────────
+  pi.registerCommand("approve", {
+    description:
+      "Approve the manual behavior under verification and commit it. " +
+      "Only valid during a manual verification pause.",
+    handler: async (_args, ctx) => {
+      runApprove(pi, ctx);
     },
   });
 
