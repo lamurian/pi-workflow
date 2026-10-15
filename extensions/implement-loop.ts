@@ -14,6 +14,7 @@ import {
   runImplementerUnit,
   getActiveUnitClient,
   setActiveUnitClient,
+  shutdownActiveClient,
   type UnitTask,
 } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
@@ -217,6 +218,26 @@ export interface HitlWindow {
 }
 
 let hitlWindow: HitlWindow | undefined;
+
+/** Unsubscribe for the orchestration input handler (module scope so session
+ * shutdown and halt paths can unregister it too). */
+let offInputHandler: (() => void) | undefined;
+
+/**
+ * Tear down every orchestration artifact: input handler, pause window,
+ * HITL clock, and any live implementer child (graceful abort, then
+ * SIGKILL after a short grace). Idempotent; safe to call from session
+ * shutdown, halt, and crash paths.
+ *
+ * @param graceMs - Grace period before the child's SIGKILL fallback.
+ */
+export async function cleanupOrchestration(graceMs: number = 1_000): Promise<void> {
+  offInputHandler?.();
+  offInputHandler = undefined;
+  hitlWindow = undefined;
+  disarmHitlClock();
+  await shutdownActiveClient(graceMs);
+}
 
 /** Rearm callback for the HITL clock (set while a timed pause is open). */
 let hitlRearm: (() => void) | undefined;
@@ -697,16 +718,14 @@ export async function runOrchestratedImplement(
   // Steering (T4): while a verification pause is open, plain user input at
   // the main prompt is consumed and forwarded to the live child; slash
   // commands and everything outside a pause pass through. Unregistered on
-  // every exit path (halt closure + normal completion).
-  let offInput: (() => void) | undefined;
+  // every exit path via cleanupOrchestration.
 
   const halt = async (
     behaviorId: string,
     error: string,
     pendingCommand?: PendingCommand,
   ) => {
-    offInput?.();
-    offInput = undefined;
+    await cleanupOrchestration();
     result.haltedOn = behaviorId;
     result.error = error;
     result.treeState = await readTreeState(pi, cwd);
@@ -737,7 +756,8 @@ export async function runOrchestratedImplement(
   }
 
   const resuming = state.phase === "implementing";
-  offInput = pi.on("input", async (event) => handleWorkflowInput(event));
+  offInputHandler?.();
+  offInputHandler = pi.on("input", async (event) => handleWorkflowInput(event));
   let resumeTreeContext = "";
   if (resuming) {
     const tree = await readTreeState(pi, cwd);
@@ -912,8 +932,7 @@ export async function runOrchestratedImplement(
   if (refusal) {
     return halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`);
   }
-  offInput?.();
-  offInput = undefined;
+  await cleanupOrchestration();
   state.phase = "idle";
   saveState(pi, state);
   updateUi(null, ctx);

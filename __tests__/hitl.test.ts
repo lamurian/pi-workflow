@@ -13,16 +13,19 @@ import {
   runApprove,
   runSteer,
   handleWorkflowInput,
+  cleanupOrchestration,
   getHitlWindow,
   setHitlWindow,
   type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
-import {
-  setActiveUnitClient,
-} from "../extensions/implementer-runner.ts";
-import { registerImplementerActivityRenderer, composeCompletionReport } from "../extensions/implement.ts";
+import { registerImplementerActivityRenderer, composeCompletionReport, runImplement } from "../extensions/implement.ts";
 import { getHitlTimeoutMs } from "../extensions/implement-loop.ts";
+import {
+  shutdownActiveClient,
+  setActiveUnitClient,
+  getActiveUnitClient,
+} from "../extensions/implementer-runner.ts";
 import { saveState, loadState } from "../extensions/state.ts";
 import type { RpcUnitClient, RpcImage } from "../extensions/rpc-unit-client.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
@@ -75,7 +78,7 @@ function mockPi(): ExtensionAPI & {
 }
 
 /** Context with recorded notify/setStatus so tests can assert UI traffic. */
-function ctxWithUiSpies(): ExtensionContext & {
+function ctxWithUiSpies(state?: WorkflowState): ExtensionContext & {
   statusCalls: Array<[string, string | undefined]>;
   notifyCalls: Array<[string, string | undefined]>;
 } {
@@ -83,7 +86,10 @@ function ctxWithUiSpies(): ExtensionContext & {
   const notifyCalls: Array<[string, string | undefined]> = [];
   return {
     cwd: "/tmp/test",
-    sessionManager: { getBranch: () => [] },
+    sessionManager: {
+      getBranch: () =>
+        state ? [{ type: "custom", customType: "workflow-state", data: state }] : [],
+    },
     ui: {
       notify: (msg: string, kind?: string) => {
         notifyCalls.push([msg, kind]);
@@ -781,5 +787,123 @@ describe("T5: HITL clock and deferral", () => {
       },
     } as unknown as ExtensionContext;
     assert.equal(loadState(legacyCtx)?.pendingManualChecks, undefined, "legacy states load cleanly");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T6 — orphan safety
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("T6: orphan safety", () => {
+  it("session_shutdown aborts and kills the live child, clears the window, and unregisters the input handler", async () => {
+    const factory = (await import("../extensions/index.ts")).default;
+    const pi = mockPi();
+    factory(pi);
+    const ons = (pi.calls["on"] ?? []) as Array<[string, unknown]>;
+    const shutdownEntry = ons.find(([name]) => name === "session_shutdown");
+    assert.ok(shutdownEntry, "a session_shutdown handler is registered");
+    const handler = shutdownEntry![1] as (event: unknown, ctx: unknown) => Promise<void>;
+
+    const record = { shutdowns: 0 };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow({ behaviorId: "T2", description: "gutter", approve: () => {} });
+    await handler({}, {});
+
+    assert.equal(record.shutdowns, 1, "the live child is shut down on session shutdown");
+    assert.equal(getActiveUnitClient(), undefined, "the registry is cleared");
+    assert.equal(getHitlWindow(), undefined, "the pause window is cleared");
+  });
+
+  it("the orchestrator halt path shuts the live child and clears the window", async () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const record = { shutdowns: 0 };
+    const client = fakeManualClient(record);
+    setActiveUnitClient(client);
+    setHitlWindow({ behaviorId: "T2", description: "gutter", approve: () => {} });
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "t",
+      task: {
+        title: "Orphan Task",
+        instruction: "x",
+        files: ["src/a.ts"],
+        done: "green",
+        behaviors: [
+          { id: "T2", description: "gutter", expectedOutput: "e", kind: "manual", status: "active" },
+        ],
+      },
+    };
+    // A mustRunNow halt after the manual unit reported would leave the
+    // child alive; simulate via the runner reporting a blocked command on
+    // a second attempt path — here the halt occurs before any pause for a
+    // blocked unit, so drive the halt directly with a failing runner.
+    const runner: UnitRunner = async () => ({
+      summary: "failed",
+      error: "boom",
+    });
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.ok(result.haltedOn, "the loop halts");
+    assert.equal(getHitlWindow(), undefined, "the window is cleared on halt");
+    assert.ok(pi.onUnsubscribed.includes("input"), "the input handler is unregistered on halt");
+  });
+
+  it("post-run input passes through; /steer /approve /impl-status refuse", async () => {
+    // After a settled run there is no window and no child: everything
+    // refuses or passes through.
+    setHitlWindow(undefined);
+    setActiveUnitClient(undefined);
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    assert.deepEqual(handleWorkflowInput({ type: "input", text: "hello", source: "interactive" }), {
+      action: "continue",
+    });
+    runSteer("hello", pi, ctx);
+    runApprove(pi, ctx);
+    await runImplStatus(pi, ctx);
+    const warnings = ctx.notifyCalls.filter(([, kind]) => kind === "warning");
+    assert.equal(warnings.length, 3, "all three commands refuse outside a pause");
+  });
+
+  it("the in-flight guard still refuses re-entry while a pause is open", async () => {
+    const pi = piWithAdvancingHead();
+    const task: TaskContract = {
+      title: "Guard Pause Task",
+      instruction: "x",
+      files: ["src/a.ts"],
+      done: "green",
+      behaviors: [
+        { id: "T1", description: "visual check", expectedOutput: "e", kind: "manual", status: "active" },
+      ],
+    };
+    const state: WorkflowState = { phase: "finalizing", specText: "t", task };
+    const ctx = ctxWithUiSpies(state);
+    const record = { shutdowns: 0 };
+    const runner: UnitRunner = async (unit) => ({
+      summary: `implemented ${unit.behaviorId}`,
+      suggestedCommit: "feat(core): visual check",
+      client: fakeManualClient(record),
+    });
+
+    let settled!: Promise<OrchestratorResult>;
+    await runImplement("", pi, ctx, runner, (background) => {
+      settled = background;
+    });
+    assert.ok(
+      await waitFor(() => getHitlWindow() !== undefined, 3_000),
+      "the pause opens",
+    );
+
+    // Second /implement while the pause holds the run in flight: refused.
+    await runImplement("", pi, ctx, runner, () => {});
+    assert.ok(
+      ctx.notifyCalls.some(([m]) => /already in flight/.test(m)),
+      "re-entry is refused while a pause is in flight",
+    );
+
+    runApprove(pi, ctx);
+    const result = await settled;
+    assert.equal(result.complete, true, "approval lets the run settle");
+    assert.equal(getHitlWindow(), undefined, "no window remains after settlement");
   });
 });

@@ -15,7 +15,7 @@ import {
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
 } from "./implement.ts";
-import { runImplStatus, runApprove, runSteer } from "./implement-loop.ts";
+import { runImplStatus, runApprove, runSteer, cleanupOrchestration } from "./implement-loop.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -44,6 +44,14 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on("session_compact", async (event, ctx) => {
     await handlePostCompact(event, ctx);
+  });
+
+  // ─── Orphan Safety (T6) ──────────────────────────────────
+  // Session shutdown aborts and kills any live implementer child, clears
+  // the pause window, and unregisters the input handler so a dying session
+  // never leaves an orphaned subprocess steering nobody.
+  pi.on("session_shutdown", async () => {
+    await cleanupOrchestration(500);
   });
 
   // ─── Context Injection ──────────────────────────────────────

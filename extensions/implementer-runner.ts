@@ -38,6 +38,23 @@ export function setActiveUnitClient(client: RpcUnitClient | undefined): void {
   activeUnitClient = client;
 }
 
+/**
+ * Shut down the active implementer child, if any (orphan safety).
+ *
+ * Graceful path: abort command + stdin close, SIGKILL after the grace
+ * period (the client's built-in shutdown fallback). Clears the registry.
+ *
+ * @param graceMs - Grace period before the SIGKILL fallback.
+ * @returns True when a child was shut down.
+ */
+export async function shutdownActiveClient(graceMs: number = 2_000): Promise<boolean> {
+  const client = getActiveUnitClient();
+  if (!client) return false;
+  if (client.isAlive()) await client.shutdown(graceMs);
+  if (getActiveUnitClient() === client) setActiveUnitClient(undefined);
+  return true;
+}
+
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
 /** Raw output from a spawned pi subprocess. */

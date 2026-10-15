@@ -16,6 +16,7 @@ import {
   setUnitPrompt,
   readGitHead,
   runImplStatus,
+  cleanupOrchestration,
   formatImplementerActivity,
   type ImplementerActivityData,
   type OrchestratorResult,
@@ -325,6 +326,8 @@ async function runOrchestratedImplementSafely(
   try {
     return await runOrchestratedImplement(pi, ctx, state, task, runUnit);
   } catch (err) {
+    // Crash path (T6): never leave an orphaned child or a stale pause.
+    await cleanupOrchestration();
     const message = String((err as Error)?.message ?? err);
     const active = task.behaviors.find((b) => b.status === "active");
     const lastHalt: LastHalt = {
