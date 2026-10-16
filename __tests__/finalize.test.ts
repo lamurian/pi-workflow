@@ -471,6 +471,41 @@ describe("save_task scan wiring (T3)", () => {
     assert.match(res.content[0].text, /declared-not-found/);
     assert.match(notifyCalls[0]!, /warnings: 2/);
   });
+
+  it("keeps save_task result text under 32 KB for a large contract (render wiring)", async () => {
+    // 100 declared entries x 30 test files all basename-matching every entry:
+    // 3,000 raw evidence lines must render small via collapse + global cap.
+    const entryCount = 100;
+    const testCount = 30;
+    const basenames = Array.from({ length: entryCount }, (_, i) => `feat${i}`);
+    const testContent = basenames.join(" ") + "\n";
+    const files: Record<string, string> = {};
+    for (let i = 0; i < entryCount; i++) files[`src/feat${i}.ts`] = "use strict;\n";
+    for (let j = 0; j < testCount; j++) files[`tests/f${j}.test.ts`] = testContent;
+    const dir = tmpProject(files);
+    const listing =
+      Object.keys(files)
+        .map((f) => `./${f}`)
+        .join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: Object.keys(files).filter((f) => f.startsWith("src/")) },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true);
+    const text = res.content[0].text;
+    assert.match(text, /too generic to enumerate/, "fan-out must collapse to summaries");
+    const bytes = Buffer.byteLength(text, "utf8");
+    assert.ok(bytes < 32 * 1024, `save_task text was ${bytes} bytes, must stay under 32 KB`);
+  });
 });
 
 // ═══ finalize-prompt.md content assertions (T6) ═══

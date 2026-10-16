@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
 import { validateTask } from "./task-contract.ts";
 import { isTestPath, deriveMatches, crossCheck, type DeriveResult } from "./test-scan.ts";
+import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
 
 // ─── Deterministic contract scan (T3) ───────────────────────────────────
@@ -191,7 +192,10 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       } else if (scan.evidence.length > 0) {
         text +=
           "\n\n## Test scan evidence (advisory)\n" +
-          scan.evidence.map((e) => `- ${e}`).join("\n");
+          renderEvidence(scan.evidence)
+            .split("\n")
+            .map((l) => `- ${l}`)
+            .join("\n");
       }
       if (allWarnings.length > 0) {
         text +=

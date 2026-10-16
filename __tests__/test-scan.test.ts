@@ -12,6 +12,7 @@ import {
 import {
   renderEvidence,
   BASENAME_FANOUT_CAP,
+  MAX_EVIDENCE_LINES,
 } from "../extensions/test-scan-render.ts";
 
 // ═══ LANG_PROFILES / profileFor / escapeRe / isTestPath ═══
@@ -334,5 +335,76 @@ describe("renderEvidence basename fan-out collapse", () => {
 
   it("returns an empty string for empty evidence", () => {
     assert.equal(renderEvidence([]), "");
+  });
+});
+
+// ═══ renderEvidence — global line cap (MAX_EVIDENCE_LINES) ═══
+describe("renderEvidence global line cap (MAX_EVIDENCE_LINES)", () => {
+  it("caps the global evidence line budget at 150", () => {
+    assert.equal(MAX_EVIDENCE_LINES, 150);
+  });
+
+  /** 1,800 low-confidence lines spread over 360 entries (5 each, no collapse). */
+  function lowFanOut(count: number): string[] {
+    return Array.from({ length: count }, (_, i) => {
+      const entry = `src/e${Math.floor(i / 5)}.ts`;
+      return `${entry} -> tests/lo-${i}.test.ts [basename, low]`;
+    });
+  }
+
+  it("keeps all high-confidence lines, adds no low-confidence past the cap, one trailer", () => {
+    // 2,000 lines: 200 high-confidence + 1,800 low-confidence.
+    const high = Array.from(
+      { length: 200 },
+      (_, i) => `src/h${i}.ts -> tests/h-${i}.test.ts [structural, high]`,
+    );
+    const evidence = [...high, ...lowFanOut(1800)];
+    const lines = renderEvidence(evidence).split("\n");
+
+    const trailer = lines[lines.length - 1]!;
+    const kept = lines.slice(0, -1);
+    assert.match(trailer, /omitted/, "last line must be the omission trailer");
+    assert.match(trailer, /1800/, "trailer must name the omitted count");
+    assert.match(trailer, /\[basename, low\]/, "trailer must name what was omitted");
+
+    // High-confidence lines are never dropped: all 200 present, stable order.
+    const keptHigh = kept.filter((l) => /\[structural, high\]/.test(l));
+    assert.equal(keptHigh.length, 200, "all 200 high-confidence lines must be present");
+    assert.deepEqual(keptHigh, high, "high-confidence lines must keep stable order");
+    // No low-confidence lines admitted: the cap is already exceeded by high lines.
+    assert.equal(kept.length, 200, "no low-confidence line may displace a high one");
+    assert.equal(lines.length, 201, "exactly high lines plus one trailer");
+  });
+
+  it("fills low-confidence lines up to the cap when high lines leave budget", () => {
+    const high = Array.from(
+      { length: 40 },
+      (_, i) => `src/h${i}.ts -> tests/h-${i}.test.ts [import-path, high]`,
+    );
+    const evidence = [...high, ...lowFanOut(1800)];
+    const lines = renderEvidence(evidence).split("\n");
+
+    assert.equal(lines.length, MAX_EVIDENCE_LINES + 1, "150 match lines plus one trailer");
+    const trailer = lines[lines.length - 1]!;
+    assert.match(trailer, /omitted/);
+    assert.match(trailer, /1690/, "1,800 low lines minus the 110 admitted");
+
+    const kept = lines.slice(0, -1);
+    const keptHigh = kept.filter((l) => /\[import-path, high\]/.test(l));
+    assert.deepEqual(keptHigh, high, "all 40 high-confidence lines first, stable order");
+    const keptLow = kept.filter((l) => /\[basename, low\]/.test(l));
+    assert.equal(keptLow.length, 110, "low-confidence fills exactly the remaining budget");
+    assert.deepEqual(
+      keptLow,
+      evidence.filter((l) => /\[basename, low\]/.test(l)).slice(0, 110),
+      "admitted low lines keep stable order",
+    );
+  });
+
+  it("leaves rendered evidence under the cap untouched", () => {
+    const evidence = [...lowFanOut(100), "src/x.ts -> tests/x.test.ts [symbol, high]"];
+    const out = renderEvidence(evidence);
+    assert.equal(out.split("\n").length, 101, "no trailer when under the cap");
+    assert.ok(!/omitted/.test(out), "no omission trailer below the cap");
   });
 });

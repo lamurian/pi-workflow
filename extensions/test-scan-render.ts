@@ -6,6 +6,9 @@
 /** Per-entry cap: above this many [basename, low] matches, collapse. */
 export const BASENAME_FANOUT_CAP = 5;
 
+/** Global safety valve: max rendered lines before omission kicks in. */
+export const MAX_EVIDENCE_LINES = 150;
+
 /** Number of sample test paths kept in a collapsed basename summary line. */
 const SAMPLE_PATHS = 3;
 
@@ -90,6 +93,41 @@ function renderEntry(lines: EvidenceLine[]): string[] {
 }
 
 /**
+ * Enforce the global line budget, prioritizing high-confidence lines.
+ *
+ * When the rendered lines exceed MAX_EVIDENCE_LINES, high-confidence and
+ * free-form lines are kept in stable order, low-confidence lines fill the
+ * remaining budget in stable order, and one trailer line names how many
+ * low-confidence matches were omitted. Under the cap, input is unchanged.
+ *
+ * @param lines - Rendered evidence lines after per-entry collapse.
+ * @returns Capped lines joined with "\n".
+ */
+function applyGlobalCap(lines: string[]): string {
+  if (lines.length <= MAX_EVIDENCE_LINES) return lines.join("\n");
+  const high: string[] = [];
+  const low: string[] = [];
+  const other: string[] = [];
+  for (const raw of lines) {
+    const parsed = parseLine(raw);
+    if (parsed.confidence === "high") high.push(raw);
+    else if (parsed.confidence === "low") low.push(raw);
+    else other.push(raw);
+  }
+  const budget = Math.max(0, MAX_EVIDENCE_LINES - high.length - other.length);
+  const keptLow = low.slice(0, budget);
+  const omitted = low.length - keptLow.length;
+  const out = [...high, ...other, ...keptLow];
+  if (omitted > 0) {
+    out.push(
+      `… omitted ${omitted} [basename, low] matches (capped at ${MAX_EVIDENCE_LINES} lines; ` +
+        `grep the sources instead of enumerating tests)`,
+    );
+  }
+  return out.join("\n");
+}
+
+/**
  * Render scan evidence lines for the save_task tool result.
  *
  * Groups lines per declared entry (in first-appearance order). When an
@@ -97,7 +135,9 @@ function renderEntry(lines: EvidenceLine[]): string[] {
  * into one summary line keeping the first 3 sample paths, the total count,
  * and a word-boundary grep hint. High-confidence matches (structural /
  * import-path / symbol) and non-match entry lines are never collapsed.
- * Lines are joined with "\n"; bullets are the caller's concern.
+ * A global MAX_EVIDENCE_LINES cap then keeps high-confidence lines first
+ * and appends one omission trailer. Lines are joined with "\n"; bullets
+ * are the caller's concern.
  *
  * @param evidence - Raw evidence lines as produced by crossCheck.
  * @returns Rendered evidence text ("" for empty input).
@@ -115,5 +155,5 @@ export function renderEvidence(evidence: readonly string[]): string {
   }
   const out: string[] = [];
   for (const lines of groups.values()) out.push(...renderEntry(lines));
-  return out.join("\n");
+  return applyGlobalCap(out);
 }
