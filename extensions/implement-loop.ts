@@ -172,35 +172,6 @@ export function relayImplementerEvent(
   }
 }
 
-/**
- * `/impl-status`: relay a compact summary from the live implementer child.
- *
- * Queries the child over RPC (`get_last_assistant_text`) and surfaces the
- * answer via notify plus a persisted activity entry. Refuses with a warning
- * when no implementer subprocess is running.
- *
- * @param pi  - ExtensionAPI reference (for appendEntry).
- * @param ctx - Extension context (UI access).
- */
-export async function runImplStatus(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
-  const client = getActiveUnitClient();
-  if (!client || !client.isAlive()) {
-    ctx.ui.notify(
-      "/impl-status is only available while an implementer subprocess is running " +
-        "(during an orchestrated /implement run, before it settles).",
-      "warning",
-    );
-    return;
-  }
-  const res = await client.command({ type: "get_last_assistant_text" }, 5_000);
-  const data = res.success ? (res.data as { text?: unknown } | undefined) : undefined;
-  const text =
-    typeof data?.text === "string" && data.text.trim() ? data.text.trim() : "(no assistant text yet)";
-  const compact = text.length > RELAY_TEXT_LIMIT ? text.slice(0, RELAY_TEXT_LIMIT - 1) + "…" : text;
-  ctx.ui.notify(`Implementer status: ${compact}`, "info");
-  persistActivity(pi, { behaviorId: "(status)", kind: "status", text: compact, at: new Date().toISOString() });
-}
-
 // ─── Manual verification pause (T3) ───────────────────────────────────────────
 
 /** An open manual-verification pause (one at a time; the loop runs one unit). */

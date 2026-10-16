@@ -7,7 +7,6 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   relayImplementerEvent,
-  runImplStatus,
   formatImplementerActivity,
   runOrchestratedImplement,
   runApprove,
@@ -174,7 +173,7 @@ function fakeManualClient(record: { shutdowns: number; steers?: Array<{ message:
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// T2 — zero-token activity relay + /impl-status
+// T2 — zero-token activity relay
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("T2: zero-token activity relay", () => {
@@ -318,58 +317,6 @@ describe("T2: zero-token activity relay", () => {
     );
   });
 
-  it("/impl-status with a live child queries get_last_assistant_text and relays a summary", async () => {
-    const pi = mockPi();
-    const ctx = ctxWithUiSpies();
-    const sent: Array<Record<string, unknown>> = [];
-    const fakeClient = {
-      isAlive: () => true,
-      command: async (command: Record<string, unknown>) => {
-        sent.push(command);
-        return {
-          type: "response",
-          command: "get_last_assistant_text",
-          success: true,
-          id: "rpc-1",
-          data: { text: "All checks pass; report emitted" },
-        };
-      },
-    } as unknown as RpcUnitClient;
-    setActiveUnitClient(fakeClient);
-    try {
-      await runImplStatus(pi, ctx);
-    } finally {
-      setActiveUnitClient(undefined);
-    }
-    assert.equal(sent.length, 1, "exactly one query reaches the child");
-    assert.equal(sent[0]!["type"], "get_last_assistant_text");
-    assert.ok(
-      ctx.notifyCalls.some(([msg]) => msg.includes("All checks pass")),
-      "the summary is relayed via notify",
-    );
-    const activity = (pi.calls["appendEntry"] ?? []) as Array<[string, unknown]>;
-    assert.ok(
-      activity.some(([type]) => type === "implementer-activity"),
-      "the summary is persisted as an activity entry",
-    );
-  });
-
-  it("/impl-status without a live child refuses and sends nothing", async () => {
-    const pi = mockPi();
-    const ctx = ctxWithUiSpies();
-    setActiveUnitClient(undefined);
-    await runImplStatus(pi, ctx);
-    assert.equal(ctx.notifyCalls.length, 1, "a single refusal notification");
-    const [msg, kind] = ctx.notifyCalls[0]!;
-    assert.match(msg, /implementer subprocess/, "the refusal names why it is unavailable");
-    assert.equal(kind, "warning");
-    const activity = (pi.calls["appendEntry"] ?? []) as Array<[string, unknown]>;
-    assert.equal(
-      activity.filter(([type]) => type === "implementer-activity").length,
-      0,
-      "nothing is persisted when no child is running",
-    );
-  });
 });
 
 describe("T2: relay entry renderer", () => {
@@ -892,7 +839,7 @@ describe("T6: orphan safety", () => {
     assert.ok(pi.onUnsubscribed.includes("input"), "the input handler is unregistered on halt");
   });
 
-  it("post-run input passes through; /steer /approve /impl-status refuse", async () => {
+  it("post-run input passes through; /steer /approve refuse", async () => {
     // After a settled run there is no window and no child: everything
     // refuses or passes through.
     setHitlWindow(undefined);
@@ -904,9 +851,8 @@ describe("T6: orphan safety", () => {
     });
     runSteer("hello", pi, ctx);
     runApprove(pi, ctx);
-    await runImplStatus(pi, ctx);
     const warnings = ctx.notifyCalls.filter(([, kind]) => kind === "warning");
-    assert.equal(warnings.length, 3, "all three commands refuse outside a pause");
+    assert.equal(warnings.length, 2, "both commands refuse outside a pause");
   });
 
   it("the in-flight guard still refuses re-entry while a pause is open", async () => {

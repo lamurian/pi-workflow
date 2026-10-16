@@ -15,7 +15,7 @@ import {
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
 } from "./implement.ts";
-import { runImplStatus, runApprove, runSteer, cleanupOrchestration } from "./implement-loop.ts";
+import { runApprove, runSteer, cleanupOrchestration } from "./implement-loop.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -137,16 +137,6 @@ export default function (pi: ExtensionAPI): void {
       "Valid only after /finalize. Usage: /implement [note]",
     handler: async (args, ctx) => {
       await runImplement(args, pi, ctx);
-    },
-  });
-
-  // ── /impl-status ───────────────────────────────────────────
-  pi.registerCommand("impl-status", {
-    description:
-      "Relay a summary from the live implementer subprocess. " +
-      "Only available while an orchestrated /implement run is in flight.",
-    handler: async (_args, ctx) => {
-      await runImplStatus(pi, ctx);
     },
   });
 

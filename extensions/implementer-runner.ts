@@ -15,8 +15,8 @@ import type { RpcUnitClient } from "./rpc-unit-client.ts";
 /**
  * The single live implementer child, if any (one unit runs at a time).
  *
- * Exposed for /impl-status queries, HITL steering, and orphan-safety
- * shutdown. Test seam: setActiveUnitClient injects a fake client.
+ * Exposed for HITL steering and orphan-safety shutdown.
+ * Test seam: setActiveUnitClient injects a fake client.
  */
 let activeUnitClient: RpcUnitClient | undefined;
 

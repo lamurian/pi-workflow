@@ -16,7 +16,6 @@ import {
   buildEngineerNoteSection,
   setUnitPrompt,
   readGitHead,
-  runImplStatus,
   cleanupOrchestration,
   formatImplementerActivity,
   type ImplementerActivityData,
