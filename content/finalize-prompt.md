@@ -35,6 +35,8 @@ You are drafting the atomic implementation contract from this discussion.
 - **obsolete** — the test covers behavior the contract removes. Declare the path in `files`; for pure-removal contracts describe the removal in a manual behavior ("remove legacy path + its tests; suite green").
 - **out-of-scope** — the test is already dead or broken for reasons unrelated to this contract. Report it to the user as a recommendation for a separate `/discuss`. Never fold it into this contract.
 
+A collapsed `[basename, low]` fan-out line (one summary line counting many matches, e.g. `src/messages/en/research.json: 88 test files match [basename, low] — e.g. … — too generic to enumerate`) is **one item**, not 88. Treat it as generic-basename noise: the basename matched incidentally, not because the tests exercise the entry. Do not enumerate or classify the sampled paths individually; grep-verify only if the entry is plausibly affected by the contract's change.
+
 An `unverified` confidence tag means derivation found no hit (default export, indirect reference, or no affected tests). Confirm by reading the test files or declare known paths directly in `files` — never assume `unverified` means "no tests affected".
 
 ## Rules
