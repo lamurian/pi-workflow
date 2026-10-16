@@ -78,7 +78,7 @@ export interface ImplementerActivityData {
   behaviorId: string;
   /** Activity flavor: a completed turn, an assistant message, or a status query. */
   kind: "turn" | "assistant" | "status";
-  /** Compact text (already truncated by the producer where relevant). */
+  /** Relayed text: full assistant milestone text, or a compact turn summary. */
   text: string;
   /** ISO timestamp of the relay. */
   at: string;
@@ -86,9 +86,6 @@ export interface ImplementerActivityData {
 
 /** Transcript-line budget for formatImplementerActivity. */
 const RELAY_TEXT_LIMIT = 200;
-
-/** Milestone-text budget for notify lines. */
-const RELAY_NOTIFY_LIMIT = 120;
 
 /**
  * Format one activity entry as a compact transcript line.
@@ -142,9 +139,9 @@ function persistActivity(pi: ExtensionAPI, data: ImplementerActivityData): void 
  * Relay one implementer stdout event into the main session at zero token cost.
  *
  * turn_end drives the footer status line; assistant message_end events emit a
- * compact milestone notification. Both are persisted as `implementer-activity`
- * custom entries (not sent to the model). User-role messages and other event
- * types are ignored.
+ * milestone notification with the complete message text. Both are persisted as
+ * `implementer-activity` custom entries (not sent to the model). User-role
+ * messages and other event types are ignored.
  *
  * @param pi         - ExtensionAPI reference.
  * @param ctx        - Extension context (UI access).
@@ -170,9 +167,8 @@ export function relayImplementerEvent(
     if (message?.role !== "assistant") return;
     const text = extractTextContent(message.content);
     if (!text) return;
-    const compact = text.length > RELAY_NOTIFY_LIMIT ? text.slice(0, RELAY_NOTIFY_LIMIT - 1) + "…" : text;
-    ctx.ui.notify(`${behaviorId}: ${compact}`, "info");
-    persistActivity(pi, { behaviorId, kind: "assistant", text: compact, at: new Date().toISOString() });
+    ctx.ui.notify(`${behaviorId}: ${text}`, "info");
+    persistActivity(pi, { behaviorId, kind: "assistant", text, at: new Date().toISOString() });
   }
 }
 

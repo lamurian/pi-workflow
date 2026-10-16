@@ -220,6 +220,35 @@ describe("T2: zero-token activity relay", () => {
     );
   });
 
+  it("assistant milestones longer than 120 chars relay the complete text", () => {
+    const pi = mockPi();
+    const ctx = ctxWithUiSpies();
+    const fullText = "Milestone: " + "x".repeat(200) + " done";
+    assert.ok(fullText.length > 120, "the fixture exceeds the old notify budget");
+
+    relayImplementerEvent(pi, ctx, "T2", "1/2", {
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: fullText }] },
+    });
+
+    const notifies = ctx.notifyCalls.map(([msg]) => msg);
+    assert.ok(
+      notifies.includes(`T2: ${fullText}`),
+      "notify carries the complete untruncated assistant text",
+    );
+    assert.ok(
+      notifies.every((m) => !m.endsWith("…")),
+      "notify payload has no truncation marker",
+    );
+    const activity = (pi.calls["appendEntry"] ?? []) as Array<[string, unknown]>;
+    const entry = activity.find(
+      ([type, data]) =>
+        type === "implementer-activity" &&
+        (data as { kind?: string }).kind === "assistant",
+    )?.[1] as { text?: string } | undefined;
+    assert.equal(entry?.text, fullText, "the persisted entry carries the full text");
+  });
+
   it("user-role message_end and non-message events are not notified", () => {
     const pi = mockPi();
     const ctx = ctxWithUiSpies();
