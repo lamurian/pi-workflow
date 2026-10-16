@@ -681,11 +681,17 @@ export function getCommitTimeoutMs(
  * re-running resumes cleanly. Progress notifications (unit start + landed
  * commit) keep a multi-minute run visibly alive in the UI.
  *
- * @param pi      - ExtensionAPI reference.
- * @param ctx     - Extension context (cwd, UI).
- * @param state   - Current workflow state (mutated in place).
- * @param task    - The task contract.
- * @param runUnit - Injectable unit runner (defaults to the real subprocess).
+ * A non-empty engineerNote is appended to every unit's task text: the base
+ * attempt, every retry (buildRetryTask), and every fix subagent (whose
+ * original task text already carries it). On completion the loop clears
+ * state.engineerNote along with the phase switch to idle.
+ *
+ * @param pi           - ExtensionAPI reference.
+ * @param ctx          - Extension context (cwd, UI).
+ * @param state        - Current workflow state (mutated in place).
+ * @param task         - The task contract.
+ * @param runUnit      - Injectable unit runner (defaults to the real subprocess).
+ * @param engineerNote - Optional engineer's note forwarded from /implement.
  * @returns Loop outcome including landed commits and halt details.
  */
 export async function runOrchestratedImplement(
@@ -703,9 +709,11 @@ export async function runOrchestratedImplement(
       onEvent,
       unit.kind === "manual",
     ),
+  engineerNote?: string,
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
   const landedCommits: string[] = [];
+  const noteSection = engineerNote ? buildEngineerNoteSection(engineerNote) : "";
   const units = task.behaviors.filter((b) => b.status === "active");
   const result: OrchestratorResult = {
     complete: false,
@@ -748,6 +756,7 @@ export async function runOrchestratedImplement(
     result.complete = evaluateCompletionGate(state) === null;
     if (result.complete) {
       state.phase = "idle";
+      state.engineerNote = undefined;
       saveState(pi, state);
       updateUi(null, ctx);
     }
@@ -811,7 +820,7 @@ export async function runOrchestratedImplement(
     }
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
-      taskText: taskPrefix + buildUnitTask(behavior, task) + resumeTreeContext,
+      taskText: taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext,
       kind: behavior.kind,
     };
     resumeTreeContext = "";
@@ -828,7 +837,7 @@ export async function runOrchestratedImplement(
           return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
         }
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-        taskText = buildRetryTask(behavior, task, attempt, retry);
+        taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection;
         attempt = await runUnit({ behaviorId: behavior.id, taskText, kind: behavior.kind }, cwd, undefined, relay);
         result.unitsRun++;
         continue;
@@ -934,6 +943,7 @@ export async function runOrchestratedImplement(
   }
   await cleanupOrchestration();
   state.phase = "idle";
+  state.engineerNote = undefined;
   saveState(pi, state);
   updateUi(null, ctx);
   ctx.ui.setStatus("implement", undefined);
@@ -964,6 +974,24 @@ export function loadUnitPrompt(): string {
  */
 export function setUnitPrompt(text: string): void {
   _unitPrompt = text;
+}
+
+/**
+ * Build the `## Engineer's note` section appended to unit task texts.
+ *
+ * Mirrors the wording the solo /implement prompt uses: the note is guidance
+ * on top of the authoritative contract, never a license to extend it.
+ *
+ * @param note - The engineer's note text (non-empty).
+ * @returns The rendered markdown section, ready for string concatenation.
+ */
+export function buildEngineerNoteSection(note: string): string {
+  return (
+    `\n\n## Engineer's note\n\n${note}` +
+    "\n\nGuidance on top of the authoritative contract. If it implies changes " +
+    "beyond the contract, report that and tell the user to run /finalize — " +
+    "do not implement beyond the contract."
+  );
 }
 
 /**

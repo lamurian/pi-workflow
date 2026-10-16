@@ -108,6 +108,12 @@ export interface WorkflowState {
    * current HEAD to soft-warn when no commit landed between behaviors.
    */
   lastMarkedHead?: string;
+  /**
+   * Engineer's note passed to /implement. Persisted so it survives a
+   * halt/resume: a re-run without args reuses it, a new note replaces it,
+   * and the orchestrated loop clears it on completion (phase -> idle).
+   */
+  engineerNote?: string;
 }
 
 /** Test run results. */

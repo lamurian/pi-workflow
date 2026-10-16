@@ -2590,3 +2590,107 @@ describe("buildRetryTask: timeout and missingReport branches", () => {
     assert.match(text, /^## Previous attempt failed \(retry 3\/5\)\nboom: cannot write file\n\n## Original task\n/);
   });
 });
+
+// ═══ engineer's note: orchestrated forwarding ═══
+describe("engineer's note: orchestrated forwarding", () => {
+  const NOTE = "use strict null checks";
+
+  function noteTask(): TaskContract {
+    return {
+      title: "Note Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("forwards the note into every active unit's first-attempt task text", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+    const taskTexts: string[] = [];
+
+    const result = await runOrchestratedViaSeam(
+      pi,
+      ctx,
+      async (unit) => {
+        taskTexts.push(unit.taskText);
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+        };
+      },
+      NOTE,
+    );
+
+    assert.equal(result.complete, true, "the orchestrated run completes");
+    assert.equal(taskTexts.length, 2, "one first-attempt task text per active behavior");
+    for (const text of taskTexts) {
+      assert.match(text, /## Engineer's note/, "note section heading present");
+      assert.match(text, /use strict null checks/, "the note text is forwarded");
+      assert.match(
+        text,
+        /do not implement beyond the contract/,
+        "the guard sentence rides along",
+      );
+      assert.match(text, /tell the user to run \/finalize/, "the finalize guidance rides along");
+    }
+  });
+
+  it("solo mode keeps its existing note section", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+
+    await runImplement(`--solo ${NOTE} also wire the retries`, pi, ctx);
+
+    const send = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(send.length, 1, "solo mode steers the in-session agent");
+    const [text] = send[0] as [string];
+    assert.match(text, /## Engineer's note/);
+    assert.match(text, /use strict null checks/);
+    assert.match(text, /do not implement beyond the contract/);
+  });
+
+  it("with no note, no unit task text carries an Engineer's note section", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+    const taskTexts: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      taskTexts.push(unit.taskText);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    });
+
+    assert.equal(result.complete, true, "the orchestrated run completes");
+    assert.equal(taskTexts.length, 2, "one first-attempt task text per active behavior");
+    for (const text of taskTexts) {
+      assert.doesNotMatch(text, /## Engineer's note/, "no note section without a note");
+    }
+  });
+});

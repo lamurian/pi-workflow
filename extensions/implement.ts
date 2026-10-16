@@ -13,6 +13,7 @@ import {
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import {
   runOrchestratedImplement,
+  buildEngineerNoteSection,
   setUnitPrompt,
   readGitHead,
   runImplStatus,
@@ -126,6 +127,12 @@ export async function runImplement(
   saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
+  // Persist the engineer's note: a new note replaces the persisted one, a
+  // resume without args reuses it (state.ts serializes the whole object).
+  if (note) {
+    state.engineerNote = note;
+    saveState(pi, state);
+  }
 
   // Cache the implementer unit prompt once per /implement so the orchestrator
   // default runner can build subprocess argv without re-reading the file.
@@ -141,7 +148,14 @@ export async function runImplement(
   // deadline). The catch-to-lastHalt logic stays inside the background task.
   const activeCount = task.behaviors.filter((b) => b.status === "active").length;
   orchestrationInFlight = true;
-  const settled = runOrchestratedImplementSafely(pi, ctx, state, task, runUnit)
+  const settled = runOrchestratedImplementSafely(
+    pi,
+    ctx,
+    state,
+    task,
+    runUnit,
+    note || state.engineerNote,
+  )
     .then((result) => {
       if (result.complete) {
         ctx.ui.notify(
@@ -309,11 +323,12 @@ export function composeHaltReport(result: OrchestratorResult): string {
  * the session log) and surfaced in a notification instead of killing the
  * /implement turn silently. The phase stays implementing for resume.
  *
- * @param pi      - ExtensionAPI reference.
- * @param ctx     - Extension context.
- * @param state   - Current workflow state.
- * @param task    - The task contract.
- * @param runUnit - Injectable unit runner.
+ * @param pi           - ExtensionAPI reference.
+ * @param ctx          - Extension context.
+ * @param state        - Current workflow state.
+ * @param task         - The task contract.
+ * @param runUnit      - Injectable unit runner.
+ * @param engineerNote - Optional engineer's note forwarded to every unit.
  * @returns Loop outcome; error details when an exception was caught.
  */
 async function runOrchestratedImplementSafely(
@@ -322,9 +337,10 @@ async function runOrchestratedImplementSafely(
   state: WorkflowState,
   task: TaskContract,
   runUnit?: UnitRunner,
+  engineerNote?: string,
 ): Promise<Awaited<ReturnType<typeof runOrchestratedImplement>>> {
   try {
-    return await runOrchestratedImplement(pi, ctx, state, task, runUnit);
+    return await runOrchestratedImplement(pi, ctx, state, task, runUnit, engineerNote);
   } catch (err) {
     // Crash path (T6): never leave an orphaned child or a stale pause.
     await cleanupOrchestration();
@@ -366,11 +382,7 @@ async function runSoloImplement(
 ): Promise<void> {
   let prompt = await buildTddPrompt(task, hasCommitTool(pi));
   if (note) {
-    prompt +=
-      `\n\n## Engineer's note\n\n${note}` +
-      "\n\nGuidance on top of the authoritative contract. If it implies changes " +
-      "beyond the contract, report that and tell the user to run /finalize — " +
-      "do not implement beyond the contract.";
+    prompt += buildEngineerNoteSection(note);
   }
   ctx.ui.notify(
     "Starting TDD implementation. I'll work through the contract behavior by behavior.",
