@@ -2694,3 +2694,157 @@ describe("engineer's note: orchestrated forwarding", () => {
     }
   });
 });
+
+// ═══ engineer's note: retry and fix task texts (T2) ═══
+describe("engineer's note: retry and fix task texts", () => {
+  const NOTE = "use strict null checks";
+
+  /** Two-behavior contract; each behavior fails its first attempt. */
+  function noteTask(): TaskContract {
+    return {
+      title: "Note Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  const HOOK_STDERR =
+    ">>> Pre-commit hook failed\n" +
+    "golangci-lint run failed\n" +
+    "approve.go:42:1: unused variable \"x\"\n" +
+    "exit status 1";
+
+  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  function piWithRejectingHook() {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: " M src/a.ts\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  /** Shared assertions: the note section rides along with its guard. */
+  function assertNoteRetained(text: string, where: string) {
+    assert.match(text, /## Engineer's note/, `${where}: note section heading present`);
+    assert.match(text, /use strict null checks/, `${where}: the note text is retained`);
+    assert.match(
+      text,
+      /do not implement beyond the contract/,
+      `${where}: the guard sentence rides along`,
+    );
+    assert.match(text, /tell the user to run \/finalize/, `${where}: the finalize guidance rides along`);
+  }
+
+  it("retry task texts (unit error path) retain the note alongside the failure investigation", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+    const result = await runOrchestratedViaSeam(
+      pi,
+      ctx,
+      async (unit) => {
+        spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+        // First attempt per behavior fails with a unit error; the retry succeeds.
+        if (spawns.length % 2 === 1) {
+          return { summary: "", error: `boom: ${unit.behaviorId} subprocess died` };
+        }
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+        };
+      },
+      NOTE,
+    );
+
+    assert.equal(result.complete, true, "the orchestrated run completes after retries");
+    assert.deepEqual(
+      spawns.map((s) => `${s.behaviorId}#${s.taskText.includes("Previous attempt failed") ? "retry" : "first"}`),
+      ["T1#first", "T1#retry", "T2#first", "T2#retry"],
+      "each behavior gets a failing first attempt and one retry",
+    );
+    // The retry texts (buildRetryTask + noteSection) carry the failure
+    // investigation AND the engineer's note.
+    for (const spawn of [spawns[1]!, spawns[3]!]) {
+      assertNoteRetained(spawn.taskText, `${spawn.behaviorId} retry`);
+      assert.match(
+        spawn.taskText,
+        /## Previous attempt failed \(retry 1\/5\)/,
+        "the retry keeps its failure section",
+      );
+      assert.match(spawn.taskText, /boom: /, "the prior error text is quoted");
+      assert.match(spawn.taskText, /## Original task/, "the original task section is preserved");
+    }
+  });
+
+  it("fix task texts (hook-rejected commits) retain the note alongside the investigation", async () => {
+    const pi = piWithRejectingHook();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Hook Note Task",
+        instruction: "do things",
+        files: ["src/a.ts"],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        ],
+      },
+    };
+    const ctx = ctxWithState(state);
+    const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    }, NOTE);
+
+    assert.equal(result.complete, false, "persistent rejection halts the run");
+    assert.equal(spawns.length, 1 + 5, "initial unit + exactly 5 fix subagents");
+    // Every fix attempt (buildFixTask loop output) keeps the failure
+    // investigation AND the engineer's note.
+    for (const spawn of spawns.slice(1)) {
+      assertNoteRetained(spawn.taskText, "fix attempt");
+      assert.match(spawn.taskText, /Previous attempt failed \(retry \d\/5\)/, "fix keeps its retry header");
+      assert.match(spawn.taskText, /Investigation: commit for T1 did not land/, "investigation present");
+      assert.match(spawn.taskText, /Raw hook output/, "raw hook output section present");
+      assert.match(spawn.taskText, /golangci-lint run failed/, "hook stderr quoted");
+    }
+  });
+});
