@@ -2848,3 +2848,140 @@ describe("engineer's note: retry and fix task texts", () => {
     }
   });
 });
+
+// ═══ engineer's note: halt/resume persistence (T3) ═══
+describe("engineer's note: halt/resume persistence", () => {
+  const NOTE = "use strict null checks";
+  const NEW_NOTE = "also pin the commit subjects";
+  const BLOCKED = "npx vitest run";
+
+  /** Two-behavior contract; both behaviors active. */
+  function noteTask(): TaskContract {
+    return {
+      title: "Note Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        { id: "T2", description: "second behavior", expectedOutput: "e2", kind: "test", status: "active" },
+      ],
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  /**
+   * Unit runner that pause-halts on its first spawn: a mustRunNow
+   * sandbox-blocked command. Any later spawn is a test bug.
+   */
+  function haltingRunner(): UnitRunner {
+    let spawns = 0;
+    return async () => {
+      spawns++;
+      if (spawns === 1) {
+        return {
+          summary: "",
+          blockedCommands: [
+            { command: BLOCKED, reason: "sandbox blocks vitest", mustRunNow: true },
+          ],
+        };
+      }
+      return { summary: `unexpected extra spawn #${spawns}`, suggestedCommit: "feat(core): unreachable" };
+    };
+  }
+
+  /** Successful unit runner that records each spawn's task text and note. */
+  function succeedingRunner(state: WorkflowState, captures: Array<{ taskText: string; noteAtSpawn: unknown }>): UnitRunner {
+    return async (unit) => {
+      captures.push({ taskText: unit.taskText, noteAtSpawn: state.engineerNote });
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    };
+  }
+
+  it("a mustRunNow pause-halt persists engineerNote into workflow state", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+
+    const result = await runOrchestratedViaSeam(pi, ctx, haltingRunner(), NOTE);
+
+    assert.equal(result.complete, false, "the mustRunNow command halts the run");
+    assert.equal(result.haltedOn, "T1", "the first behavior halted");
+    assert.equal(state.phase, "implementing", "phase stays implementing so a re-run resumes");
+    assert.equal(state.engineerNote, NOTE, "the note is persisted on the workflow state");
+    assert.equal(state.lastHalt?.pendingCommand?.command, BLOCKED, "the pause handoff carries the command");
+    const saves = (pi.calls["appendEntry"] ?? []) as Array<[string, WorkflowState]>;
+    const lastSave = saves.filter(([type]) => type === "workflow-state").at(-1);
+    assert.equal(lastSave?.[1].engineerNote, NOTE, "the persisted state entry contains the note");
+  });
+
+  it("a resume re-run without args reuses the note; completion clears it", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+
+    // First run: halt with the note persisted.
+    const halted = await runOrchestratedViaSeam(pi, ctx, haltingRunner(), NOTE);
+    assert.equal(halted.complete, false, "the first run halts");
+    assert.equal(state.engineerNote, NOTE, "the note survived the halt");
+
+    // Resume: /implement with no args must reuse the persisted note.
+    const captures: Array<{ taskText: string; noteAtSpawn: unknown }> = [];
+    const resumed = await runOrchestratedViaSeam(pi, ctx, succeedingRunner(state, captures), "");
+
+    assert.equal(resumed.complete, true, "the resumed run completes");
+    assert.equal(captures.length, 2, "one first-attempt task text per active behavior");
+    for (const capture of captures) {
+      assert.match(capture.taskText, /## Engineer's note/, "the persisted note section is present");
+      assert.match(capture.taskText, /use strict null checks/, "the persisted note text is reused");
+      assert.match(capture.taskText, /do not implement beyond the contract/, "the guard sentence rides along");
+    }
+    assert.equal(state.phase, "idle", "completion switches the phase to idle");
+    assert.equal(state.engineerNote, undefined, "completion clears the persisted note");
+  });
+
+  it("a different note on resume replaces the persisted one and is then cleared", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: noteTask() };
+    const ctx = ctxWithState(state);
+
+    // First run: halt with NOTE persisted.
+    const halted = await runOrchestratedViaSeam(pi, ctx, haltingRunner(), NOTE);
+    assert.equal(halted.complete, false, "the first run halts");
+    assert.equal(state.engineerNote, NOTE, "the original note is persisted");
+
+    // Resume with a different note: it replaces the persisted one.
+    const captures: Array<{ taskText: string; noteAtSpawn: unknown }> = [];
+    const resumed = await runOrchestratedViaSeam(pi, ctx, succeedingRunner(state, captures), NEW_NOTE);
+
+    assert.equal(resumed.complete, true, "the resumed run completes");
+    assert.ok(captures.length >= 2, "both behaviors ran");
+    for (const capture of captures) {
+      assert.equal(capture.noteAtSpawn, NEW_NOTE, "the loop ran with the replaced note");
+      assert.match(capture.taskText, /## Engineer's note/, "the note section heading is present");
+      assert.match(capture.taskText, /also pin the commit subjects/, "the new note text is used");
+      assert.doesNotMatch(capture.taskText, /use strict null checks/, "the old note text is gone");
+    }
+    assert.equal(state.phase, "idle", "completion switches the phase to idle");
+    assert.equal(state.engineerNote, undefined, "completion clears the replaced note too");
+  });
+});
