@@ -9,6 +9,10 @@ import {
   deriveMatches,
   crossCheck,
 } from "../extensions/test-scan.ts";
+import {
+  renderEvidence,
+  BASENAME_FANOUT_CAP,
+} from "../extensions/test-scan-render.ts";
 
 // ═══ LANG_PROFILES / profileFor / escapeRe / isTestPath ═══
 describe("test-scan profiles and predicates", () => {
@@ -242,5 +246,93 @@ describe("crossCheck classifier", () => {
     assert.ok(line);
     assert.match(line!, /symbol/);
     assert.match(line!, /high/);
+  });
+});
+
+// ═══ renderEvidence — basename fan-out collapse ═══
+describe("renderEvidence basename fan-out collapse", () => {
+  it("caps the per-entry basename fan-out at 5", () => {
+    assert.equal(BASENAME_FANOUT_CAP, 5);
+  });
+
+  it("collapses 88 basename matches into one summary line", () => {
+    const evidence = Array.from(
+      { length: 88 },
+      (_, i) => `src/messages/en/research.json -> src/app/f${i}.test.tsx [basename, low]`,
+    );
+    const lines = renderEvidence(evidence).split("\n");
+    assert.equal(lines.length, 1, `expected 1 summary line, got ${lines.length}`);
+    const line = lines[0]!;
+    assert.match(line, /src\/messages\/en\/research\.json/, "summary must name the entry");
+    assert.match(line, /88/, "summary must state the total count");
+    assert.match(line, /src\/app\/f0\.test\.tsx/, "summary must keep sample path 1");
+    assert.match(line, /src\/app\/f1\.test\.tsx/, "summary must keep sample path 2");
+    assert.match(line, /src\/app\/f2\.test\.tsx/, "summary must keep sample path 3");
+    assert.match(line, /grep/, "summary must carry the grep hint");
+    assert.match(line, /\\bresearch\\b/, "grep hint must use a word-boundary pattern");
+    assert.ok(!/f3\.test\.tsx/.test(line), "samples beyond the first 3 must be omitted");
+  });
+
+  it("lists basename matches individually at or below the cap", () => {
+    for (const n of [1, 5]) {
+      const evidence = Array.from(
+        { length: n },
+        (_, i) => `src/util.ts -> tests/util-${i}.test.ts [basename, low]`,
+      );
+      const out = renderEvidence(evidence);
+      const lines = out.split("\n");
+      assert.equal(lines.length, n, `n=${n}: expected every line kept, got ${lines.length}`);
+      for (const l of lines) assert.match(l, /\[basename, low\]/);
+      assert.ok(!/too generic/.test(out), `n=${n}: must not collapse`);
+    }
+  });
+
+  it("collapses at cap + 1, keeping the first 3 samples", () => {
+    const evidence = Array.from(
+      { length: 6 },
+      (_, i) => `src/util.ts -> tests/util-${i}.test.ts [basename, low]`,
+    );
+    const lines = renderEvidence(evidence).split("\n");
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /\b6\b/);
+    assert.match(lines[0]!, /tests\/util-0\.test\.ts/);
+    assert.match(lines[0]!, /tests\/util-2\.test\.ts/);
+    assert.ok(!/util-3\.test\.ts/.test(lines[0]!));
+  });
+
+  it("never collapses high-confidence matches regardless of count", () => {
+    const evidence = Array.from(
+      { length: 20 },
+      (_, i) => `src/auth.ts -> tests/auth-${i}.test.ts [structural, high]`,
+    );
+    const out = renderEvidence(evidence);
+    const lines = out.split("\n");
+    assert.equal(lines.length, 20, "all high-confidence lines must stay enumerated");
+    for (const l of lines) assert.match(l, /\[structural, high\]/);
+    assert.ok(!/too generic/.test(out), "high-confidence lines must never collapse");
+  });
+
+  it("keeps mixed entries: high enumerated, basename block collapsed in place", () => {
+    const evidence = [
+      "src/messages/en/research.json -> __tests__/research.test.ts [structural, high]",
+      ...Array.from(
+        { length: 10 },
+        (_, i) => `src/messages/en/research.json -> src/x/t${i}.test.ts [basename, low]`,
+      ),
+    ];
+    const lines = renderEvidence(evidence).split("\n");
+    assert.equal(lines.length, 2);
+    assert.match(lines[0]!, /__tests__\/research\.test\.ts \[structural, high\]/);
+    assert.match(lines[1]!, /too generic/);
+  });
+
+  it("passes non-match entry lines through unchanged", () => {
+    const unverified =
+      "src/new.ts: unverified — no derivation hit (default export, indirect reference, or no affected tests); confirm by reading the tests or declare known paths in files";
+    assert.equal(renderEvidence([unverified]), unverified);
+  });
+
+  it("returns an empty string for empty evidence", () => {
+    assert.equal(renderEvidence([]), "");
   });
 });
