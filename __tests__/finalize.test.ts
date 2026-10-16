@@ -472,6 +472,48 @@ describe("save_task scan wiring (T3)", () => {
     assert.match(notifyCalls[0]!, /warnings: 2/);
   });
 
+  it("renders evidence through renderEvidence: collapsed summary, no per-match explosion (T4)", async () => {
+    // One entry whose basename fans out across 12 test files: save_task must
+    // surface renderEvidence's one-line summary, not 12 raw per-match lines.
+    const files: Record<string, string> = {
+      "src/messages/en/research.json": '{"topic": "research"}\n',
+    };
+    for (let j = 0; j < 12; j++) files[`tests/t${j}.test.ts`] = "// research notes\n";
+    const dir = tmpProject(files);
+    const listing =
+      Object.keys(files)
+        .map((f) => `./${f}`)
+        .join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: ["src/messages/en/research.json"] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true);
+    const text = res.content[0].text;
+    const evidence = text.split("## Test scan evidence (advisory)\n")[1]?.split("\n\nWarnings")[0] ?? "";
+    const bullets = evidence.split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(bullets.length, 1, `expected one collapsed bullet, got:\n${evidence}`);
+    assert.match(
+      bullets[0]!,
+      /^- src\/messages\/en\/research\.json: 12 test files match \[basename, low\] — e\.g\. tests\/t0\.test\.ts, tests\/t1\.test\.ts, tests\/t2\.test\.ts — too generic to enumerate; grep "\\bresearch\\b" in test files if relevant$/,
+      "summary line must carry count, 3 samples, and the grep hint",
+    );
+    assert.doesNotMatch(
+      text,
+      /\S+ -> \S+ \[basename, low\]/,
+      "raw per-match [basename, low] lines must not reach the tool text",
+    );
+  });
+
   it("keeps save_task result text under 32 KB for a large contract (render wiring)", async () => {
     // 100 declared entries x 30 test files all basename-matching every entry:
     // 3,000 raw evidence lines must render small via collapse + global cap.
