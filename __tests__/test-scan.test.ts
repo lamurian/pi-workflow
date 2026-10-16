@@ -166,6 +166,51 @@ describe("crossCheck classifier", () => {
     );
   });
 
+  it("aggregates undeclared-referencing into one warning per distinct test path", () => {
+    // Three declared entries all match the same undeclared test file via two
+    // different methods: import-path (x2) and symbol (x1).
+    const findings = new Map([
+      ["src/a.ts", { matches: [{ path: "tests/shared.test.ts", method: "import-path" as const, confidence: "high" as const }] }],
+      ["src/b.ts", { matches: [{ path: "tests/shared.test.ts", method: "symbol" as const, confidence: "high" as const }] }],
+      ["src/c.ts", { matches: [{ path: "tests/shared.test.ts", method: "import-path" as const, confidence: "high" as const }] }],
+    ]);
+    const declared = ["src/a.ts", "src/b.ts", "src/c.ts"];
+    const r = crossCheck(declared, findings, new Set(declared));
+    const undeclaredLines = r.warnings.filter((w) => /undeclared-referencing/.test(w));
+    assert.equal(
+      undeclaredLines.length,
+      1,
+      `expected exactly 1 aggregated warning, got ${JSON.stringify(undeclaredLines)}`,
+    );
+    const line = undeclaredLines[0]!;
+    assert.match(line, /tests\/shared\.test\.ts/, "warning must name the test path");
+    assert.match(line, /import-path/, "warning must name the matched method(s)");
+    assert.match(line, /symbol/, "warning must name the matched method(s)");
+    assert.match(line, /\b3\b/, "warning must state how many declaring entries matched");
+  });
+
+  it("emits one warning per distinct path, not per match pair", () => {
+    const findings = new Map([
+      ["src/a.ts", { matches: [
+        { path: "tests/one.test.ts", method: "symbol" as const, confidence: "high" as const },
+        { path: "tests/two.test.ts", method: "basename" as const, confidence: "low" as const },
+      ] }],
+      ["src/b.ts", { matches: [{ path: "tests/one.test.ts", method: "basename" as const, confidence: "low" as const }] }],
+    ]);
+    const declared = ["src/a.ts", "src/b.ts"];
+    const r = crossCheck(declared, findings, new Set(declared));
+    const undeclaredLines = r.warnings.filter((w) => /undeclared-referencing/.test(w));
+    // 3 match pairs (a->one, a->two, b->one) but only 2 distinct paths.
+    assert.equal(
+      undeclaredLines.length,
+      2,
+      `expected 2 warnings (distinct paths), got ${JSON.stringify(undeclaredLines)}`,
+    );
+    const singleEntryLine = undeclaredLines.find((w) => /tests\/two\.test\.ts/.test(w));
+    assert.ok(singleEntryLine);
+    assert.match(singleEntryLine!, /\b1\b/);
+  });
+
   it("flags declared entries that match nothing on disk", () => {
     const r = crossCheck(["src/typo.ts"], new Map(), new Set());
     assert.ok(

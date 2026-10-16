@@ -430,14 +430,27 @@ export function crossCheck(
   }
 
   // Undeclared referencing test files (referenced but not in files).
+  // Aggregated per distinct test path: one warning per path naming the
+  // matched method(s) and how many declared entries matched it.
+  const undeclared = new Map<string, { methods: Set<MatchMethod>; entries: number }>();
   for (const [, found] of findings) {
     for (const m of found.matches) {
       if (!declared.has(m.path)) {
-        warnings.push(
-          `undeclared-referencing: ${m.path} references affected code via ${m.method} but is not in files — classify preserved/superseded/obsolete; declare it in files if the contract changes it`,
-        );
+        let agg = undeclared.get(m.path);
+        if (!agg) {
+          agg = { methods: new Set(), entries: 0 };
+          undeclared.set(m.path, agg);
+        }
+        agg.methods.add(m.method);
+        agg.entries++;
       }
     }
+  }
+  for (const [path, agg] of undeclared) {
+    const methods = [...agg.methods].join(", ");
+    warnings.push(
+      `undeclared-referencing: ${path} references affected code via ${methods} (matched by ${agg.entries} declared entr${agg.entries === 1 ? "y" : "ies"}) but is not in files — classify preserved/superseded/obsolete; declare it in files if the contract changes it`,
+    );
   }
 
   if (files.length > 0 && totalMatches === 0) {
