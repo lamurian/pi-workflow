@@ -33,7 +33,7 @@ When a bash tool result says the command is "blocked by the sandbox" or ends wit
   - **Must run now** — you cannot implement or verify THIS behavior without it. Stop immediately, report it in `blockedCommands` with `mustRunNow: true`, and end the turn with the JSON report. Do not burn the clock on workarounds.
   - **Deferrable** — a verification nicety or optional check. Finish the implementation, verify another way, and list the command in `blockedCommands` with `mustRunNow: false`.
 - Never end your turn with a prose request for the user to run something. There is no user mid-run; the JSON report is the only handover channel.
-- You are hard-killed at the wall clock (PI_IMPLEMENT_TIMEOUT_MS, 600 s default). Prioritize emitting the JSON report over extended debugging: if you cannot finish verifying in the time you have, report the state you reached.
+- You are hard-killed at the wall clock (PI_IMPLEMENT_TIMEOUT_MS, 900 s default). Prioritize emitting the JSON report over extended debugging: if you cannot finish verifying in the time you have, report the state you reached.
 
 ## Rules
 

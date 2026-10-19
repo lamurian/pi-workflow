@@ -225,9 +225,9 @@ describe("getScoutTimeoutMs", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("getImplementerTimeoutMs (T8)", () => {
-  it("defaults to 600000 — implementer units are far heavier than scouts", async () => {
+  it("defaults to 900000 — implementer units are far heavier than scouts", async () => {
     const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
-    assert.equal(getImplementerTimeoutMs({}), 600_000);
+    assert.equal(getImplementerTimeoutMs({}), 900_000);
   });
 
   it("honors PI_IMPLEMENT_TIMEOUT_MS when set", async () => {
@@ -242,15 +242,44 @@ describe("getImplementerTimeoutMs (T8)", () => {
     const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
     assert.equal(
       getImplementerTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "1000" }),
-      600_000,
+      900_000,
       "the scout budget must not leak into implementer units",
     );
   });
 
   it("falls back to the default for invalid values", async () => {
     const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
-    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 600_000);
-    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 600_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 900_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 900_000);
+  });
+
+  it("retry text and unit prompt say the 900 s default", async () => {
+    const { buildRetryTask } = await import("../extensions/implement-loop.ts");
+    const { loadContent } = await import("../extensions/utils.ts");
+    const task: import("../extensions/state.ts").TaskContract = {
+      title: "T",
+      instruction: "i",
+      files: [],
+      done: "d",
+      behaviors: [
+        {
+          id: "T1",
+          description: "x",
+          expectedOutput: "y",
+          kind: "test",
+          status: "active",
+        },
+      ],
+    };
+    const retryText = buildRetryTask(
+      task.behaviors[0]!,
+      task,
+      { summary: "s", timedOut: true },
+      1,
+    );
+    assert.match(retryText, /900 s default/, "retry text names the 900 s default");
+    const prompt = await loadContent("unit-prompt.md");
+    assert.match(prompt, /900 s default/, "unit prompt names the 900 s default");
   });
 });
 

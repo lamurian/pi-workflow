@@ -56,7 +56,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PI_COMMIT_TIMEOUT_MS` | `300000` | Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
-| `PI_IMPLEMENT_TIMEOUT_MS` | `600000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). |
+| `PI_IMPLEMENT_TIMEOUT_MS` | `900000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). |
 | `PI_IMPLEMENTER_TOOLS` | `read,write,edit,bash` | Full override of the tool allowlist granted to implementer subprocesses. |
 
 ### Files-allowlist contract rule

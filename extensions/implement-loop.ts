@@ -1020,7 +1020,7 @@ export function buildRetryTask(
   if (prior.timedOut) {
     return (
       `## Previous attempt was killed at the time limit (retry ${attempt}/${RETRY_BUDGET})\n` +
-      `The previous run hit the hard wall-clock timeout (PI_IMPLEMENT_TIMEOUT_MS, 600 s default) and was ` +
+      `The previous run hit the hard wall-clock timeout (PI_IMPLEMENT_TIMEOUT_MS, 900 s default) and was ` +
       `killed mid-investigation — this was an infrastructure timeout, not a check failure.\n\n` +
       `Your work from that run is likely already on disk. Do NOT redo it from scratch: inspect git status ` +
       `and git diff first, then fix exactly one blocking issue. ` +
