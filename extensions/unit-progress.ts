@@ -11,7 +11,10 @@
  * progress the attempt consumes one retry as before. {@link shouldHaltEarly}
  * additionally halts the behavior after {@link EARLY_HALT_THRESHOLD}
  * consecutive no-progress timed-out/partial attempts (T7). Plain unit
- * errors and missing-report attempts never enter this path.
+ * errors and missing-report attempts never enter this path. The module
+ * also hosts {@link isAlreadySatisfied} (T11a): the predicate that lets
+ * the loop mark a behavior done without a commit when the unit reports it
+ * is already implemented at an unchanged HEAD and a clean tree.
  */
 
 /** Maximum continuation units per behavior before retries take over. */
@@ -191,4 +194,34 @@ export function buildContinuationTaskText(
     "### Original task",
     originalTaskText,
   ].join("\n");
+}
+
+/** Inputs for the already-satisfied check (T11a). */
+export interface AlreadySatisfiedInput {
+  /** True when the unit's report declares the behavior already implemented. */
+  alreadySatisfied?: boolean;
+  /** HEAD hash captured before the attempt (null when unavailable). */
+  headBefore: string | null;
+  /** HEAD hash after the attempt (null when unavailable). */
+  headNow: string | null;
+  /** `git status --short` output; "" means clean, "(unavailable)" means unknown. */
+  treeStatus: string;
+}
+
+/**
+ * Decide whether a behavior is already satisfied and needs no commit (T11a).
+ *
+ * True only when the unit set the alreadySatisfied flag, the working tree
+ * is clean, and HEAD did not move during the attempt (both hashes known
+ * and equal). A dirty tree, an unknown tree state, or a moved HEAD always
+ * falls through to the normal commit gate — the flag alone never skips
+ * landing real changes.
+ *
+ * @param input - The flag plus HEAD/tree observations around the attempt.
+ * @returns True when the behavior can be marked done without committing.
+ */
+export function isAlreadySatisfied(input: AlreadySatisfiedInput): boolean {
+  if (input.alreadySatisfied !== true) return false;
+  if (input.treeStatus !== "") return false;
+  return input.headBefore !== null && input.headNow !== null && input.headNow === input.headBefore;
 }

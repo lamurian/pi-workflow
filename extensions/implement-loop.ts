@@ -16,6 +16,7 @@ import {
   classifyProgress,
   decideContinuation,
   computeTreeFingerprint,
+  isAlreadySatisfied,
   isPartialAttempt,
   shouldHaltEarly,
   buildEarlyHaltError,
@@ -74,6 +75,8 @@ export interface OrchestratorResult {
   unitsRun: number;
   /** Commit subjects landed so far, in order. */
   landedCommits: string[];
+  /** Behaviors marked done without a commit via the alreadySatisfied flag (T11a). */
+  satisfiedWithoutCommit: string[];
   /** Populated when the loop halted early. */
   haltedOn?: string;
   /** Failure detail when the loop halted. */
@@ -788,6 +791,7 @@ export async function runOrchestratedImplement(
     complete: false,
     unitsRun: 0,
     landedCommits,
+    satisfiedWithoutCommit: [],
     deferredCommands: [],
     pendingManualChecks: [],
   };
@@ -942,8 +946,12 @@ export async function runOrchestratedImplement(
     let attemptFingerprintBefore = "";
     let attemptNewFindings = false;
     let attemptProgress = false;
+    // T11a: HEAD before this attempt, compared with HEAD after it for the
+    // already-satisfied check (the flag alone never skips the commit gate).
+    let attemptHeadBefore: string | null = null;
     const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
       attemptFingerprintBefore = await readTreeFingerprint(pi, cwd);
+      attemptHeadBefore = await readGitHead(pi, cwd);
       attemptNewFindings = false;
       const startedAt = Date.now();
       const digest = createToolCallCollector();
@@ -1083,6 +1091,31 @@ export async function runOrchestratedImplement(
       // The attempt reached the commit gate with a usable report: any
       // no-progress streak from earlier partial attempts is broken.
       noProgressStreak = 0;
+
+      // T11a: the unit reports the behavior is already implemented. With a
+      // clean tree and an unchanged HEAD the commit gate would only trip
+      // the no-changes verdict — mark the behavior done without a commit
+      // and without consuming retries. A dirty tree, an unknown tree
+      // state, or a moved HEAD falls through to the normal commit gate.
+      if (
+        isAlreadySatisfied({
+          alreadySatisfied: attempt.alreadySatisfied,
+          headBefore: attemptHeadBefore,
+          headNow: await readGitHead(pi, cwd),
+          treeStatus: await readTreeState(pi, cwd),
+        })
+      ) {
+        sealLastAttempt("landed");
+        behavior.status = "done";
+        result.satisfiedWithoutCommit.push(behavior.id);
+        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): already satisfied`);
+        state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
+        state.lastHalt = undefined;
+        saveState(pi, state);
+        updateUi(state, ctx);
+        ctx.ui.notify(`${behavior.id} already satisfied at HEAD — no commit needed`, "info");
+        break;
+      }
 
       // Manual behaviors pause before commit for human verification (T3).
       // The kept-alive child stays available for mid-pause steering; once
