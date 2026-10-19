@@ -8,12 +8,20 @@
  * the attempt, or new findings appended to the shared ledger. With
  * progress the loop spawns a continuation unit without consuming the retry
  * budget, bounded by {@link MAX_CONTINUATIONS} per behavior; without
- * progress the attempt consumes one retry as before. Plain unit errors and
- * missing-report attempts never enter this path.
+ * progress the attempt consumes one retry as before. {@link shouldHaltEarly}
+ * additionally halts the behavior after {@link EARLY_HALT_THRESHOLD}
+ * consecutive no-progress timed-out/partial attempts (T7). Plain unit
+ * errors and missing-report attempts never enter this path.
  */
 
 /** Maximum continuation units per behavior before retries take over. */
 export const MAX_CONTINUATIONS = 4;
+
+/** Consecutive no-progress timed-out/partial attempts that halt early (T7). */
+export const EARLY_HALT_THRESHOLD = 2;
+
+/** Diagnosis named verbatim in the early-halt error text. */
+export const EARLY_HALT_DIAGNOSIS = "exploration not converging";
 
 /** Heading rendered at the top of every continuation task text. */
 export const CONTINUATION_HEADING = "## Continue previous partial attempt";
@@ -91,6 +99,42 @@ export function decideContinuation(input: {
 }): "continue" | "retry" {
   const max = input.maxContinuations ?? MAX_CONTINUATIONS;
   return input.progressed && input.continuations < max ? "continue" : "retry";
+}
+
+/**
+ * Whether consecutive no-progress attempts should halt the behavior early.
+ *
+ * Counts consecutive timed-out/partial attempts that neither moved the tree
+ * fingerprint nor appended findings. At {@link EARLY_HALT_THRESHOLD} (2) the
+ * loop halts immediately instead of burning the retry budget on attempts
+ * that explore identically every time.
+ *
+ * @param consecutiveNoProgress - No-progress attempts so far, in a row.
+ * @returns True when the behavior must halt now.
+ */
+export function shouldHaltEarly(consecutiveNoProgress: number): boolean {
+  return consecutiveNoProgress >= EARLY_HALT_THRESHOLD;
+}
+
+/**
+ * Build the early-halt error text for a non-converging behavior.
+ *
+ * Names the diagnosis ("exploration not converging") and both actionable
+ * recommendations: split the behavior via /discuss -> /finalize, or raise
+ * PI_IMPLEMENT_TIMEOUT_MS so the unit gets more time.
+ *
+ * @param behaviorId - The halted behavior.
+ * @param attempts   - Consecutive no-progress attempts that triggered the halt.
+ * @returns The halt error text.
+ */
+export function buildEarlyHaltError(behaviorId: string, attempts: number): string {
+  return (
+    `Unit ${behaviorId}: ${attempts} consecutive attempts reported partial work or hit the ` +
+    `time limit without advancing the working tree or adding findings — ` +
+    `diagnosis: ${EARLY_HALT_DIAGNOSIS}. ` +
+    `Split this behavior into smaller behaviors via /discuss -> /finalize, or raise ` +
+    `PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.`
+  );
 }
 
 /** Minimal report shape the continuation task text renders. */

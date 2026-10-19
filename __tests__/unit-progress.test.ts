@@ -7,6 +7,8 @@ import {
   classifyProgress,
   decideContinuation,
   buildContinuationTaskText,
+  shouldHaltEarly,
+  buildEarlyHaltError,
 } from "../extensions/unit-progress.ts";
 import { runOrchestratedImplement, type UnitRunner } from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
@@ -148,6 +150,21 @@ describe("unit-progress: pure classification", () => {
       decideContinuation({ progressed: true, continuations: 2, maxContinuations: 2 }),
       "retry",
     );
+  });
+
+  it("shouldHaltEarly fires on the second consecutive no-progress attempt", () => {
+    assert.equal(shouldHaltEarly(0), false);
+    assert.equal(shouldHaltEarly(1), false, "one no-progress attempt still retries");
+    assert.equal(shouldHaltEarly(2), true, "two consecutive no-progress attempts halt");
+    assert.equal(shouldHaltEarly(3), true);
+  });
+
+  it("buildEarlyHaltError names the diagnosis and both recommendations", () => {
+    const text = buildEarlyHaltError("T2", 2);
+    assert.match(text, /T2/, "the halted behavior is named");
+    assert.match(text, /exploration not converging/, "diagnosis is present");
+    assert.match(text, /\/discuss -> \/finalize/, "split recommendation is present");
+    assert.match(text, /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation is present");
   });
 
   it("buildContinuationTaskText carries the heading, nextSteps, summary, tree and original task", () => {
@@ -344,5 +361,89 @@ describe("unit-progress: partial continuation wiring", () => {
     assert.equal(spawns.length, 2, "one retry after the plain error");
     assert.match(spawns[1]!.taskText, /Previous attempt failed \(retry 1\/5\)/);
     assert.ok(!spawns[1]!.taskText.includes("## Continue previous partial attempt"));
+  });
+});
+
+// ═══ Early halt on no-progress attempts (T7) ═══
+describe("unit-progress: early halt on no-progress timeouts", () => {
+  interface Spawn {
+    behaviorId: string;
+    taskText: string;
+  }
+
+  it("two consecutive no-progress partial attempts halt after 2 attempts with a diagnosis", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return { summary: `partial ${spawns.length}`, status: "partial", nextSteps: "still stuck" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, false, "the behavior halts instead of exhausting retries");
+    assert.equal(spawns.length, 2, "halts after 2 attempts, not the full retry budget of 6");
+    assert.equal(result.haltedOn, "T1");
+    assert.match(result.error ?? "", /exploration not converging/, "diagnosis in the halt error");
+    assert.match(result.error ?? "", /\/discuss -> \/finalize/, "split recommendation");
+    assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation");
+    assert.equal(commits().length, 0, "no commit for a no-progress halt");
+    assert.match(state.lastHalt?.error ?? "", /exploration not converging/, "halt persists in state");
+  });
+
+  it("two consecutive no-progress timed-out attempts halt early too", async () => {
+    const { pi } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return { summary: "", error: "timed out after 900000ms", timedOut: true };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, false);
+    assert.equal(spawns.length, 2, "timeouts without progress halt after 2 attempts");
+    assert.equal(result.haltedOn, "T1");
+    assert.match(result.error ?? "", /exploration not converging/);
+    assert.match(result.error ?? "", /\/discuss -> \/finalize/);
+    assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/);
+  });
+
+  it("progress between no-progress attempts resets the streak", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 1 || spawns.length === 3) {
+        return { summary: `stuck ${spawns.length}`, status: "partial", nextSteps: "stuck" };
+      }
+      if (spawns.length === 2) {
+        return {
+          summary: "explored further",
+          status: "partial",
+          nextSteps: "keep going",
+          findings: ["fact: the entry point lives in index.ts"],
+        };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, true, "the streak reset lets the behavior finish");
+    assert.equal(spawns.length, 4, "no-progress partial (retry), progressing continuation, no-progress partial (retry), success");
+    assert.match(spawns[1]!.taskText, /Previous attempt failed \(retry 1\/5\)/, "the first no-progress partial consumed a retry");
+    assert.match(spawns[2]!.taskText, /## Continue previous partial attempt/, "progress spawned a continuation");
+    assert.match(spawns[3]!.taskText, /Previous attempt failed \(retry 2\/5\)/, "the later no-progress partial retried instead of halting");
+    assert.equal(commits().length, 1);
   });
 });

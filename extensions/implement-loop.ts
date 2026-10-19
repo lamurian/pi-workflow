@@ -17,6 +17,8 @@ import {
   decideContinuation,
   computeTreeFingerprint,
   isPartialAttempt,
+  shouldHaltEarly,
+  buildEarlyHaltError,
 } from "./unit-progress.ts";
 import {
   runImplementerUnit,
@@ -879,6 +881,9 @@ export async function runOrchestratedImplement(
     // retry budget; reset per behavior.
     let continuations = 0;
     let retry = 1;
+    // T7: consecutive timed-out/partial attempts that neither moved the tree
+    // fingerprint nor added findings; two in a row halt the behavior early.
+    let noProgressStreak = 0;
 
     while (retry <= RETRY_BUDGET + 1) {
       // T6: partial reports and timed-out attempts never reach the commit
@@ -890,6 +895,13 @@ export async function runOrchestratedImplement(
           fingerprintAfter,
           newFindings: attemptNewFindings,
         });
+        if (progressed) {
+          noProgressStreak = 0;
+        } else if (shouldHaltEarly(++noProgressStreak)) {
+          // T7: repeated identical timeouts/partial reports waste hours —
+          // halt with an actionable diagnosis instead of burning retries.
+          return halt(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
+        }
         if (decideContinuation({ progressed, continuations }) === "continue") {
           continuations++;
           ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
@@ -922,6 +934,10 @@ export async function runOrchestratedImplement(
       }
 
       if (attempt.error) {
+        // A plain unit error (no partial report, no timeout) breaks any
+        // no-progress streak: only timed-out/partial attempts count toward
+        // the early halt.
+        if (!isPartialAttempt(attempt)) noProgressStreak = 0;
         if (retry > RETRY_BUDGET) {
           return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
         }
@@ -956,6 +972,9 @@ export async function runOrchestratedImplement(
       for (const entry of attempt.blockedCommands ?? []) {
         result.deferredCommands!.push(entry);
       }
+      // The attempt reached the commit gate with a usable report: any
+      // no-progress streak from earlier partial attempts is broken.
+      noProgressStreak = 0;
 
       // Manual behaviors pause before commit for human verification (T3).
       // The kept-alive child stays available for mid-pause steering; once
