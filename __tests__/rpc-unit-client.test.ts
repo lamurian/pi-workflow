@@ -1,4 +1,4 @@
-import { describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -213,3 +213,115 @@ describe("runImplementerUnit over the rpc transport", () => {
     });
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T3 — soft deadline: a single wrap-up steer at 75% before the hard kill
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * In-memory RpcUnitClient double for fake-timer tests: records steer
+ * messages and lets the test emit assistant output on demand.
+ */
+function stubClient() {
+  const eventListeners = new Set<(event: Record<string, unknown>) => void>();
+  const exitListeners = new Set<(info: { code: number }) => void>();
+  const steers: string[] = [];
+  let raw = "";
+  let alive = true;
+  return {
+    steers,
+    send: () => {},
+    command: async () => ({ type: "response", success: false, id: "" }),
+    prompt: (_message: string) => {},
+    steer: (message: string) => {
+      steers.push(message);
+    },
+    shutdown: async () => {
+      alive = false;
+    },
+    kill: () => {
+      if (!alive) return;
+      alive = false;
+      for (const listener of exitListeners) listener({ code: 1 });
+      exitListeners.clear();
+    },
+    onEvent: (listener: (event: Record<string, unknown>) => void) => {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    },
+    onExit: (listener: (info: { code: number }) => void) => {
+      if (!alive) {
+        listener({ code: 1 });
+        return () => {};
+      }
+      exitListeners.add(listener);
+      return () => exitListeners.delete(listener);
+    },
+    rawStdout: () => raw,
+    stderrText: () => "",
+    isAlive: () => alive,
+    /** Emit a final assistant message containing `text` (e.g. a report block). */
+    emitAssistant(text: string) {
+      raw +=
+        JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text }] },
+        }) + "\n";
+      for (const listener of eventListeners) listener({ type: "message_end" });
+    },
+  };
+}
+
+describe("runImplementerUnit soft deadline (T3)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("steers exactly once at 750ms of a 1000ms budget; the hard kill still fires timedOut", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(749);
+    assert.equal(client.steers.length, 0, "no steer before the 75% mark");
+    await vi.advanceTimersByTimeAsync(1);
+    assert.equal(client.steers.length, 1, "one wrap-up steer at 750ms");
+    assert.match(client.steers[0]!, /status/, "the steer names the status field");
+    assert.match(client.steers[0]!, /partial/, "the steer asks for status partial");
+    await vi.advanceTimersByTimeAsync(251); // hard kill at 1000ms
+    const res = await promise;
+    assert.equal(res.timedOut, true, "the hard kill still yields timedOut=true");
+    assert.match(res.error ?? "", /timed out after 1000ms/);
+    assert.equal(client.steers.length, 1, "the steer fires exactly once");
+  });
+
+  it("does not steer when the report arrives before the soft deadline", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    client.emitAssistant("done.\n```json\n{\"summary\": \"ok\"}\n```");
+    const res = await promise;
+    assert.equal(res.summary, "ok");
+    assert.equal(res.timedOut, undefined);
+    await vi.advanceTimersByTimeAsync(2_000); // timers cleared on completion
+    assert.equal(client.steers.length, 0, "no steer when the report beats the deadline");
+  });
+
+  it("clears the soft timer on abort (no steer after the unit is aborted)", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const controller = new AbortController();
+    const promise = runImplementerUnitWithClient(client, "task", {
+      timeoutMs: 1_000,
+      signal: controller.signal,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    const res = await promise;
+    assert.equal(res.timedOut, true, "an abort takes the kill path");
+    await vi.advanceTimersByTimeAsync(2_000);
+    assert.equal(client.steers.length, 0, "the soft timer must not steer after abort");
+  });
+});
+

@@ -178,6 +178,32 @@ export async function runRawPiProcess(
 
 // ─── Unit runner ───────────────────────────────────────────────────────────────
 
+/** Fraction of the per-unit time budget at which the wrap-up steer fires. */
+export const SOFT_DEADLINE_RATIO = 0.75;
+
+/**
+ * Wrap-up steer delivered once when a unit nears its hard-kill deadline.
+ *
+ * Asks the unit to stop exploring, persist its work uncommitted, and emit
+ * the JSON report with status partial, findings and nextSteps so a
+ * continuation unit can pick up where it left off.
+ */
+export const WRAP_UP_STEER_MESSAGE =
+  "time budget nearly exhausted: stop exploring, write what you have to disk, " +
+  "emit the JSON report with status partial, findings, nextSteps";
+
+/** Options for the client-injected unit runner. */
+export interface UnitRunnerOptions {
+  /** Per-process wall-clock timeout in ms; 0 disables both timers. */
+  timeoutMs?: number;
+  /** Optional parent abort signal. */
+  signal?: AbortSignal;
+  /** Optional sink for live stdout events (zero-token relay). */
+  onEvent?: (event: Record<string, unknown>) => void;
+  /** Manual-kind units: skip the post-report shutdown (HITL pause). */
+  keepAlive?: boolean;
+}
+
 /**
  * Check that a final assistant message contains a parseable JSON report
  * block (fenced ```json with a string `summary`).
@@ -208,7 +234,10 @@ function hasParseableReport(text: string): boolean {
  * JSONL `prompt` command on stdin (never argv), keeping stdin open for
  * later steering. Completion is a parsed report block seen on stdout —
  * not process exit — after which the child is shut down gracefully
- * (`abort` + stdin close, SIGKILL fallback). A child that exits before
+ * (`abort` + stdin close, SIGKILL fallback). At 75% of the budget the
+ * unit is steered once with WRAP_UP_STEER_MESSAGE (soft deadline) so it
+ * can emit a status-partial report before the hard kill. A child that
+ * exits before
  * any report yields `error` with the same stdout-tail diagnostics as the
  * one-shot transport. The PI_IMPLEMENT_TIMEOUT_MS model-activity wall
  * clock still SIGKILLs a working child; timeouts are detected
@@ -240,6 +269,36 @@ export async function runImplementerUnit(
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
   const client = spawnRpcUnitClient({ systemPrompt, cwd });
   setActiveUnitClient(client);
+  return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });
+}
+
+/**
+ * Run one implementer unit on an already-spawned client.
+ *
+ * Shared core behind runImplementerUnit; exported as the test seam for
+ * fake-timer tests with an injected client. Arms two timers when
+ * `timeoutMs > 0`:
+ *
+ * - a soft deadline at SOFT_DEADLINE_RATIO (75%) of the budget that
+ *   steers the unit once with WRAP_UP_STEER_MESSAGE so it can wrap up
+ *   with a status-partial report before the kill;
+ * - the hard kill at `timeoutMs` that SIGKILLs the child (timedOut=true).
+ *
+ * Both timers are cleared as soon as the run settles (report seen, child
+ * exit, or abort), so a completed unit is never steered afterwards.
+ *
+ * @param client   - Live RPC client for the unit subprocess.
+ * @param taskText - The behavior slice for this unit.
+ * @param options  - Timeout, abort signal, event sink, keep-alive flag.
+ * @returns Parsed report, plus `client` when kept alive and
+ *          `error`/`timedOut`/`missingReport` on failure.
+ */
+export async function runImplementerUnitWithClient(
+  client: RpcUnitClient,
+  taskText: string,
+  options: UnitRunnerOptions = {},
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
+  const { timeoutMs = getImplementerTimeoutMs(), signal, onEvent, keepAlive = false } = options;
 
   let timedOut = false;
   let reportSeen = false;
@@ -271,6 +330,14 @@ export async function runImplementerUnit(
     client.kill();
   };
   const timer = timeoutMs > 0 ? setTimeout(killNow, timeoutMs) : undefined;
+  // Soft deadline: one wrap-up steer at 75% of the budget, before the hard kill.
+  const softTimer =
+    timeoutMs > 0
+      ? setTimeout(
+          () => client.steer(WRAP_UP_STEER_MESSAGE),
+          Math.floor(timeoutMs * SOFT_DEADLINE_RATIO),
+        )
+      : undefined;
   const onAbort = () => killNow();
   if (signal) {
     if (signal.aborted) onAbort();
@@ -280,6 +347,7 @@ export async function runImplementerUnit(
   client.prompt(taskText);
   await waitDone;
   if (timer) clearTimeout(timer);
+  if (softTimer) clearTimeout(softTimer);
   signal?.removeEventListener("abort", onAbort);
   unsubEvents();
   unsubExit();
