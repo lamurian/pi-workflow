@@ -42,13 +42,19 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
      - **HEAD unchanged + clean tree** → the unit landed no changes → explicit retry instruction.
      - **Commit timed out** (`PI_COMMIT_TIMEOUT_MS`) → infrastructure failure → halt, no fix subagent.
    - **Retry budget** — 5 retries per behavior (shared across unit errors, hook rejections, no-changes); a further failure halts.
-   - **Persisted handoff** — every halt (and any orchestrator crash) persists `lastHalt` — behavior id, error carrying the investigation and hook output, tree state, landed commits, timestamp — into the session log, so failures are diagnosable after the fact.
+   - **Wrap-up steer (75% soft deadline)** — at 75% of the per-unit budget (`PI_IMPLEMENT_TIMEOUT_MS`), the unit is steered once to stop exploring, persist its work, and emit its JSON report. The hard kill at 100% is unchanged — the steer only gives the unit a chance to leave a coherent handoff instead of being killed mid-edit.
+   - **Partial reports and continuations** — the implementer report parses optional `status`, `findings`, `nextSteps` and `alreadySatisfied` fields. A `partial` attempt that made tree progress continues without committing and without consuming the retry budget: a **continuation unit** picks up the uncommitted work with the prior findings and `nextSteps` injected. Continuations are bounded at **4 per behavior** (`MAX_CONTINUATIONS`); after that, plain retries take over.
+   - **Early halt on non-converging exploration** — two consecutive attempts with **no** tree progress (e.g. repeated timeouts that wrote nothing) halt the behavior immediately with diagnosis `exploration not converging`, instead of burning the retry budget on attempts that never touch the tree.
+   - **Shared findings ledger** — every unit's report findings are appended to a session-wide ledger, deduplicated, capped at 40 entries, and rendered into every subsequent unit's task text as `## Known findings from earlier units`. The ledger is cleared when implementation completes. When an attempt times out or returns no report, its recorded tool calls are collapsed into a **tool-call digest** finding (`previous attempt touched: …`) so the next unit inherits what the dead one learned.
+   - **Persisted handoff** — every halt (and any orchestrator crash) persists `lastHalt` — behavior id, error carrying the investigation and hook output, tree state, landed commits, attempt records, diagnosis and recommended next action — into the session log, so failures are diagnosable after the fact.
+   - **Enriched halt report** — on halt the orchestrator returns a structured report to the main process: `Commits landed since /implement started:` (per-run fallback lists landed commit subjects or `(none)`), a truncated attempt table (outcome, duration, progress, last text cut to 200 chars), the findings tail, a `Diagnosis:` line and a `Recommended next action:` line, closing with *"Relay this status and the recommended next action to the user. Do not run tools or modify the working tree."* The **main process** — not a subagent — relays this status and the recommended action to you.
+   - **alreadySatisfied** — a unit may report `alreadySatisfied: true` when the behavior is in fact already implemented at HEAD. With a **clean tree and unchanged HEAD** since the attempt started, the orchestrator marks the behavior done **without invoking git commit** (no hook run, no retry) and lists it in the completion report under `Satisfied without a new commit:`. With a dirty tree the flag is ignored and the normal commit gate runs — only a verifiably no-op change skips the gate.
    Removed behaviors are skipped.
 4. **Implement (`--solo`)** — `/implement --solo` steers the in-session agent with a TDD prompt instead: write a failing test → implement → self-check via its own sandboxed commands → `mark_task_done` → (when available) `commit_changes`, which fires the same hooks. When `commit_changes` is registered, the prompt instructs a conventional commit after each behavior; the instruction is omitted entirely when the tool is absent. `mark_task_done` soft-warns if HEAD has not advanced since the previous behavior — it never blocks.
 
    **Solo asymmetry:** solo mode has no extension-level staged-diff inspection. The tamper rule is **prompt-only** (prompt discipline): the TDD prompt instructs the agent to never delete, skip, or weaken a test to land a commit, and to report instead. The orchestrator's hard guard does not apply on this path — only the project's commit hooks gate.
-5. **Complete** — the orchestrator returns the workflow to idle on its own once every behavior is done (each `done` backed by a landed commit whose hooks passed). In solo mode the agent calls `complete_implementation`, which refuses while behaviors are active; test outcomes are not consulted. Completed manual behaviors are listed in the final report under **Manual verification required**.
-6. **Resume** — after a halt, re-run `/implement`. Done behaviors are skipped and the loop continues from the first active one; when the working tree is dirty, the resumed unit receives the `git status --short` output as context. The original baseline HEAD is kept.
+5. **Complete** — the orchestrator returns the workflow to idle on its own once every behavior is done (each `done` backed by a landed commit whose hooks passed, except behaviors reported `alreadySatisfied` on a clean tree with unchanged HEAD — those are flagged in the completion report). In solo mode the agent calls `complete_implementation`, which refuses while behaviors are active; test outcomes are not consulted. Completed manual behaviors are listed in the final report under **Manual verification required**.
+6. **Resume** — after a halt, re-run `/implement`. Done behaviors are skipped and the loop continues from the first active one; when the working tree is dirty, the resumed unit receives the `git status --short` output as context. The original baseline HEAD is kept. The persisted `lastHalt` is rendered as a `## Previous run halted` section (diagnosis, recommended next action, attempt table) and prepended to the **first unit of the halted behavior only** — retries, continuations and other behaviors never inherit it.
 7. **Commit & push** — push and open a PR with your own git workflow.
 
 ### Environment variables
@@ -56,7 +62,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PI_COMMIT_TIMEOUT_MS` | `300000` | Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
-| `PI_IMPLEMENT_TIMEOUT_MS` | `900000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). |
+| `PI_IMPLEMENT_TIMEOUT_MS` | `900000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 75% of this budget the unit gets its single wrap-up steer. |
 | `PI_IMPLEMENTER_TOOLS` | `read,write,edit,bash` | Full override of the tool allowlist granted to implementer subprocesses. |
 
 ### Files-allowlist contract rule
@@ -77,7 +83,11 @@ The scan is **advisory, confidence-tagged, and never blocking**: warnings never 
 
 ### Diagnosing a halt
 
-The last `workflow-state` session entry carries `lastHalt`: the behavior that failed, the error (unit failure, hook investigation with raw hook output, staged-diff guard investigation with name-status lines, or timeout note), `git status --short` at halt time, and the commits landed so far. A `test-guard` halt means the staged diff touched undeclared tests — re-declare via `/discuss → /finalize`, then re-run `/implement` to resume. A red-baseline signature (see above) means fix the suite before resuming.
+The last `workflow-state` session entry carries `lastHalt`: the behavior that failed, the error (unit failure, hook investigation with raw hook output, staged-diff guard investigation with name-status lines, or timeout note), `git status --short` at halt time, the commits landed since `/implement` started, the attempt records (outcome, duration, progress, truncated last text), and the derived diagnosis with recommended next action. The same content is returned to the main process as the halt report, which relays it to you. A `test-guard` halt means the staged diff touched undeclared tests — re-declare via `/discuss → /finalize`, then re-run `/implement` to resume. A red-baseline signature (see above) means fix the suite before resuming.
+
+### Re-finalizing preserves done behaviors
+
+When `save_task` runs with a prior contract (a re-finalize after a halt or scope change), a draft behavior **keeps status `done`** whenever the prior contract has a behavior with the same id, identical description and identical `expectedOutput` whose status was `done` — an unchanged done behavior is never demoted to active. Any text change leaves the draft's own status. Preserved ids are reported in the tool result as `Preserved done behaviors: T1, T2` so the agent and reviewer can see what survived the rewrite.
 
 ### Escaping a gated phase
 
@@ -108,9 +118,13 @@ pi-workflow/
 │   ├── implement-loop.ts     # Orchestrator loop (spawn → staged-diff guard → commit → HEAD gate → mark, retry budget, halt, resume)
 │   ├── commit-gate.ts        # HEAD-gate classification + staged-diff tamper classifier + investigations + fix-task builder (pure)
 │   ├── test-scan.ts          # Language profiles, isTestPath, derivation layers, cross-check (pure)
-│   ├── implementer-runner.ts # Implementer subprocess runner (spawn errors, stdout tails, named timeouts)
+│   ├── implementer-runner.ts # Implementer subprocess runner (spawn errors, stdout tails, wrap-up steer, named timeouts)
+│   ├── findings-ledger.ts    # Shared findings ledger (cap, digest fallback, section rendering)
+│   ├── halt-report.ts        # Halt report rendering (attempt table, diagnosis, recommendation)
+│   ├── resume-context.ts     # "Previous run halted" section for resumed runs
+│   ├── unit-progress.ts      # Partial-attempt continuations, early halt, alreadySatisfied (pure)
 │   ├── finalize.ts           # /finalize command + save_task tool + contract scan wiring
-│   ├── task-contract.ts      # Pure contract logic (validation, rendering, completion gate)
+│   ├── task-contract.ts      # Pure contract logic (validation, rendering, done-preservation, completion gate)
 │   ├── explore.ts            # /explore command + explore tool
 │   ├── explore-core.ts       # Parallel exploration engine
 │   ├── subagent-runner.ts    # Scout + implementer subprocess spawning, timeouts, argv builders
