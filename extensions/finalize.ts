@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
-import { validateTask } from "./task-contract.ts";
+import { validateTask, preserveDoneStatuses } from "./task-contract.ts";
 import { isTestPath, deriveMatches, crossCheck, type DeriveResult } from "./test-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
@@ -174,7 +174,8 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       const scan = await runContractScan(pi, ctx.cwd, result.task.files);
       const allWarnings = [...warnings, ...(scan?.warnings ?? [])];
       const entering = state.phase === "discussing";
-      state.task = result.task;
+      const { task, preserved } = preserveDoneStatuses(state.task, result.task);
+      state.task = task;
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
       if (entering) {
@@ -196,6 +197,9 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
             .split("\n")
             .map((l) => `- ${l}`)
             .join("\n");
+      }
+      if (preserved.length > 0) {
+        text += `\n\nPreserved done behaviors: ${preserved.join(", ")}`;
       }
       if (allWarnings.length > 0) {
         text +=

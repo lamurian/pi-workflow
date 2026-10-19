@@ -121,6 +121,46 @@ export function validateTask(raw: unknown): TaskValidation {
   };
 }
 
+/**
+ * Carry over "done" status from a prior contract into a revised draft.
+ *
+ * A draft behavior gets status "done" when the prior contract has a
+ * behavior with the same id whose status is "done" and whose description
+ * and expectedOutput are byte-identical to the draft's. Any text change
+ * leaves the draft's own status untouched (the behavior must be redone).
+ * Pure: neither input is mutated.
+ *
+ * @param prior - The previously saved contract, if any.
+ * @param draft - The freshly validated draft contract.
+ * @returns The draft with preserved statuses, plus the ids (in draft order)
+ *          whose done status was carried over.
+ */
+export function preserveDoneStatuses(
+  prior: TaskContract | undefined,
+  draft: TaskContract,
+): { task: TaskContract; preserved: string[] } {
+  if (!prior) return { task: draft, preserved: [] };
+  const priorDone = new Map(
+    prior.behaviors
+      .filter((b) => b.status === "done")
+      .map((b) => [b.id, b]),
+  );
+  const preserved: string[] = [];
+  const behaviors = draft.behaviors.map((b) => {
+    const p = priorDone.get(b.id);
+    if (
+      p &&
+      p.description === b.description &&
+      p.expectedOutput === b.expectedOutput
+    ) {
+      preserved.push(b.id);
+      return { ...b, status: "done" as const };
+    }
+    return b;
+  });
+  return { task: { ...draft, behaviors }, preserved };
+}
+
 /** Parsed results from a test run. */
 export interface ParsedTest {
   passed: number;

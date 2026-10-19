@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { registerSaveTaskTool, runFinalize } from "../extensions/finalize.ts";
+import { preserveDoneStatuses } from "../extensions/task-contract.ts";
+import type { TaskContract, Behavior } from "../extensions/state.ts";
 import { loadContent } from "../extensions/utils.ts";
 import type { WorkflowState } from "../extensions/state.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -630,5 +632,117 @@ describe("unit-prompt.md content assertions (T7)", () => {
     assert.match(content, /Implement ONLY the behavior named in the task text/);
     assert.match(content, /suggestedCommit/);
     assert.match(content, /Do NOT run `git commit`/);
+  });
+});
+
+// ═══ done-preservation on re-finalize (T10) ═══
+function contract(behaviors: Behavior[]): TaskContract {
+  return {
+    title: "My Task",
+    instruction: "do the thing",
+    files: ["src/a.ts"],
+    done: "tests pass",
+    behaviors,
+  };
+}
+
+describe("preserveDoneStatuses (T10)", () => {
+  it("keeps a prior done behavior done when description and expectedOutput are identical", () => {
+    const prior = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }]);
+    const draft = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }]);
+
+    const { task, preserved } = preserveDoneStatuses(prior, draft);
+
+    assert.deepEqual(preserved, ["T1"]);
+    assert.equal(task.behaviors[0].status, "done");
+    assert.equal(draft.behaviors[0].status, "active", "draft must not be mutated");
+  });
+
+  it("leaves the draft status when the description changed", () => {
+    const prior = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }]);
+    const draft = contract([{ id: "T1", description: "x changed", expectedOutput: "y", kind: "test", status: "active" }]);
+
+    const { task, preserved } = preserveDoneStatuses(prior, draft);
+
+    assert.deepEqual(preserved, []);
+    assert.equal(task.behaviors[0].status, "active");
+  });
+
+  it("leaves the draft status when the expectedOutput changed", () => {
+    const prior = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }]);
+    const draft = contract([{ id: "T1", description: "x", expectedOutput: "y changed", kind: "test", status: "active" }]);
+
+    const { task, preserved } = preserveDoneStatuses(prior, draft);
+
+    assert.deepEqual(preserved, []);
+    assert.equal(task.behaviors[0].status, "active");
+  });
+
+  it("does not preserve when the prior behavior was not done", () => {
+    const prior = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }]);
+    const draft = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }]);
+
+    const { task, preserved } = preserveDoneStatuses(prior, draft);
+
+    assert.deepEqual(preserved, []);
+    assert.equal(task.behaviors[0].status, "active");
+  });
+
+  it("returns the draft untouched when there is no prior contract", () => {
+    const draft = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" }]);
+
+    const { task, preserved } = preserveDoneStatuses(undefined, draft);
+
+    assert.deepEqual(preserved, []);
+    assert.equal(task, draft);
+  });
+});
+
+describe("save_task done-preservation (T10)", () => {
+  const PRIOR_DONE = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }]);
+
+  it("keeps T1 done across re-finalize and reports it in the tool result", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const ctx = ctxWithState(s);
+    const draft = { ...VALID, behaviors: [
+      { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+    ] };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.equal(s.task!.behaviors[0].status, "done");
+    assert.match(res.content[0].text, /Preserved done behaviors: T1/);
+  });
+
+  it("leaves the draft status when the description changed and reports no preservation", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const ctx = ctxWithState(s);
+    const draft = { ...VALID, behaviors: [
+      { id: "T1", description: "x changed", expectedOutput: "y", kind: "test", status: "active" },
+    ] };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.equal(s.task!.behaviors[0].status, "active");
+    assert.doesNotMatch(res.content[0].text, /Preserved done behaviors/);
+  });
+
+  it("leaves the draft status when the expectedOutput changed", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const ctx = ctxWithState(s);
+    const draft = { ...VALID, behaviors: [
+      { id: "T1", description: "x", expectedOutput: "y changed", kind: "test", status: "active" },
+    ] };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.equal(s.task!.behaviors[0].status, "active");
+    assert.doesNotMatch(res.content[0].text, /Preserved done behaviors/);
   });
 });
