@@ -27,6 +27,7 @@ import {
   type AttemptOutcome,
   type AttemptRecord,
 } from "./halt-report.ts";
+import { renderPreviousHaltSection } from "./resume-context.ts";
 import {
   runImplementerUnit,
   getActiveUnitClient,
@@ -888,6 +889,13 @@ export async function runOrchestratedImplement(
         `If its effects are missing, report that in your JSON report instead of retrying the command.`,
     };
   }
+  // T9: resume halt context. Capture state.lastHalt before the loop (a
+  // landed commit clears it), render the "## Previous run halted" section
+  // once, and prepend it to the base task text of the FIRST unit of the
+  // halted behavior only — it is dropped after that unit so retries,
+  // continuations and other behaviors never inherit it.
+  const previousHalt = state.lastHalt;
+  let previousHaltSection = previousHalt ? renderPreviousHaltSection(previousHalt) : "";
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
     // T8: attempt history is per behavior — a landed behavior's history
@@ -909,10 +917,15 @@ export async function runOrchestratedImplement(
         saveState(pi, state);
       }
     }
+    let haltPrefix = "";
+    if (previousHaltSection && previousHalt?.behaviorId === behavior.id) {
+      haltPrefix = previousHaltSection + "\n\n";
+      previousHaltSection = "";
+    }
     const baseCore = taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext;
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
-      taskText: baseCore + findingsSection(),
+      taskText: haltPrefix + baseCore + findingsSection(),
       kind: behavior.kind,
     };
     resumeTreeContext = "";
