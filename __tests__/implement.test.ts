@@ -2197,7 +2197,11 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
 
     assert.equal(result.complete, true, "clean staged diff lands the commit");
     assert.equal(state.task!.behaviors[0].status, "done");
-    const gitCommands = execLog.filter((e) => e.cmd === "git").map((e) => e.args[0]);
+    // Exclude the T6 progress fingerprint's `git diff --stat` queries: the
+    // guard must run the staged diff between add and commit.
+    const gitCommands = execLog
+      .filter((e) => !(e.cmd === "git" && e.args[0] === "diff" && e.args.includes("--stat")))
+      .map((e) => (e.cmd === "git" ? e.args[0] : e.cmd));
     const addIdx = gitCommands.indexOf("add");
     const diffIdx = gitCommands.indexOf("diff");
     const commitIdx = gitCommands.indexOf("commit");

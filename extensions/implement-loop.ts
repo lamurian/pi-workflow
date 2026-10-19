@@ -12,6 +12,13 @@ import {
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import { appendFindings, createToolCallCollector, renderFindingsSection, renderToolCallDigest } from "./findings-ledger.ts";
 import {
+  buildContinuationTaskText,
+  classifyProgress,
+  decideContinuation,
+  computeTreeFingerprint,
+  isPartialAttempt,
+} from "./unit-progress.ts";
+import {
   runImplementerUnit,
   getActiveUnitClient,
   setActiveUnitClient,
@@ -490,6 +497,28 @@ export async function readTreeState(
   }
 }
 
+/**
+ * Read the working-tree fingerprint used for partial-attempt progress
+ * detection (T6): `git status --short` + `git diff --stat`, joined by
+ * computeTreeFingerprint. Best-effort: failed commands contribute empty
+ * strings, keeping the fingerprint stable across attempts.
+ *
+ * @param pi  - ExtensionAPI reference (for exec access).
+ * @param cwd - Working directory.
+ * @returns The joined tree fingerprint.
+ */
+async function readTreeFingerprint(pi: ExtensionAPI, cwd: string): Promise<string> {
+  const status = await readTreeState(pi, cwd);
+  let diffStat = "";
+  try {
+    const res = await pi.exec("git", ["diff", "--stat"], { cwd });
+    diffStat = (res.stdout ?? "").trim();
+  } catch {
+    diffStat = "";
+  }
+  return computeTreeFingerprint(status, diffStat);
+}
+
 /** Outcome of a commit attempt, classified by the HEAD gate. */
 interface CommitAttempt {
   outcome: Exclude<GateOutcome, { kind: "landed" }> | null;
@@ -691,13 +720,16 @@ export async function runOrchestratedImplement(
    * Append a unit attempt's report findings to the shared ledger and
    * persist the state. Exact duplicates are skipped; when nothing new
    * lands, no persist happens.
+   *
+   * @returns True when at least one new finding landed in the ledger.
    */
-  const recordFindings = (behaviorId: string, texts: string[] | undefined): void => {
-    if (!texts?.length) return;
+  const recordFindings = (behaviorId: string, texts: string[] | undefined): boolean => {
+    if (!texts?.length) return false;
     const { ledger, changed } = appendFindings(state.findings ?? [], behaviorId, texts);
-    if (!changed) return;
+    if (!changed) return false;
     state.findings = ledger;
     saveState(pi, state);
+    return true;
   };
 
   const result: OrchestratorResult = {
@@ -817,26 +849,78 @@ export async function runOrchestratedImplement(
     /**
      * Run one unit attempt and record its report findings in the ledger.
      * Timed-out or report-less attempts additionally contribute a tool-call
-     * digest (T5) so the next attempt does not re-read blindly.
+     * digest (T5) so the next attempt does not re-read blindly. Captures the
+     * tree fingerprint before the attempt (T6 progress detection) and tracks
+     * whether any new finding landed during it.
      */
+    let attemptFingerprintBefore = "";
+    let attemptNewFindings = false;
     const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
+      attemptFingerprintBefore = await readTreeFingerprint(pi, cwd);
+      attemptNewFindings = false;
       const digest = createToolCallCollector();
       const out = await runUnit(unit, cwd, undefined, (event) => {
         digest.record(event);
         relay(event);
       });
-      recordFindings(behavior.id, out.findings);
+      attemptNewFindings = recordFindings(behavior.id, out.findings);
       if (out.timedOut || out.missingReport) {
         const digestText = renderToolCallDigest(digest.entries());
-        if (digestText) recordFindings(behavior.id, [digestText]);
+        if (digestText) {
+          attemptNewFindings = recordFindings(behavior.id, [digestText]) || attemptNewFindings;
+        }
       }
       return out;
     };
     let attempt = await runAndRecord(baseTask);
     result.unitsRun++;
     let taskText = baseTask.taskText;
+    // T6: continuation units per behavior, bounded and never charged to the
+    // retry budget; reset per behavior.
+    let continuations = 0;
+    let retry = 1;
 
-    for (let retry = 1; retry <= RETRY_BUDGET + 1; retry++) {
+    while (retry <= RETRY_BUDGET + 1) {
+      // T6: partial reports and timed-out attempts never reach the commit
+      // gate — their work stays uncommitted for a continuation unit.
+      if (!attempt.missingReport && isPartialAttempt(attempt)) {
+        const fingerprintAfter = await readTreeFingerprint(pi, cwd);
+        const progressed = classifyProgress({
+          fingerprintBefore: attemptFingerprintBefore,
+          fingerprintAfter,
+          newFindings: attemptNewFindings,
+        });
+        if (decideContinuation({ progressed, continuations }) === "continue") {
+          continuations++;
+          ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
+          taskText =
+            buildContinuationTaskText(behavior.id, attempt, baseCore, await readTreeState(pi, cwd)) +
+            noteSection +
+            findingsSection();
+          attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
+          result.unitsRun++;
+          continue;
+        }
+        if (!attempt.error) {
+          // A partial report without progress consumes one retry as today.
+          if (retry > RETRY_BUDGET) {
+            return halt(
+              behavior.id,
+              `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without ` +
+                `advancing the tree or adding findings: ${attempt.summary ?? "no summary"}`,
+            );
+          }
+          ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
+          taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection();
+          attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
+          result.unitsRun++;
+          retry++;
+          continue;
+        }
+        // Timed out without progress (or beyond the continuation budget):
+        // fall through to the unchanged timeout-retry path below.
+      }
+
       if (attempt.error) {
         if (retry > RETRY_BUDGET) {
           return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
@@ -845,6 +929,7 @@ export async function runOrchestratedImplement(
         taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection();
         attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
         result.unitsRun++;
+        retry++;
         continue;
       }
 
@@ -939,6 +1024,7 @@ export async function runOrchestratedImplement(
       taskText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
       attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
       result.unitsRun++;
+      retry++;
     }
   }
 
