@@ -414,6 +414,14 @@ export interface ImplementerReport {
   suggestedCommit?: string;
   /** Commands the sandbox blocked, classified by urgency by the unit. */
   blockedCommands?: BlockedCommand[];
+  /** Completion state: "partial" when wrapping up unfinished work, "complete" when done. */
+  status?: "complete" | "partial";
+  /** Short reusable facts (file paths, signatures, verified tool behavior) for later units. */
+  findings?: string[];
+  /** What a follow-up unit should do next after a partial wrap-up. */
+  nextSteps?: string;
+  /** True when the behavior is already implemented at HEAD and needs no commit. */
+  alreadySatisfied?: boolean;
 }
 
 /**
@@ -526,6 +534,30 @@ function parseBlockedCommands(raw: unknown): BlockedCommand[] | undefined {
 }
 
 /**
+ * Parse the optional `status` field: only "complete" | "partial" survive;
+ * anything else is omitted.
+ *
+ * @param raw - The unparsed `status` value from the JSON block.
+ * @returns The validated status, or undefined when absent or invalid.
+ */
+function parseReportStatus(raw: unknown): "complete" | "partial" | undefined {
+  return raw === "complete" || raw === "partial" ? raw : undefined;
+}
+
+/**
+ * Parse the optional `findings` field: string entries only; non-string
+ * entries are dropped; an empty (or non-array) value is omitted.
+ *
+ * @param raw - The unparsed `findings` value from the JSON block.
+ * @returns The surviving string findings, or undefined when none survive.
+ */
+function parseReportFindings(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const findings = raw.filter((item): item is string => typeof item === "string");
+  return findings.length > 0 ? findings : undefined;
+}
+
+/**
  * Parse implementer JSON-mode output into a structured report.
  *
  * Reads the final fenced ```json block from the last assistant message.
@@ -535,7 +567,7 @@ function parseBlockedCommands(raw: unknown): BlockedCommand[] | undefined {
  * dropped when malformed. Never throws.
  *
  * @param stdout - Raw JSONL output from the implementer subprocess.
- * @returns The parsed report; `suggestedCommit`/`blockedCommands` absent when unavailable.
+ * @returns The parsed report; optional fields absent when unavailable or invalid.
  */
 export function parseImplementerReport(stdout: string): ImplementerReport {
   const text = lastAssistantText(stdout);
@@ -546,12 +578,20 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
       const parsed = JSON.parse(jsonMatch[1]!) as Record<string, unknown>;
       if (typeof parsed.summary === "string") {
         const blockedCommands = parseBlockedCommands(parsed.blockedCommands);
+        const status = parseReportStatus(parsed.status);
+        const findings = parseReportFindings(parsed.findings);
         return {
           summary: parsed.summary,
           ...(typeof parsed.suggestedCommit === "string"
             ? { suggestedCommit: parsed.suggestedCommit }
             : {}),
           ...(blockedCommands ? { blockedCommands } : {}),
+          ...(status ? { status } : {}),
+          ...(findings ? { findings } : {}),
+          ...(typeof parsed.nextSteps === "string" ? { nextSteps: parsed.nextSteps } : {}),
+          ...(typeof parsed.alreadySatisfied === "boolean"
+            ? { alreadySatisfied: parsed.alreadySatisfied }
+            : {}),
         };
       }
     } catch {

@@ -583,6 +583,139 @@ describe("parseImplementerReport blockedCommands", () => {
   });
 });
 
+describe("parseImplementerReport report schema (T2)", () => {
+  function assistantEvent(text: string): string {
+    return JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    });
+  }
+
+  function reportWith(json: string): string {
+    return assistantEvent(`Done.\n\`\`\`json\n${json}\n\`\`\``);
+  }
+
+  it("parses status partial and complete", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const partial = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "half done", status: "partial" })),
+    );
+    assert.equal(partial.summary, "half done");
+    assert.equal(partial.status, "partial");
+
+    const complete = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "done", status: "complete" })),
+    );
+    assert.equal(complete.status, "complete");
+  });
+
+  it("ignores status values outside complete|partial", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const report = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "s", status: "failed", nextSteps: "keep going" })),
+    );
+    assert.equal(report.status, undefined);
+    assert.equal(report.nextSteps, "keep going");
+  });
+
+  it("keeps string findings and drops non-string entries", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const report = parseImplementerReport(
+      reportWith(
+        JSON.stringify({
+          summary: "s",
+          findings: ["extensions/a.ts exports parseX", 42, null, { path: "b.ts" }, "bash: go test ./..."],
+        }),
+      ),
+    );
+
+    assert.deepEqual(report.findings, ["extensions/a.ts exports parseX", "bash: go test ./..."]);
+  });
+
+  it("omits findings when the array is empty or not an array", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    assert.equal(parseImplementerReport(reportWith(JSON.stringify({ summary: "s", findings: [] }))).findings, undefined);
+    assert.equal(
+      parseImplementerReport(reportWith(JSON.stringify({ summary: "s", findings: [1, null, {}] }))).findings,
+      undefined,
+    );
+    assert.equal(
+      parseImplementerReport(reportWith(JSON.stringify({ summary: "s", findings: "one file" }))).findings,
+      undefined,
+    );
+  });
+
+  it("parses nextSteps only when a string", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const ok = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "s", nextSteps: "finish the ledger wiring" })),
+    );
+    assert.equal(ok.nextSteps, "finish the ledger wiring");
+
+    const bad = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "s", nextSteps: ["step 1", "step 2"] })),
+    );
+    assert.equal(bad.nextSteps, undefined);
+  });
+
+  it("parses alreadySatisfied only when a boolean", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const yes = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "s", alreadySatisfied: true })),
+    );
+    assert.equal(yes.alreadySatisfied, true);
+
+    const no = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "s", alreadySatisfied: "yes" })),
+    );
+    assert.equal(no.alreadySatisfied, undefined);
+  });
+
+  it("parses all new fields together alongside the old ones", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    const report = parseImplementerReport(
+      reportWith(
+        JSON.stringify({
+          summary: "wrapped up partial work",
+          suggestedCommit: "feat(x): y",
+          status: "partial",
+          findings: ["state.ts holds WorkflowState"],
+          nextSteps: "wire the ledger into buildRetryTask",
+          alreadySatisfied: false,
+          blockedCommands: [{ command: "npm test", mustRunNow: true }],
+        }),
+      ),
+    );
+
+    assert.deepEqual(report, {
+      summary: "wrapped up partial work",
+      suggestedCommit: "feat(x): y",
+      status: "partial",
+      findings: ["state.ts holds WorkflowState"],
+      nextSteps: "wire the ledger into buildRetryTask",
+      alreadySatisfied: false,
+      blockedCommands: [{ command: "npm test", mustRunNow: true }],
+    });
+  });
+
+  it("reports without the new fields parse exactly as before", async () => {
+    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+
+    assert.deepEqual(parseImplementerReport(""), { summary: "" });
+    const report = parseImplementerReport(
+      reportWith(JSON.stringify({ summary: "plain", suggestedCommit: "fix: x" })),
+    );
+    assert.deepEqual(report, { summary: "plain", suggestedCommit: "fix: x" });
+  });
+});
+
 
 describe("runScoutSubprocess kill handling", () => {
   it("rejects with the abort reason when killed by signal", async () => {

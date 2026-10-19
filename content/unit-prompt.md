@@ -51,6 +51,10 @@ End your final message with exactly one fenced JSON block and nothing after it:
 {
   "summary": "one or two sentences: what you changed and how you verified it",
   "suggestedCommit": "type(scope): conventional subject, max 75 chars, no behavior id",
+  "status": "partial",
+  "findings": ["short reusable facts for later units"],
+  "nextSteps": "what a follow-up unit should do next",
+  "alreadySatisfied": false,
   "blockedCommands": [
     { "command": "the exact command the sandbox refused", "reason": "why you need it (optional)", "mustRunNow": true }
   ]
@@ -58,5 +62,11 @@ End your final message with exactly one fenced JSON block and nothing after it:
 ```
 
 `suggestedCommit` must be a conventional commit subject describing the change (e.g. `feat(http): add retry backoff`), never the behavior id.
+
+`status`, `findings`, `nextSteps` and `alreadySatisfied` are optional:
+
+- Use `"status": "partial"` plus `findings` and `nextSteps` when you are wrapping up unfinished work: leave your files on disk, never commit, and tell the next unit exactly where you stopped.
+- `findings` are short reusable facts for later units: file paths, signatures, verified tool behavior. Not a diary — only what saves the next unit real exploration time.
+- Set `"alreadySatisfied": true` when the behavior is already implemented at HEAD and needs no changes. Never invent changes just to produce a commit.
 
 `blockedCommands` is optional — include it only when the sandbox blocked a command (see the Sandbox blocks section). `mustRunNow: true` means you cannot implement or verify the behavior without it; `false` means deferrable.
