@@ -10,7 +10,7 @@ import {
   type PendingManualCheck,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
-import { appendFindings, createToolCallCollector, renderFindingsSection, renderToolCallDigest } from "./findings-ledger.ts";
+import { appendFindings, createToolCallCollector, renderFindingsSection, renderToolCallDigest, type Finding } from "./findings-ledger.ts";
 import {
   buildContinuationTaskText,
   classifyProgress,
@@ -20,6 +20,13 @@ import {
   shouldHaltEarly,
   buildEarlyHaltError,
 } from "./unit-progress.ts";
+import {
+  classifyAttemptOutcome,
+  deriveDiagnosis,
+  truncateAttemptText,
+  type AttemptOutcome,
+  type AttemptRecord,
+} from "./halt-report.ts";
 import {
   runImplementerUnit,
   getActiveUnitClient,
@@ -78,6 +85,16 @@ export interface OrchestratorResult {
   deferredCommands?: BlockedCommand[];
   /** Manual behaviors whose verification timed out — committed but unconfirmed. */
   pendingManualChecks?: PendingManualCheck[];
+  /** Per-attempt history recorded for the halted behavior (T8). */
+  attempts?: AttemptRecord[];
+  /** Commit subjects since the /implement baseline, git log baseline..HEAD (T8). */
+  commitsSinceBaseline?: string[];
+  /** Shared findings ledger snapshot at halt time; the report renders its tail (T8). */
+  findings?: Finding[];
+  /** Derived one-line halt diagnosis (T8). */
+  diagnosis?: string;
+  /** Derived one-line recommended next action (T8). */
+  recommendation?: string;
 }
 
 // ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
@@ -641,6 +658,38 @@ async function readDiffStat(pi: ExtensionAPI, cwd: string): Promise<string> {
   }
 }
 
+/**
+ * Read the commit subjects landed since the /implement baseline (T8).
+ *
+ * Runs `git log <baselineHead>..HEAD --pretty=%s` so the halt report can
+ * list cumulative commits across ALL runs of the task, not just the
+ * current one. Best-effort: returns null when no baseline was recorded
+ * (older sessions, git unavailable, or a failed log) so callers fall
+ * back to the per-run landedCommits.
+ *
+ * @param pi          - ExtensionAPI reference.
+ * @param cwd         - Working directory.
+ * @param baselineHead - HEAD recorded when /implement started (optional).
+ * @returns Commit subjects since the baseline, or null when unavailable.
+ */
+export async function readCommitsSinceBaseline(
+  pi: ExtensionAPI,
+  cwd: string,
+  baselineHead: string | undefined,
+): Promise<string[] | null> {
+  if (!baselineHead) return null;
+  try {
+    const res = await pi.exec("git", ["log", `${baselineHead}..HEAD`, "--pretty=%s"], { cwd });
+    if (res.code !== 0) return null;
+    return (res.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
 // ─── Commit timeout budget ─────────────────────────────────────────────────────
 
 /** Default git-commit budget: hooks run lint+format+test on cold caches. */
@@ -742,6 +791,11 @@ export async function runOrchestratedImplement(
     pendingManualChecks: [],
   };
 
+  // T8: per-attempt history of the currently-halted-behavior candidate.
+  // Reset per behavior; on halt it feeds the attempt table, the diagnosis
+  // derivation and lastHalt persistence.
+  const attemptHistory: AttemptRecord[] = [];
+
   // Steering (T4): while a verification pause is open, plain user input at
   // the main prompt is consumed and forwarded to the live child; slash
   // commands and everything outside a pause pass through. Unregistered on
@@ -757,11 +811,25 @@ export async function runOrchestratedImplement(
     result.error = error;
     result.treeState = await readTreeState(pi, cwd);
     if (pendingCommand) result.pendingCommand = pendingCommand;
+    // T8: enrich the halt — cumulative commits since the /implement
+    // baseline (per-run fallback stays in composeHaltReport), the halted
+    // behavior's attempt history, the findings tail, and a derived
+    // diagnosis + recommended next action. All of it persists to lastHalt.
+    const commits = await readCommitsSinceBaseline(pi, cwd, state.baselineHead);
+    if (commits?.length) result.commitsSinceBaseline = commits;
+    result.attempts = attemptHistory.map((entry) => ({ ...entry }));
+    result.findings = state.findings?.length ? [...state.findings] : undefined;
+    const diagnosis = deriveDiagnosis(result.attempts, error);
+    result.diagnosis = diagnosis.diagnosis;
+    result.recommendation = diagnosis.recommendation;
     state.lastHalt = {
       behaviorId,
       error,
       treeState: result.treeState,
       landedCommits: [...landedCommits],
+      attempts: result.attempts,
+      diagnosis: diagnosis.diagnosis,
+      recommendation: diagnosis.recommendation,
       ...(pendingCommand ? { pendingCommand } : {}),
       at: new Date().toISOString(),
     };
@@ -822,6 +890,9 @@ export async function runOrchestratedImplement(
   }
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
+    // T8: attempt history is per behavior — a landed behavior's history
+    // is irrelevant to a later behavior's halt report.
+    attemptHistory.length = 0;
     // Progress visibility: a unit subprocess can run for minutes with captured
     // stdio — announce start and landing so a healthy run never looks frozen.
     ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
@@ -857,9 +928,11 @@ export async function runOrchestratedImplement(
      */
     let attemptFingerprintBefore = "";
     let attemptNewFindings = false;
+    let attemptProgress = false;
     const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
       attemptFingerprintBefore = await readTreeFingerprint(pi, cwd);
       attemptNewFindings = false;
+      const startedAt = Date.now();
       const digest = createToolCallCollector();
       const out = await runUnit(unit, cwd, undefined, (event) => {
         digest.record(event);
@@ -872,7 +945,33 @@ export async function runOrchestratedImplement(
           attemptNewFindings = recordFindings(behavior.id, [digestText]) || attemptNewFindings;
         }
       }
+      // T8: classify and record the finished attempt. Timed-out/partial
+      // attempts additionally compute their progress flag here; the
+      // partial branch reuses it instead of re-fingerprinting the tree.
+      const preOutcome = classifyAttemptOutcome(out);
+      let progress = attemptNewFindings;
+      if (preOutcome === "timeout" || preOutcome === "partial") {
+        progress =
+          classifyProgress({
+            fingerprintBefore: attemptFingerprintBefore,
+            fingerprintAfter: await readTreeFingerprint(pi, cwd),
+            newFindings: attemptNewFindings,
+          }) || attemptNewFindings;
+      }
+      attemptProgress = progress;
+      attemptHistory.push({
+        attempt: attemptHistory.length + 1,
+        outcome: preOutcome,
+        durationSec: Math.max(0, Math.round((Date.now() - startedAt) / 1000)),
+        progress,
+        lastText: truncateAttemptText(out.error ?? out.summary ?? ""),
+      });
       return out;
+    };
+    /** Seal the last recorded attempt with the commit-gate verdict (T8). */
+    const sealLastAttempt = (outcome: AttemptOutcome) => {
+      const last = attemptHistory[attemptHistory.length - 1];
+      if (last) last.outcome = outcome;
     };
     let attempt = await runAndRecord(baseTask);
     result.unitsRun++;
@@ -889,12 +988,7 @@ export async function runOrchestratedImplement(
       // T6: partial reports and timed-out attempts never reach the commit
       // gate — their work stays uncommitted for a continuation unit.
       if (!attempt.missingReport && isPartialAttempt(attempt)) {
-        const fingerprintAfter = await readTreeFingerprint(pi, cwd);
-        const progressed = classifyProgress({
-          fingerprintBefore: attemptFingerprintBefore,
-          fingerprintAfter,
-          newFindings: attemptNewFindings,
-        });
+        const progressed = attemptProgress;
         if (progressed) {
           noProgressStreak = 0;
         } else if (shouldHaltEarly(++noProgressStreak)) {
@@ -954,6 +1048,7 @@ export async function runOrchestratedImplement(
       // retry-budget consumption; the behavior stays active for resume.
       const mustRun = attempt.blockedCommands?.find((entry) => entry.mustRunNow);
       if (mustRun) {
+        sealLastAttempt("blocked");
         const pendingCommand: PendingCommand = {
           command: mustRun.command,
           ...(mustRun.reason ? { reason: mustRun.reason } : {}),
@@ -991,6 +1086,10 @@ export async function runOrchestratedImplement(
       const subject = pickCommitSubject(attempt, behavior);
       ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
       const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry);
+      // T8: the commit-gate verdict seals the last attempt's outcome in
+      // the halt report's attempt table (landed attempts reset with the
+      // next behavior's history).
+      if (commit.outcome !== null) sealLastAttempt(commit.outcome.kind);
 
       if (commit.outcome === null) {
         landedCommits.push(subject);

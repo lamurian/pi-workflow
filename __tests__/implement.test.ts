@@ -805,7 +805,7 @@ describe("B5: halt report as an agent turn", () => {
     assert.match(report, /Tree state:\n M src\/b\.ts/, "tree-state snapshot");
     assert.match(
       report,
-      /Commits landed so far:\n- feat\(core\): add T1/,
+      /Commits landed since \/implement started:\n- feat\(core\): add T1/,
       "one - <subject> line per landed commit",
     );
     assert.match(
@@ -815,8 +815,8 @@ describe("B5: halt report as an agent turn", () => {
     );
     assert.match(
       report,
-      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
-      "closing no-action instruction",
+      /Relay this status and the recommended next action to the user\. Do not run tools or modify the working tree\./,
+      "closing relay instruction",
     );
   });
 
@@ -832,7 +832,7 @@ describe("B5: halt report as an agent turn", () => {
     assert.match(report, /## Implementation status: halted on T1/);
     assert.match(report, /Error: boom/);
     assert.match(report, /Tree state:\n\(unavailable\)/, "(unavailable) when the snapshot is absent");
-    assert.match(report, /Commits landed so far:\n\(none\)/, "(none) when nothing landed");
+    assert.match(report, /Commits landed since \/implement started:\n\(none\)/, "(none) when nothing landed");
   });
 
   it("an always-failing unit exhausts the budget; exactly one steer halt report is delivered; lastHalt persisted; phase stays implementing", async () => {
@@ -876,7 +876,7 @@ describe("B5: halt report as an agent turn", () => {
       /Tree state:\nM src\/a\.ts\n\?\? new-file\.txt/,
       "includes the tree-state snapshot",
     );
-    assert.match(delivery.text, /Commits landed so far:\n\(none\)/, "lists (none) when nothing landed");
+    assert.match(delivery.text, /Commits landed since \/implement started:\n\(none\)/, "lists (none) when nothing landed");
     assert.match(
       delivery.text,
       /Resume: run \/implement again to resume from the first active behavior\./,
@@ -884,8 +884,8 @@ describe("B5: halt report as an agent turn", () => {
     );
     assert.match(
       delivery.text,
-      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
-      "closing no-action instruction",
+      /Relay this status and the recommended next action to the user\. Do not run tools or modify the working tree\./,
+      "closing relay instruction",
     );
 
     assert.equal(state.phase, "implementing", "phase remains implementing so a later /implement resumes");

@@ -11,6 +11,7 @@ import {
   type LastHalt,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
+import { renderHaltReport } from "./halt-report.ts";
 import {
   runOrchestratedImplement,
   buildEngineerNoteSection,
@@ -263,56 +264,34 @@ export function composeCompletionReport(
  * Delivered as an agent turn via `pi.sendUserMessage(report, { deliverAs:
  * "steer" })` after the orchestrator loop has persisted lastHalt and kept
  * state.phase implementing (the explore pattern), so the halt outcome
- * renders as an assistant message in RPC clients. A result with
- * pendingCommand renders an "Action required" section (run the command
- * outside the sandbox, then resume) before the resume line. Any
- * OrchestratorResult with haltedOn qualifies: unit failure after retries,
- * test-guard, commit-timeout, mustRunNow pause-halt, completion-gate
- * refusal, or a caught orchestrator crash.
+ * renders as an assistant message in RPC clients. Thin wrapper over
+ * renderHaltReport (extensions/halt-report.ts, T8): renders the cumulative
+ * commits since the /implement baseline (falling back to this run's
+ * landedCommits), the halted behavior's attempt table, the findings tail,
+ * and the Diagnosis / Recommended next action lines, ending with the
+ * pinned relay instruction. A result with pendingCommand renders an
+ * "Action required" section (run the command outside the sandbox, then
+ * resume) before the resume line. Any OrchestratorResult with haltedOn
+ * qualifies: unit failure after retries, test-guard, commit-timeout,
+ * mustRunNow pause-halt, completion-gate refusal, or a caught crash.
  *
  * @param result - The settled orchestrator outcome (halted).
  * @returns The markdown report string with the pinned shape.
  */
 export function composeHaltReport(result: OrchestratorResult): string {
-  const lines: string[] = [
-    `## Implementation status: halted on ${result.haltedOn ?? "(unknown)"}`,
-    "",
-    `Error: ${result.error ?? "(unknown)"}`,
-    "",
-    "Tree state:",
-    result.treeState ?? "(unavailable)",
-    "",
-    "Commits landed so far:",
-  ];
-  if (result.landedCommits.length) {
-    for (const subject of result.landedCommits) {
-      lines.push(`- ${subject}`);
-    }
-  } else {
-    lines.push("(none)");
-  }
-  if (result.pendingCommand) {
-    lines.push(
-      "",
-      "Action required:",
-      "Run this command in your shell (the sandbox blocks it here):",
-      "",
-      "```",
-      result.pendingCommand.command,
-      "```",
-    );
-    if (result.pendingCommand.reason) {
-      lines.push(`Reason: ${result.pendingCommand.reason}`);
-    }
-    lines.push("", "Then run /implement again to resume.");
-  }
-  lines.push(
-    "",
-    "Resume: run /implement again to resume from the first active behavior.",
-    "",
-    "No action needed: relay this status to the user. Do not run tools or modify the working tree.",
-  );
-  return lines.join("\n");
+  return renderHaltReport({
+    haltedOn: result.haltedOn,
+    error: result.error,
+    treeState: result.treeState,
+    commits: result.commitsSinceBaseline?.length
+      ? result.commitsSinceBaseline
+      : result.landedCommits,
+    attempts: result.attempts,
+    findings: result.findings,
+    diagnosis: result.diagnosis,
+    recommendation: result.recommendation,
+    pendingCommand: result.pendingCommand,
+  });
 }
 
 /**

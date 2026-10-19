@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shortSlug } from "./utils.ts";
 import type { Finding } from "./findings-ledger.ts";
+import type { AttemptRecord } from "./halt-report.ts";
 
 /** Valid phases of the workflow state machine. */
 export type WorkflowPhase =
@@ -63,6 +64,16 @@ export interface LastHalt {
   treeState?: string;
   /** Commit subjects landed before the halt. */
   landedCommits?: string[];
+  /**
+   * Per-attempt history of the halted behavior (T8): attempt number,
+   * outcome kind, duration, progress and last text. Optional: absent on
+   * sessions persisted before this field existed.
+   */
+  attempts?: AttemptRecord[];
+  /** One-line diagnosis of why the behavior halted (T8). */
+  diagnosis?: string;
+  /** One-line recommended next action for the user (T8). */
+  recommendation?: string;
   /** Sandbox-blocked command the user must run before resuming. */
   pendingCommand?: PendingCommand;
   /** ISO timestamp of the halt. */
