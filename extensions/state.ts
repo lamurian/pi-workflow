@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shortSlug } from "./utils.ts";
+import type { Finding } from "./findings-ledger.ts";
 
 /** Valid phases of the workflow state machine. */
 export type WorkflowPhase =
@@ -114,6 +115,15 @@ export interface WorkflowState {
    * and the orchestrated loop clears it on completion (phase -> idle).
    */
   engineerNote?: string;
+  /**
+   * Shared findings ledger: reusable facts reported by unit attempts,
+   * across ALL behaviors of the task. Appended by the orchestrator loop
+   * (exact-text dedup, capped at the 40 most recent), rendered into every
+   * unit task text, cleared on completion (phase -> idle), and kept
+   * across halts, resumes and re-finalize. Optional: absent on sessions
+   * persisted before this field existed.
+   */
+  findings?: Finding[];
 }
 
 /** Test run results. */

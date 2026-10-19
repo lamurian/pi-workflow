@@ -10,6 +10,7 @@ import {
   type PendingManualCheck,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
+import { appendFindings, renderFindingsSection } from "./findings-ledger.ts";
 import {
   runImplementerUnit,
   getActiveUnitClient,
@@ -682,6 +683,23 @@ export async function runOrchestratedImplement(
   const landedCommits: string[] = [];
   const noteSection = engineerNote ? buildEngineerNoteSection(engineerNote) : "";
   const units = task.behaviors.filter((b) => b.status === "active");
+
+  /** Current findings section for task texts (shared ledger, all behaviors). */
+  const findingsSection = () => renderFindingsSection(state.findings);
+
+  /**
+   * Append a unit attempt's report findings to the shared ledger and
+   * persist the state. Exact duplicates are skipped; when nothing new
+   * lands, no persist happens.
+   */
+  const recordFindings = (behaviorId: string, texts: string[] | undefined): void => {
+    if (!texts?.length) return;
+    const { ledger, changed } = appendFindings(state.findings ?? [], behaviorId, texts);
+    if (!changed) return;
+    state.findings = ledger;
+    saveState(pi, state);
+  };
+
   const result: OrchestratorResult = {
     complete: false,
     unitsRun: 0,
@@ -724,6 +742,7 @@ export async function runOrchestratedImplement(
     if (result.complete) {
       state.phase = "idle";
       state.engineerNote = undefined;
+      state.findings = undefined;
       saveState(pi, state);
       updateUi(null, ctx);
     }
@@ -785,16 +804,23 @@ export async function runOrchestratedImplement(
         saveState(pi, state);
       }
     }
+    const baseCore = taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext;
     const baseTask: UnitTask = {
       behaviorId: behavior.id,
-      taskText: taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext,
+      taskText: baseCore + findingsSection(),
       kind: behavior.kind,
     };
     resumeTreeContext = "";
 
     const relay = (event: Record<string, unknown>) =>
       relayImplementerEvent(pi, ctx, behavior.id, position, event);
-    let attempt = await runUnit(baseTask, cwd, undefined, relay);
+    /** Run one unit attempt and record its report findings in the ledger. */
+    const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
+      const out = await runUnit(unit, cwd, undefined, relay);
+      recordFindings(behavior.id, out.findings);
+      return out;
+    };
+    let attempt = await runAndRecord(baseTask);
     result.unitsRun++;
     let taskText = baseTask.taskText;
 
@@ -804,8 +830,8 @@ export async function runOrchestratedImplement(
           return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
         }
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-        taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection;
-        attempt = await runUnit({ behaviorId: behavior.id, taskText, kind: behavior.kind }, cwd, undefined, relay);
+        taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection();
+        attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
         result.unitsRun++;
         continue;
       }
@@ -898,8 +924,8 @@ export async function runOrchestratedImplement(
       }
 
       ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-      taskText = buildFixTask(behavior, task, baseTask.taskText, commit.outcome, retry);
-      attempt = await runUnit({ behaviorId: behavior.id, taskText, kind: behavior.kind }, cwd, undefined, relay);
+      taskText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
+      attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
       result.unitsRun++;
     }
   }
@@ -911,6 +937,7 @@ export async function runOrchestratedImplement(
   await cleanupOrchestration();
   state.phase = "idle";
   state.engineerNote = undefined;
+  state.findings = undefined;
   saveState(pi, state);
   updateUi(null, ctx);
   ctx.ui.setStatus("implement", undefined);
