@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import {
   appendFindings,
   renderFindingsSection,
+  createToolCallCollector,
+  renderToolCallDigest,
+  TOOL_DIGEST_MAX_CHARS,
   MAX_FINDINGS,
   type Finding,
 } from "../extensions/findings-ledger.ts";
@@ -203,6 +206,70 @@ describe("findings ledger: append/cap/render", () => {
   });
 });
 
+// ═══ Tool-call digest (T5) ═══
+describe("tool-call digest", () => {
+  it("records read/edit paths and bash command heads from assistant events, deduped and truncated", () => {
+    const collector = createToolCallCollector();
+    const long = "go test ./... ".repeat(10).trim(); // 139 chars > 120
+    assert.ok(long.length > TOOL_DIGEST_MAX_CHARS);
+    collector.record({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", name: "read", arguments: { path: "a.go" } },
+          { type: "toolCall", name: "read", arguments: { path: "a.go" } }, // duplicate
+          { type: "toolCall", name: "read", arguments: { path: "b.go" } },
+          { type: "toolCall", name: "edit", arguments: { path: "a.go" } },
+          { type: "toolCall", name: "bash", arguments: { command: long } },
+          { type: "text", text: "plain prose, not a tool call" },
+        ],
+      },
+    });
+    // User-role messages and non-message events never contribute.
+    collector.record({
+      type: "message_end",
+      message: {
+        role: "user",
+        content: [{ type: "toolCall", name: "read", arguments: { path: "c.go" } }],
+      },
+    });
+    collector.record({ type: "turn_end" });
+
+    const entries = collector.entries();
+    const bash = entries.find((e) => e.tool === "bash");
+    assert.ok(bash, "the bash call was recorded");
+    assert.equal(bash!.detail.length, TOOL_DIGEST_MAX_CHARS, "bash command head is truncated to 120 chars");
+    assert.equal(bash!.detail, long.slice(0, TOOL_DIGEST_MAX_CHARS), "the head keeps the command start");
+
+    const digest = renderToolCallDigest(entries);
+    assert.match(digest, /^previous attempt touched: /);
+    assert.match(digest, /read a\.go, b\.go/, "deduped read paths group under their tool");
+    assert.match(digest, /edit a\.go/);
+    assert.ok(digest.includes(bash!.detail), "the truncated command head is rendered");
+    assert.ok(!digest.includes(long), "the full long command never appears");
+    assert.ok(!digest.includes("c.go"), "user-role events are ignored");
+  });
+
+  it("caps the digest at the most recent entries and returns empty when nothing was recorded", () => {
+    const collector = createToolCallCollector();
+    assert.equal(renderToolCallDigest(collector.entries()), "", "no events -> no digest text");
+    for (let i = 0; i < 30; i++) {
+      collector.record({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "read", arguments: { path: `f${i}.go` } }],
+        },
+      });
+    }
+    const entries = collector.entries();
+    assert.ok(entries.length <= 20, `digest capped, got ${entries.length}`);
+    assert.equal(entries[entries.length - 1]!.detail, "f29.go", "the most recent call survives");
+    assert.ok(!entries.some((e) => e.detail === "f0.go"), "the oldest call is evicted");
+  });
+});
+
 // ═══ Orchestrator wiring ═══
 describe("findings ledger: orchestrator wiring", () => {
   interface Spawn { behaviorId: string; taskText: string }
@@ -335,6 +402,127 @@ describe("findings ledger: orchestrator wiring", () => {
     assert.match(resumeSpawns[0]!.taskText, /## Known findings from earlier units/);
     assert.match(resumeSpawns[0]!.taskText, /- \[T1\] lint lives in \.golangci\.yml/);
     assert.equal(state.findings, undefined, "completion of the resumed run clears the ledger");
+  });
+
+  it("a timed-out attempt appends a behavior-tagged digest finding that reaches the retry task text", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: { ...twoBehaviorTask(), behaviors: [twoBehaviorTask().behaviors[0]!] },
+    };
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit, _cwd, _signal, onEvent) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 1) {
+        onEvent?.({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "toolCall", name: "read", arguments: { path: "src/helpers.ts" } },
+              { type: "toolCall", name: "bash", arguments: { command: "go test ./..." } },
+            ],
+          },
+        });
+        return { summary: "", error: "timed out after 900000ms", timedOut: true };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.equal(result.complete, true, "the retry succeeds");
+
+    const persisted = persistedWithFindings(pi);
+    assert.ok(persisted, "the digest finding was persisted with the ledger");
+    const digestEntry = persisted!.findings!.find((f) => f.text.startsWith("previous attempt touched:"));
+    assert.ok(digestEntry, "a digest finding landed in the ledger");
+    assert.equal(digestEntry!.behaviorId, "T1", "the digest is tagged with the behavior id");
+    assert.match(digestEntry!.text, /read src\/helpers\.ts/);
+    assert.match(digestEntry!.text, /bash: go test \.\/\.\.\./);
+
+    const retry = spawns[1]!.taskText;
+    assert.match(retry, /## Known findings from earlier units/, "the retry task carries the ledger section");
+    assert.match(retry, /previous attempt touched: read src\/helpers\.ts/, "the digest appears in the retry task text");
+  });
+
+  it("a report-less attempt appends the digest too, and identical digests are stored once", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: { ...twoBehaviorTask(), behaviors: [twoBehaviorTask().behaviors[0]!] },
+    };
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit, _cwd, _signal, onEvent) => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length <= 2) {
+        onEvent?.({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read", arguments: { path: "src/a.ts" } }],
+          },
+        });
+        return {
+          summary: "",
+          error: "implementer ended without the required JSON report block",
+          missingReport: true,
+        };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.equal(result.complete, true, "the third attempt succeeds");
+    assert.equal(spawns.length, 3, "two failures, one success");
+
+    // Both report-less attempts touch the same file: the digest is stored once.
+    const persisted = persistedWithFindings(pi)!;
+    const digests = persisted.findings!.filter((f) => f.text.startsWith("previous attempt touched:"));
+    assert.equal(digests.length, 1, "identical digests dedupe to one ledger entry");
+    assert.equal(digests[0]!.behaviorId, "T1");
+    assert.match(digests[0]!.text, /read src\/a\.ts/);
+    // Both retry task texts render the digest from the shared ledger.
+    assert.match(spawns[1]!.taskText, /previous attempt touched: read src\/a\.ts/);
+    assert.match(spawns[2]!.taskText, /previous attempt touched: read src\/a\.ts/);
+  });
+
+  it("a successful attempt leaves no digest finding in the ledger", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: { ...twoBehaviorTask(), behaviors: [twoBehaviorTask().behaviors[0]!] },
+    };
+    const ctx = ctxWithState(state);
+
+    const runner: UnitRunner = async (unit, _cwd, _signal, onEvent) => {
+      onEvent?.({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", name: "read", arguments: { path: "src/a.ts" } }],
+        },
+      });
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    assert.equal(result.complete, true, "the run completes");
+    const entries = (pi.calls["appendEntry"] ?? []) as Array<[string, WorkflowState]>;
+    for (const [, data] of entries) {
+      if (data.findings?.length) {
+        assert.ok(
+          !data.findings.some((f) => f.text.startsWith("previous attempt touched:")),
+          "no digest finding for a clean attempt",
+        );
+      }
+    }
   });
 
   it("duplicate findings across attempts are stored once and do not re-persist", async () => {

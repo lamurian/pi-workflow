@@ -10,7 +10,7 @@ import {
   type PendingManualCheck,
 } from "./state.ts";
 import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
-import { appendFindings, renderFindingsSection } from "./findings-ledger.ts";
+import { appendFindings, createToolCallCollector, renderFindingsSection, renderToolCallDigest } from "./findings-ledger.ts";
 import {
   runImplementerUnit,
   getActiveUnitClient,
@@ -814,10 +814,22 @@ export async function runOrchestratedImplement(
 
     const relay = (event: Record<string, unknown>) =>
       relayImplementerEvent(pi, ctx, behavior.id, position, event);
-    /** Run one unit attempt and record its report findings in the ledger. */
+    /**
+     * Run one unit attempt and record its report findings in the ledger.
+     * Timed-out or report-less attempts additionally contribute a tool-call
+     * digest (T5) so the next attempt does not re-read blindly.
+     */
     const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
-      const out = await runUnit(unit, cwd, undefined, relay);
+      const digest = createToolCallCollector();
+      const out = await runUnit(unit, cwd, undefined, (event) => {
+        digest.record(event);
+        relay(event);
+      });
       recordFindings(behavior.id, out.findings);
+      if (out.timedOut || out.missingReport) {
+        const digestText = renderToolCallDigest(digest.entries());
+        if (digestText) recordFindings(behavior.id, [digestText]);
+      }
       return out;
     };
     let attempt = await runAndRecord(baseTask);
