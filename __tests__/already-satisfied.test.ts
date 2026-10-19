@@ -1,7 +1,11 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { isAlreadySatisfied } from "../extensions/unit-progress.ts";
-import { runOrchestratedImplement } from "../extensions/implement-loop.ts";
+import { composeCompletionReport } from "../extensions/implement.ts";
+import {
+  runOrchestratedImplement,
+  type OrchestratorResult,
+} from "../extensions/implement-loop.ts";
 import type { TaskContract, WorkflowState } from "../extensions/state.ts";
 import type {
   ExtensionAPI,
@@ -138,6 +142,12 @@ describe("runOrchestratedImplement: alreadySatisfied marks done without a commit
 
     assert.equal(result.complete, true, "the run completes");
     assert.deepEqual(result.satisfiedWithoutCommit, ["T1"], "the id is recorded");
+    const report = composeCompletionReport(result, state.task!);
+    assert.match(
+      report,
+      /Satisfied without a new commit:\n- T1/,
+      "the completion report lists the satisfied id",
+    );
     assert.equal(state.task!.behaviors[0]!.status, "done", "the behavior is marked done");
     assert.equal(spawns.length, 1, "no retry spawns for a satisfied behavior");
     const commits = pi.calls.exec.filter(([, args]) => args[0] === "commit");
@@ -170,5 +180,76 @@ describe("runOrchestratedImplement: alreadySatisfied marks done without a commit
     assert.equal(result.complete, true, "the commit lands and the run completes");
     assert.equal(state.task!.behaviors[0]!.status, "done", "the behavior is done via the commit");
     assert.equal(spawns.length, 1, "no retry once the commit lands");
+  });
+});
+
+// ─── completion report ────────────────────────────────────────────────────────
+
+describe("composeCompletionReport: satisfied without a new commit", () => {
+  function reportTask(): TaskContract {
+    return {
+      title: "Report Task",
+      instruction: "do the thing",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "done" },
+        { id: "T2", description: "second", expectedOutput: "e2", kind: "test", status: "done" },
+      ],
+    };
+  }
+
+  function baseResult(overrides: Partial<OrchestratorResult>): OrchestratorResult {
+    return {
+      complete: true,
+      unitsRun: 2,
+      landedCommits: ["feat(core): add T1"],
+      satisfiedWithoutCommit: [],
+      ...overrides,
+    };
+  }
+
+  it("lists '- <id>' lines after the Behaviors list when satisfiedWithoutCommit is non-empty", () => {
+    const report = composeCompletionReport(
+      baseResult({ satisfiedWithoutCommit: ["T1", "T2"] }),
+      reportTask(),
+    );
+
+    assert.match(
+      report,
+      /Behaviors:\n- T1 done\n- T2 done\n\nSatisfied without a new commit:\n- T1\n- T2/,
+      "the section sits right after the behaviors list with one - <id> line each",
+    );
+    assert.match(
+      report,
+      /No action needed: relay this status to the user\. Do not run tools or modify the working tree\./,
+      "the pinned closing line is unchanged",
+    );
+  });
+
+  it("omits the section entirely when satisfiedWithoutCommit is empty", () => {
+    const report = composeCompletionReport(baseResult({}), reportTask());
+
+    assert.ok(
+      !report.includes("Satisfied without a new commit:"),
+      "no section header when nothing was satisfied without a commit",
+    );
+    assert.match(
+      report,
+      /Behaviors:\n- T1 done\n- T2 done\n\nNo action needed:/,
+      "the behaviors list flows straight into the closing line as before",
+    );
+  });
+
+  it("omits the section when the field is absent (older result shapes)", () => {
+    const legacy = {
+      complete: true,
+      unitsRun: 1,
+      landedCommits: ["feat(core): add T1"],
+    } as unknown as OrchestratorResult;
+
+    const report = composeCompletionReport(legacy, reportTask());
+
+    assert.ok(!report.includes("Satisfied without a new commit:"), "no crash, no section");
   });
 });
