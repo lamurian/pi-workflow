@@ -9,12 +9,12 @@ import {
 import { DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
+import { runImplement } from "./implement.ts";
 import {
-  runImplement,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
-} from "./implement.ts";
+} from "./implement-tools.ts";
 import { runApprove, runSteer, cleanupOrchestration } from "./hitl-pause.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";

@@ -23,7 +23,9 @@ import {
   setHitlWindow,
   getHitlTimeoutMs,
 } from "../extensions/hitl-pause.ts";
-import { registerImplementerActivityRenderer, composeCompletionReport, runImplement } from "../extensions/implement.ts";
+import { runImplement } from "../extensions/implement.ts";
+import { registerImplementerActivityRenderer } from "../extensions/implement-tools.ts";
+import { composeCompletionReport } from "../extensions/implement-report.ts";
 import {
   shutdownActiveClient,
   setActiveUnitClient,

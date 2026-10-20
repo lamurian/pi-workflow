@@ -1,12 +1,14 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { runImplement } from "../extensions/implement.ts";
 import {
-  runImplement,
   registerMarkTaskDoneTool,
   registerCompleteImplementationTool,
+} from "../extensions/implement-tools.ts";
+import {
   composeCompletionReport,
   composeHaltReport,
-} from "../extensions/implement.ts";
+} from "../extensions/implement-report.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
@@ -1883,7 +1885,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
 // ═══ T6: manual behaviors flagged in the final report ═══
 describe("T6: manual behaviors flagged in the final report", () => {
   it("lists completed manual behaviors under 'Manual verification required'", async () => {
-    const { generateReport } = await import("../extensions/implement.ts");
+    const { generateReport } = await import("../extensions/implement-report.ts");
     const state: WorkflowState = {
       phase: "idle",
       specText: "topic",
@@ -1911,7 +1913,7 @@ describe("T6: manual behaviors flagged in the final report", () => {
   });
 
   it("keeps test behaviors under Test Results and omits the manual section when none completed", async () => {
-    const { generateReport } = await import("../extensions/implement.ts");
+    const { generateReport } = await import("../extensions/implement-report.ts");
     const state: WorkflowState = {
       phase: "idle",
       specText: "topic",
@@ -1940,7 +1942,7 @@ describe("T6: manual behaviors flagged in the final report", () => {
 describe("implement tool registration", () => {
   it("registers mark_task_done and complete_implementation; run_tests is gone (T10)", async () => {
     const pi = mockPi();
-    const mod = await import("../extensions/implement.ts");
+    const mod = await import("../extensions/implement-tools.ts");
     (mod as unknown as Record<string, Function>)["registerMarkTaskDoneTool"]!(pi);
     (mod as unknown as Record<string, Function>)["registerCompleteImplementationTool"]!(pi);
 

@@ -1,7 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { isAlreadySatisfied } from "../extensions/unit-progress.ts";
-import { composeCompletionReport } from "../extensions/implement.ts";
+import { composeCompletionReport } from "../extensions/implement-report.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,

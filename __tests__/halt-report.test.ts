@@ -9,7 +9,10 @@ import {
   truncateAttemptText,
   type AttemptRecord,
 } from "../extensions/halt-report.ts";
-import { composeCompletionReport, composeHaltReport } from "../extensions/implement.ts";
+import {
+  composeCompletionReport,
+  composeHaltReport,
+} from "../extensions/implement-report.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
