@@ -1,68 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  saveState,
-  updateUi,
-  type WorkflowState,
-  type TaskContract,
-  type PendingCommand,
-  type PendingManualCheck,
-} from "./state.ts";
+import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
 import { evaluateCompletionGate } from "./task-contract.ts";
-import {
-  appendFindings,
-  createToolCallCollector,
-  renderFindingsSection,
-  renderToolCallDigest,
-  type Finding,
-} from "./findings-ledger.ts";
-import {
-  buildContinuationTaskText,
-  classifyProgress,
-  decideContinuation,
-  isAlreadySatisfied,
-  isPartialAttempt,
-  shouldHaltEarly,
-  buildEarlyHaltError,
-} from "./unit-progress.ts";
-import {
-  classifyAttemptOutcome,
-  deriveDiagnosis,
-  truncateAttemptText,
-  type AttemptOutcome,
-  type AttemptRecord,
-} from "./halt-report.ts";
+import { appendFindings, renderFindingsSection, type Finding } from "./findings-ledger.ts";
+import { deriveDiagnosis, type AttemptRecord } from "./halt-report.ts";
 import { renderPreviousHaltSection } from "./resume-context.ts";
-import {
-  runImplementerUnit,
-  getActiveUnitClient,
-  setActiveUnitClient,
-  type UnitTask,
-} from "./implementer-runner.ts";
+import { runImplementerUnit, type UnitTask } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
-import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
-import { relayImplementerEvent } from "./implementer-activity.ts";
-import {
-  cleanupOrchestration,
-  openVerificationPause,
-  registerWorkflowInputHandler,
-  type PauseOutcome,
-} from "./hitl-pause.ts";
-import {
-  commitAndGate,
-  getCommitTimeoutMs,
-  pickCommitSubject,
-  readCommitsSinceBaseline,
-  readGitHead,
-  readTreeFingerprint,
-  readTreeState,
-} from "./git-ops.ts";
-import {
-  buildEngineerNoteSection,
-  buildRetryTask,
-  buildUnitTask,
-  loadUnitPrompt,
-} from "./unit-task-text.ts";
+import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
+import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
+import { buildEngineerNoteSection, loadUnitPrompt } from "./unit-task-text.ts";
+import { runBehaviorLoop } from "./behavior-loop.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -136,6 +84,10 @@ export interface OrchestratorResult {
  * re-running resumes cleanly. Progress notifications (unit start + landed
  * commit) keep a multi-minute run visibly alive in the UI.
  *
+ * The per-behavior unit/retry/commit loop lives in runBehaviorLoop
+ * (behavior-loop.ts); this driver owns unit filtering, halt wiring, the
+ * shared findings ledger, resume context, and the empty-units gate.
+ *
  * A non-empty engineerNote is appended to every unit's task text: the base
  * attempt, every retry (buildRetryTask), and every fix subagent (whose
  * original task text already carries it). On completion the loop clears
@@ -154,16 +106,7 @@ export async function runOrchestratedImplement(
   ctx: ExtensionContext,
   state: WorkflowState,
   task: TaskContract,
-  runUnit: UnitRunner = (unit, cwd, signal, onEvent) =>
-    runImplementerUnit(
-      loadUnitPrompt(),
-      unit.taskText,
-      cwd,
-      signal,
-      undefined,
-      onEvent,
-      unit.kind === "manual",
-    ),
+  runUnit: UnitRunner = (unit, cwd, signal, onEvent) => runImplementerUnit(loadUnitPrompt(), unit.taskText, cwd, signal, undefined, onEvent, unit.kind === "manual"),
   engineerNote?: string,
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
@@ -304,16 +247,6 @@ export async function runOrchestratedImplement(
   let previousHaltSection = previousHalt ? renderPreviousHaltSection(previousHalt) : "";
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
-    // T8: attempt history is per behavior — a landed behavior's history
-    // is irrelevant to a later behavior's halt report.
-    attemptHistory.length = 0;
-    // Progress visibility: a unit subprocess can run for minutes with captured
-    // stdio — announce start and landing so a healthy run never looks frozen.
-    ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
-    // B3: live footer status under the distinct "implement" key; the
-    // "workflow" key from state.ts updateUi is never written by these frames.
-    const position = `${unitIndex + 1}/${totalUnits}`;
-    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`);
     let taskPrefix = "";
     if (pendingNote && pendingNote.behaviorId === behavior.id) {
       taskPrefix = pendingNote.note;
@@ -328,270 +261,12 @@ export async function runOrchestratedImplement(
       haltPrefix = previousHaltSection + "\n\n";
       previousHaltSection = "";
     }
-    const baseCore = taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext;
-    const baseTask: UnitTask = {
-      behaviorId: behavior.id,
-      taskText: haltPrefix + baseCore + findingsSection(),
-      kind: behavior.kind,
-    };
+    const halted = await runBehaviorLoop(behavior, unitIndex, totalUnits, {
+      pi, ctx, state, task, runUnit, result, landedCommits, attemptHistory,
+      findingsSection, recordFindings, noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt,
+    });
     resumeTreeContext = "";
-
-    const relay = (event: Record<string, unknown>) =>
-      relayImplementerEvent(pi, ctx, behavior.id, position, event);
-    /**
-     * Run one unit attempt and record its report findings in the ledger.
-     * Timed-out or report-less attempts additionally contribute a tool-call
-     * digest (T5) so the next attempt does not re-read blindly. Captures the
-     * tree fingerprint before the attempt (T6 progress detection) and tracks
-     * whether any new finding landed during it.
-     */
-    let attemptFingerprintBefore = "";
-    let attemptNewFindings = false;
-    let attemptProgress = false;
-    // T11a: HEAD before this attempt, compared with HEAD after it for the
-    // already-satisfied check (the flag alone never skips the commit gate).
-    let attemptHeadBefore: string | null = null;
-    const runAndRecord = async (unit: UnitTask): Promise<UnitAttempt> => {
-      attemptFingerprintBefore = await readTreeFingerprint(pi, cwd);
-      attemptHeadBefore = await readGitHead(pi, cwd);
-      attemptNewFindings = false;
-      const startedAt = Date.now();
-      const digest = createToolCallCollector();
-      const out = await runUnit(unit, cwd, undefined, (event) => {
-        digest.record(event);
-        relay(event);
-      });
-      attemptNewFindings = recordFindings(behavior.id, out.findings);
-      if (out.timedOut || out.missingReport) {
-        const digestText = renderToolCallDigest(digest.entries());
-        if (digestText) {
-          attemptNewFindings = recordFindings(behavior.id, [digestText]) || attemptNewFindings;
-        }
-      }
-      // T8: classify and record the finished attempt. Timed-out/partial
-      // attempts additionally compute their progress flag here; the
-      // partial branch reuses it instead of re-fingerprinting the tree.
-      const preOutcome = classifyAttemptOutcome(out);
-      let progress = attemptNewFindings;
-      if (preOutcome === "timeout" || preOutcome === "partial") {
-        progress =
-          classifyProgress({
-            fingerprintBefore: attemptFingerprintBefore,
-            fingerprintAfter: await readTreeFingerprint(pi, cwd),
-            newFindings: attemptNewFindings,
-          }) || attemptNewFindings;
-      }
-      attemptProgress = progress;
-      attemptHistory.push({
-        attempt: attemptHistory.length + 1,
-        outcome: preOutcome,
-        durationSec: Math.max(0, Math.round((Date.now() - startedAt) / 1000)),
-        progress,
-        lastText: truncateAttemptText(out.error ?? out.summary ?? ""),
-      });
-      return out;
-    };
-    /** Seal the last recorded attempt with the commit-gate verdict (T8). */
-    const sealLastAttempt = (outcome: AttemptOutcome) => {
-      const last = attemptHistory[attemptHistory.length - 1];
-      if (last) last.outcome = outcome;
-    };
-    let attempt = await runAndRecord(baseTask);
-    result.unitsRun++;
-    let taskText = baseTask.taskText;
-    // T6: continuation units per behavior, bounded and never charged to the
-    // retry budget; reset per behavior.
-    let continuations = 0;
-    let retry = 1;
-    // T7: consecutive timed-out/partial attempts that neither moved the tree
-    // fingerprint nor added findings; two in a row halt the behavior early.
-    let noProgressStreak = 0;
-
-    while (retry <= RETRY_BUDGET + 1) {
-      // T6: partial reports and timed-out attempts never reach the commit
-      // gate — their work stays uncommitted for a continuation unit.
-      if (!attempt.missingReport && isPartialAttempt(attempt)) {
-        const progressed = attemptProgress;
-        if (progressed) {
-          noProgressStreak = 0;
-        } else if (shouldHaltEarly(++noProgressStreak)) {
-          // T7: repeated identical timeouts/partial reports waste hours —
-          // halt with an actionable diagnosis instead of burning retries.
-          return halt(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
-        }
-        if (decideContinuation({ progressed, continuations }) === "continue") {
-          continuations++;
-          ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
-          taskText =
-            buildContinuationTaskText(behavior.id, attempt, baseCore, await readTreeState(pi, cwd)) +
-            noteSection +
-            findingsSection();
-          attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
-          result.unitsRun++;
-          continue;
-        }
-        if (!attempt.error) {
-          // A partial report without progress consumes one retry as today.
-          if (retry > RETRY_BUDGET) {
-            return halt(
-              behavior.id,
-              `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without ` +
-                `advancing the tree or adding findings: ${attempt.summary ?? "no summary"}`,
-            );
-          }
-          ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-          taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection();
-          attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
-          result.unitsRun++;
-          retry++;
-          continue;
-        }
-        // Timed out without progress (or beyond the continuation budget):
-        // fall through to the unchanged timeout-retry path below.
-      }
-
-      if (attempt.error) {
-        // A plain unit error (no partial report, no timeout) breaks any
-        // no-progress streak: only timed-out/partial attempts count toward
-        // the early halt.
-        if (!isPartialAttempt(attempt)) noProgressStreak = 0;
-        if (retry > RETRY_BUDGET) {
-          return halt(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
-        }
-        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-        taskText = buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection();
-        attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
-        result.unitsRun++;
-        retry++;
-        continue;
-      }
-
-      // mustRunNow: the unit cannot proceed without the user running a
-      // sandbox-blocked command. Pause immediately — no commit attempt, no
-      // retry-budget consumption; the behavior stays active for resume.
-      const mustRun = attempt.blockedCommands?.find((entry) => entry.mustRunNow);
-      if (mustRun) {
-        sealLastAttempt("blocked");
-        const pendingCommand: PendingCommand = {
-          command: mustRun.command,
-          ...(mustRun.reason ? { reason: mustRun.reason } : {}),
-        };
-        return halt(
-          behavior.id,
-          `Unit ${behavior.id} reported a sandbox-blocked command that must run now: ` +
-            `${mustRun.command}${mustRun.reason ? ` (${mustRun.reason})` : ""}. ` +
-            `Run it outside the sandbox, then /implement resumes.`,
-          pendingCommand,
-        );
-      }
-
-      // Deferrable entries never block landing: the commit gate runs as
-      // usual and the commands are reported to the user at completion.
-      for (const entry of attempt.blockedCommands ?? []) {
-        result.deferredCommands!.push(entry);
-      }
-      // The attempt reached the commit gate with a usable report: any
-      // no-progress streak from earlier partial attempts is broken.
-      noProgressStreak = 0;
-
-      // T11a: the unit reports the behavior is already implemented. With a
-      // clean tree and an unchanged HEAD the commit gate would only trip
-      // the no-changes verdict — mark the behavior done without a commit
-      // and without consuming retries. A dirty tree, an unknown tree
-      // state, or a moved HEAD falls through to the normal commit gate.
-      if (
-        isAlreadySatisfied({
-          alreadySatisfied: attempt.alreadySatisfied,
-          headBefore: attemptHeadBefore,
-          headNow: await readGitHead(pi, cwd),
-          treeStatus: await readTreeState(pi, cwd),
-        })
-      ) {
-        sealLastAttempt("landed");
-        behavior.status = "done";
-        result.satisfiedWithoutCommit.push(behavior.id);
-        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): already satisfied`);
-        state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
-        state.lastHalt = undefined;
-        saveState(pi, state);
-        updateUi(state, ctx);
-        ctx.ui.notify(`${behavior.id} already satisfied at HEAD — no commit needed`, "info");
-        break;
-      }
-
-      // Manual behaviors pause before commit for human verification (T3).
-      // The kept-alive child stays available for mid-pause steering; once
-      // the pause closes (approve or HITL timeout), it is shut down and the
-      // commit runs. A timeout defers the behavior to pendingManualChecks
-      // after the commit lands (T5).
-      let pauseOutcome: PauseOutcome | undefined;
-      if (behavior.kind === "manual" && attempt.client) {
-        pauseOutcome = await openVerificationPause(ctx, behavior);
-        await attempt.client.shutdown(2_000);
-        if (getActiveUnitClient() === attempt.client) setActiveUnitClient(undefined);
-      }
-
-      const subject = pickCommitSubject(attempt, behavior);
-      ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
-      const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry);
-      // T8: the commit-gate verdict seals the last attempt's outcome in
-      // the halt report's attempt table (landed attempts reset with the
-      // next behavior's history).
-      if (commit.outcome !== null) sealLastAttempt(commit.outcome.kind);
-
-      if (commit.outcome === null) {
-        landedCommits.push(subject);
-        behavior.status = "done";
-        if (pauseOutcome?.timedOut) {
-          const check: PendingManualCheck = {
-            behaviorId: behavior.id,
-            description: behavior.description,
-          };
-          state.pendingManualChecks = [...(state.pendingManualChecks ?? []), check];
-          result.pendingManualChecks = [...(result.pendingManualChecks ?? []), check];
-        }
-        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): landed`);
-        state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
-        state.lastHalt = undefined;
-        saveState(pi, state);
-        updateUi(state, ctx);
-        ctx.ui.notify(`Landed commit for ${behavior.id}: ${subject}`, "info");
-        break;
-      }
-
-      if (commit.outcome.kind === "test-guard") {
-        return halt(
-          behavior.id,
-          `Staged-diff guard blocked the commit for ${behavior.id} — tests are the specification. ` +
-            `If the contract requires updating or removing test paths, re-declare them via ` +
-            `/discuss -> /finalize listing those paths in files, then /implement resumes.\n\n` +
-            commit.outcome.investigation,
-        );
-      }
-
-      if (commit.outcome.kind === "commit-timeout") {
-        return halt(
-          behavior.id,
-          `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms ` +
-            `(PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. ` +
-            `Raise the budget or scope the project's pre-commit hooks.`,
-        );
-      }
-
-      if (retry > RETRY_BUDGET) {
-        const detail =
-          commit.outcome.kind === "hook-rejected"
-            ? `pre-commit hook rejected the commit for ${behavior.id} after ${RETRY_BUDGET} retries`
-            : `no changes detected for ${behavior.id} after ${RETRY_BUDGET} retries`;
-        return halt(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
-      }
-
-      ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-      taskText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
-      attempt = await runAndRecord({ behaviorId: behavior.id, taskText, kind: behavior.kind });
-      result.unitsRun++;
-      retry++;
-    }
+    if (halted) return halted;
   }
 
   const refusal = evaluateCompletionGate(state);
@@ -608,4 +283,3 @@ export async function runOrchestratedImplement(
   result.complete = true;
   return result;
 }
-
