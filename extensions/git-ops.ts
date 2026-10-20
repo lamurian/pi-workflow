@@ -5,7 +5,7 @@ import {
   classifyStagedDiff,
   type GateOutcome,
 } from "./commit-gate.ts";
-import type { ImplementerReport } from "./subagent-runner.ts";
+import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, TaskContract } from "./state.ts";
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────

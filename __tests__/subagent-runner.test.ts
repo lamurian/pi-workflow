@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import type { AgentConfig } from "../extensions/subagent-runner.ts";
+import type { AgentConfig } from "../extensions/scout-runner.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // createTimeoutSignal — combined timeout + parent signal
@@ -8,7 +8,7 @@ import type { AgentConfig } from "../extensions/subagent-runner.ts";
 
 describe("createTimeoutSignal", () => {
   it("creates signal that aborts after timeout", async () => {
-    const { createTimeoutSignal } = await import("../extensions/subagent-runner.ts");
+    const { createTimeoutSignal } = await import("../extensions/process-utils.ts");
     const { signal, clear } = createTimeoutSignal(10);
 
     // Before timeout: signal is not aborted
@@ -22,7 +22,7 @@ describe("createTimeoutSignal", () => {
   });
 
   it("clear prevents the timeout from firing", async () => {
-    const { createTimeoutSignal } = await import("../extensions/subagent-runner.ts");
+    const { createTimeoutSignal } = await import("../extensions/process-utils.ts");
     const { signal, clear } = createTimeoutSignal(10);
 
     clear(); // cancel before timeout
@@ -32,7 +32,7 @@ describe("createTimeoutSignal", () => {
   });
 
   it("immediately aborts when parent signal is already aborted", async () => {
-    const { createTimeoutSignal } = await import("../extensions/subagent-runner.ts");
+    const { createTimeoutSignal } = await import("../extensions/process-utils.ts");
     const parent = AbortSignal.abort();
     const { signal, clear } = createTimeoutSignal(10_000, parent);
 
@@ -41,7 +41,7 @@ describe("createTimeoutSignal", () => {
   });
 
   it("aborts when parent signal aborts before timeout", async () => {
-    const { createTimeoutSignal } = await import("../extensions/subagent-runner.ts");
+    const { createTimeoutSignal } = await import("../extensions/process-utils.ts");
     const controller = new AbortController();
     const { signal, clear } = createTimeoutSignal(10_000, controller.signal);
 
@@ -59,7 +59,7 @@ describe("createTimeoutSignal", () => {
 
 describe("buildScoutArgs", () => {
   it("includes lean flags: --no-extensions --no-skills --no-context-files --offline", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -79,7 +79,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("does NOT pass --model flag (uses user default)", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -96,7 +96,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("includes --thinking minimal to cap scout latency", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -115,7 +115,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("preserves required flags: --mode json -p --no-session", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -135,7 +135,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("includes --tools when agent has tools defined", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -154,7 +154,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("includes --append-system-prompt followed by the system prompt TEXT (not a file path)", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -177,7 +177,7 @@ describe("buildScoutArgs", () => {
   });
 
   it("appends the task as the final positional argument", async () => {
-    const { buildScoutArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",
@@ -200,12 +200,12 @@ describe("buildScoutArgs", () => {
 
 describe("getScoutTimeoutMs", () => {
   it("defaults to 120000 when no env var is set", async () => {
-    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getScoutTimeoutMs } = await import("../extensions/scout-runner.ts");
     assert.equal(getScoutTimeoutMs({}), 120_000, "default budget should be 120s");
   });
 
   it("honors PI_EXPLORE_TIMEOUT_MS when set", async () => {
-    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getScoutTimeoutMs } = await import("../extensions/scout-runner.ts");
     assert.equal(
       getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "30000" }),
       30_000,
@@ -214,7 +214,7 @@ describe("getScoutTimeoutMs", () => {
   });
 
   it("falls back to the default for invalid values", async () => {
-    const { getScoutTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getScoutTimeoutMs } = await import("../extensions/scout-runner.ts");
     assert.equal(getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "abc" }), 120_000);
     assert.equal(getScoutTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "-5" }), 120_000);
   });
@@ -226,12 +226,12 @@ describe("getScoutTimeoutMs", () => {
 
 describe("getImplementerTimeoutMs (T8)", () => {
   it("defaults to 900000 — implementer units are far heavier than scouts", async () => {
-    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(getImplementerTimeoutMs({}), 900_000);
   });
 
   it("honors PI_IMPLEMENT_TIMEOUT_MS when set", async () => {
-    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(
       getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "90000" }),
       90_000,
@@ -239,7 +239,7 @@ describe("getImplementerTimeoutMs (T8)", () => {
   });
 
   it("is independent of PI_EXPLORE_TIMEOUT_MS (T8)", async () => {
-    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(
       getImplementerTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "1000" }),
       900_000,
@@ -248,7 +248,7 @@ describe("getImplementerTimeoutMs (T8)", () => {
   });
 
   it("falls back to the default for invalid values", async () => {
-    const { getImplementerTimeoutMs } = await import("../extensions/subagent-runner.ts");
+    const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 900_000);
     assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 900_000);
   });
@@ -318,7 +318,7 @@ describe("runScoutSubprocess integration (real pi)", () => {
         "integration test — set PI_RUN_INTEGRATION=1 to run against a live pi",
     },
     async () => {
-      const { runScoutSubprocess } = await import("../extensions/subagent-runner.ts");
+      const { runScoutSubprocess } = await import("../extensions/scout-runner.ts");
 
       const agent: AgentConfig = {
         name: "scout",
@@ -359,7 +359,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
   const TASK = "Implement behavior T3: add retry backoff.";
 
   it("includes the lean flag set in rpc mode", async () => {
-    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const args = buildImplementerArgs(SYSTEM);
 
     assert.ok(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "rpc");
@@ -375,7 +375,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
 
   it("restricts --tools to read,write,edit,bash (T8)", async () => {
     delete process.env.PI_IMPLEMENTER_TOOLS;
-    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const args = buildImplementerArgs(SYSTEM);
 
     const idx = args.indexOf("--tools");
@@ -391,7 +391,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
   it("honors PI_IMPLEMENTER_TOOLS as a full override (T8)", async () => {
     process.env.PI_IMPLEMENTER_TOOLS = "read,write";
     try {
-      const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+      const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
       const args = buildImplementerArgs(SYSTEM);
       const idx = args.indexOf("--tools");
       assert.equal(args[idx + 1], "read,write", "env override must replace the default list");
@@ -401,7 +401,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
   });
 
   it("sources --append-system-prompt from content/unit-prompt.md", async () => {
-    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const { loadContent } = await import("../extensions/utils.ts");
     const unitPrompt = await loadContent("unit-prompt.md");
 
@@ -413,7 +413,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
   });
 
   it("passes no positional task prompt (the task travels over stdin)", async () => {
-    const { buildImplementerArgs } = await import("../extensions/subagent-runner.ts");
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const args = buildImplementerArgs(SYSTEM);
     assert.ok(!args.includes(TASK), "task text must not appear anywhere in argv");
     assert.equal(
@@ -433,7 +433,7 @@ describe("parseImplementerReport (T5)", () => {
   }
 
   it("extracts summary and suggestedCommit from the last assistant message", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = [
       assistantEvent("First pass, still working."),
       assistantEvent(
@@ -448,7 +448,7 @@ describe("parseImplementerReport (T5)", () => {
   });
 
   it("uses the final message when no JSON block is present", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = assistantEvent("Implemented the behavior and tests pass.");
 
     const report = parseImplementerReport(stdout);
@@ -458,7 +458,7 @@ describe("parseImplementerReport (T5)", () => {
   });
 
   it("tolerates malformed JSON lines between events", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = [
       "{{{ not json",
       assistantEvent('ok\n```json\n{"summary": "touched one file", "suggestedCommit": "fix: handle null head"}\n```'),
@@ -472,7 +472,7 @@ describe("parseImplementerReport (T5)", () => {
   });
 
   it("tolerates killed processes: empty and partial output do not throw", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     assert.deepEqual(parseImplementerReport(""), { summary: "" });
     assert.deepEqual(parseImplementerReport("\n\n"), { summary: "" });
@@ -482,7 +482,7 @@ describe("parseImplementerReport (T5)", () => {
   });
 
   it("falls back to the whole message when the JSON block is malformed", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = assistantEvent('Tried.\n```json\n{"summary": "broken\n```');
 
     const report = parseImplementerReport(stdout);
@@ -505,7 +505,7 @@ describe("parseImplementerReport blockedCommands", () => {
   }
 
   it("parses valid blockedCommands entries alongside summary and suggestedCommit", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = reportWith(
       JSON.stringify({
         summary: "implemented header, blocked on verification",
@@ -528,7 +528,7 @@ describe("parseImplementerReport blockedCommands", () => {
   });
 
   it("returns no blockedCommands when the report omits the field", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = reportWith(JSON.stringify({ summary: "plain report", suggestedCommit: "feat: x" }));
 
     const report = parseImplementerReport(stdout);
@@ -538,7 +538,7 @@ describe("parseImplementerReport blockedCommands", () => {
   });
 
   it("drops the whole field when blockedCommands is not an array", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = reportWith(
       JSON.stringify({ summary: "s", blockedCommands: { command: "ls", mustRunNow: true } }),
     );
@@ -550,7 +550,7 @@ describe("parseImplementerReport blockedCommands", () => {
   });
 
   it("drops malformed entries but keeps valid ones, never throws", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
     const stdout = reportWith(
       JSON.stringify({
         summary: "s",
@@ -573,7 +573,7 @@ describe("parseImplementerReport blockedCommands", () => {
   });
 
   it("keeps the empty-output and broken-block fallback contracts unchanged", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     assert.deepEqual(parseImplementerReport(""), { summary: "" });
     const broken = reportWith('{"summary": "broken');
@@ -596,7 +596,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   }
 
   it("parses status partial and complete", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const partial = parseImplementerReport(
       reportWith(JSON.stringify({ summary: "half done", status: "partial" })),
@@ -611,7 +611,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("ignores status values outside complete|partial", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const report = parseImplementerReport(
       reportWith(JSON.stringify({ summary: "s", status: "failed", nextSteps: "keep going" })),
@@ -621,7 +621,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("keeps string findings and drops non-string entries", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const report = parseImplementerReport(
       reportWith(
@@ -636,7 +636,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("omits findings when the array is empty or not an array", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     assert.equal(parseImplementerReport(reportWith(JSON.stringify({ summary: "s", findings: [] }))).findings, undefined);
     assert.equal(
@@ -650,7 +650,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("parses nextSteps only when a string", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const ok = parseImplementerReport(
       reportWith(JSON.stringify({ summary: "s", nextSteps: "finish the ledger wiring" })),
@@ -664,7 +664,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("parses alreadySatisfied only when a boolean", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const yes = parseImplementerReport(
       reportWith(JSON.stringify({ summary: "s", alreadySatisfied: true })),
@@ -678,7 +678,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("parses all new fields together alongside the old ones", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     const report = parseImplementerReport(
       reportWith(
@@ -706,7 +706,7 @@ describe("parseImplementerReport report schema (T2)", () => {
   });
 
   it("reports without the new fields parse exactly as before", async () => {
-    const { parseImplementerReport } = await import("../extensions/subagent-runner.ts");
+    const { parseImplementerReport } = await import("../extensions/implementer-report.ts");
 
     assert.deepEqual(parseImplementerReport(""), { summary: "" });
     const report = parseImplementerReport(
@@ -719,7 +719,7 @@ describe("parseImplementerReport report schema (T2)", () => {
 
 describe("runScoutSubprocess kill handling", () => {
   it("rejects with the abort reason when killed by signal", async () => {
-    const { runScoutSubprocess } = await import("../extensions/subagent-runner.ts");
+    const { runScoutSubprocess } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
       name: "test-agent",

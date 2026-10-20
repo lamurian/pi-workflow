@@ -1,12 +1,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { complete } from "@earendil-works/pi-ai";
 import { loadContent, getPackageRoot } from "./utils.ts";
-import {
-  discoverEmbeddedAgents,
-  mapWithConcurrencyLimit,
-  runScoutSubprocess,
-  type ScoutResult,
-} from "./subagent-runner.ts";
+import { discoverEmbeddedAgents, runScoutSubprocess, type ScoutResult } from "./scout-runner.ts";
+import { mapWithConcurrencyLimit } from "./process-utils.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 

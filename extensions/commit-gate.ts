@@ -1,5 +1,5 @@
 import type { Behavior, TaskContract } from "./state.ts";
-import type { ImplementerReport } from "./subagent-runner.ts";
+import type { ImplementerReport } from "./implementer-report.ts";
 import { isTestPath, LANG_PROFILES } from "./test-scan.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────

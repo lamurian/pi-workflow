@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { buildImplementerArgs, getPiInvocation } from "./subagent-runner.ts";
+import { buildImplementerArgs } from "./implementer-report.ts";
+import { getPiInvocation } from "./process-utils.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 

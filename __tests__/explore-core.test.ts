@@ -105,7 +105,7 @@ describe("explore content files", () => {
 
 describe("discoverEmbeddedAgents", () => {
   it("discovers scout agent from content/agents/ directory", async () => {
-    const { discoverEmbeddedAgents } = await import("../extensions/subagent-runner.ts");
+    const { discoverEmbeddedAgents } = await import("../extensions/scout-runner.ts");
     const agents = discoverEmbeddedAgents(PACKAGE_ROOT);
 
     assert.ok(agents.length >= 1, "should discover at least one agent");
@@ -117,7 +117,7 @@ describe("discoverEmbeddedAgents", () => {
   });
 
   it("returns agent with correct AgentConfig shape", async () => {
-    const { discoverEmbeddedAgents } = await import("../extensions/subagent-runner.ts");
+    const { discoverEmbeddedAgents } = await import("../extensions/scout-runner.ts");
     const agents = discoverEmbeddedAgents(PACKAGE_ROOT);
     const scout = agents.find((a: { name: string }) => a.name === "scout");
     assert.ok(scout);
@@ -130,7 +130,7 @@ describe("discoverEmbeddedAgents", () => {
   });
 
   it("returns empty array when agents directory does not exist", async () => {
-    const { discoverEmbeddedAgents } = await import("../extensions/subagent-runner.ts");
+    const { discoverEmbeddedAgents } = await import("../extensions/scout-runner.ts");
     const agents = discoverEmbeddedAgents("/nonexistent/path");
     assert.deepEqual(agents, []);
   });
@@ -142,14 +142,14 @@ describe("discoverEmbeddedAgents", () => {
 
 describe("mapWithConcurrencyLimit", () => {
   it("runs all items and returns results in order", async () => {
-    const { mapWithConcurrencyLimit } = await import("../extensions/subagent-runner.ts");
+    const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     const input = [1, 2, 3, 4, 5];
     const results = await mapWithConcurrencyLimit(input, 2, async (n) => n * 2);
     assert.deepEqual(results, [2, 4, 6, 8, 10]);
   });
 
   it("respects max concurrency by tracking concurrent runs", async () => {
-    const { mapWithConcurrencyLimit } = await import("../extensions/subagent-runner.ts");
+    const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     let maxConcurrent = 0;
     let currentConcurrent = 0;
 
@@ -170,19 +170,19 @@ describe("mapWithConcurrencyLimit", () => {
   });
 
   it("handles empty input", async () => {
-    const { mapWithConcurrencyLimit } = await import("../extensions/subagent-runner.ts");
+    const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     const results = await mapWithConcurrencyLimit([], 4, async (n) => n);
     assert.deepEqual(results, []);
   });
 
   it("handles single item", async () => {
-    const { mapWithConcurrencyLimit } = await import("../extensions/subagent-runner.ts");
+    const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     const results = await mapWithConcurrencyLimit([42], 4, async (n) => n);
     assert.deepEqual(results, [42]);
   });
 
   it("when concurrency > items, still works", async () => {
-    const { mapWithConcurrencyLimit } = await import("../extensions/subagent-runner.ts");
+    const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     const results = await mapWithConcurrencyLimit([1, 2], 10, async (n) => n);
     assert.deepEqual(results, [1, 2]);
   });
@@ -285,7 +285,7 @@ describe("runScoutSubprocess backup timer", () => {
     // SIGKILL backup timer. Without .unref(), this timer keeps the event
     // loop alive, causing the test suite to hang for ~35s.
     const packageRoot = resolve(import.meta.dirname!, "..");
-    const { runScoutSubprocess, discoverEmbeddedAgents } = await import("../extensions/subagent-runner.ts");
+    const { runScoutSubprocess, discoverEmbeddedAgents } = await import("../extensions/scout-runner.ts");
     const agents = discoverEmbeddedAgents(packageRoot);
     const scout = agents.find((a: { name: string }) => a.name === "scout")!;
     assert.ok(scout, "scout agent must be found for the test");

@@ -14,7 +14,7 @@ import {
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
-import type { ImplementerReport } from "../extensions/subagent-runner.ts";
+import type { ImplementerReport } from "../extensions/implementer-report.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,

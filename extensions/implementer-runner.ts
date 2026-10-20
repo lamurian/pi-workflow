@@ -1,12 +1,6 @@
 import { spawn } from "node:child_process";
-import {
-  createTimeoutSignal,
-  getPiInvocation,
-  getImplementerTimeoutMs,
-  lastAssistantText,
-  parseImplementerReport,
-  type ImplementerReport,
-} from "./subagent-runner.ts";
+import { createTimeoutSignal, getPiInvocation, getImplementerTimeoutMs } from "./process-utils.ts";
+import { lastAssistantText, parseImplementerReport, type ImplementerReport } from "./implementer-report.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 

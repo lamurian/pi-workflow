@@ -5,7 +5,7 @@ import { appendFindings, renderFindingsSection, type Finding } from "./findings-
 import { deriveDiagnosis, type AttemptRecord } from "./halt-report.ts";
 import { renderPreviousHaltSection } from "./resume-context.ts";
 import { runImplementerUnit, type UnitTask } from "./implementer-runner.ts";
-import type { BlockedCommand, ImplementerReport } from "./subagent-runner.ts";
+import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
 import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
