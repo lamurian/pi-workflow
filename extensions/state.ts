@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { shortSlug } from "./utils.ts";
 import type { Finding } from "./findings-ledger.ts";
 import type { AttemptRecord } from "./halt-report.ts";
+import { isWidgetVisible } from "./widget-visibility.ts";
 
 /** Valid phases of the workflow state machine. */
 export type WorkflowPhase =
@@ -146,14 +147,6 @@ export interface TestResults {
 
 const STATE_CUSTOM_TYPE = "workflow-state";
 
-/**
- * Whether the workflow widget is currently shown.
- *
- * In-memory UI state only: hidden by default, never persisted, resets on
- * session reload. Toggled by the /task command (extensions/index.ts).
- */
-let widgetVisible = false;
-
 /** Per-phase widget header line. */
 const PHASE_HEADERS: Record<string, string> = {
   discussing: "◉ discussing — read-only planning",
@@ -241,38 +234,15 @@ function buildTitle(state: WorkflowState): string {
 }
 
 /**
- * Toggle workflow widget visibility.
- *
- * Flips the in-memory `widgetVisible` flag and returns the new value.
- * The caller re-renders via updateUi afterwards. State is not
- * persisted: a session reload starts hidden again.
- *
- * @returns true when the widget is now visible.
- */
-export function toggleWidgetVisible(): boolean {
-  widgetVisible = !widgetVisible;
-  return widgetVisible;
-}
-
-/**
- * Reset widget visibility to hidden.
- *
- * Called on session_start so every session — including a resume in the
- * same process — starts with the workflow widget hidden.
- */
-export function resetWidgetVisibility(): void {
-  widgetVisible = false;
-}
-
-/**
  * Update the UI status, widget, and session title to reflect the phase.
  *
  * Uses only the string-array form of setWidget so it works in RPC mode
  * (paseo). The widget's first line is a phase header so the current
  * state is visible at a glance.
  *
- * The widget itself is gated by the module-level `widgetVisible` flag:
- * hidden by default, toggled by the /task command. setStatus and
+ * The widget itself is gated by the `widgetVisible` flag in
+ * widget-visibility.ts: hidden by default, toggled by the /task
+ * command. setStatus and
  * setTitle stay unconditional, so the footer phase indicator remains
  * visible even while the widget is hidden.
  *
@@ -295,7 +265,7 @@ export function updateUi(state: WorkflowState | null, ctx: ExtensionContext): vo
   ctx.ui.setTitle(buildTitle(state));
 
   // Widget visibility gate: hidden by default; /task toggles it on.
-  if (!widgetVisible) {
+  if (!isWidgetVisible()) {
     ctx.ui.setWidget("workflow-todos", undefined);
     return;
   }

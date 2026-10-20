@@ -1,7 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { toggleWidgetVisible } from "../extensions/state.ts";
+import { toggleWidgetVisible } from "../extensions/widget-visibility.ts";
 
 function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   const calls: Record<string, unknown[]> = {};

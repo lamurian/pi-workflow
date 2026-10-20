@@ -6,10 +6,12 @@ import {
   transitionTo,
   loadState,
   updateUi,
-  toggleWidgetVisible,
-  resetWidgetVisibility,
   type WorkflowState,
 } from "../extensions/state.ts";
+import {
+  toggleWidgetVisible,
+  resetWidgetVisibility,
+} from "../extensions/widget-visibility.ts";
 import { getPackageRoot } from "../extensions/utils.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 

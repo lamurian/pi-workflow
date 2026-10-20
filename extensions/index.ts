@@ -1,11 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { loadState, updateUi } from "./state.ts";
 import {
-  loadState,
-  updateUi,
   toggleWidgetVisible,
   resetWidgetVisibility,
-} from "./state.ts";
+} from "./widget-visibility.ts";
 import { DISCUSS_BLOCKED_TOOLS } from "./tools.ts";
 import { buildPhasePrompt } from "./prompt.ts";
 import { runDiscussion } from "./discuss.ts";
