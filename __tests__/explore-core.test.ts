@@ -419,7 +419,7 @@ describe("decomposeInstruction", () => {
 
 describe("synthesizeResults", () => {
   it("returns fallback summary when model is null", async () => {
-    const { synthesizeResults } = await import("../extensions/explore-core.ts");
+    const { synthesizeResults } = await import("../extensions/explore-synthesis.ts");
     const ctx = mockCtx("/tmp/test", {
       model: null as unknown as ExtensionContext["model"],
     });
@@ -440,7 +440,7 @@ describe("synthesizeResults", () => {
   });
 
   it("includes partial results when some scouts failed", async () => {
-    const { synthesizeResults } = await import("../extensions/explore-core.ts");
+    const { synthesizeResults } = await import("../extensions/explore-synthesis.ts");
     const ctx = mockCtx("/tmp/test", {
       model: null as unknown as ExtensionContext["model"],
     });
@@ -468,7 +468,7 @@ describe("synthesizeResults", () => {
   });
 
   it("fallback summary includes file paths from succeeded scouts", async () => {
-    const { synthesizeResults } = await import("../extensions/explore-core.ts");
+    const { synthesizeResults } = await import("../extensions/explore-synthesis.ts");
     const ctx = mockCtx("/tmp/test", {
       model: null as unknown as ExtensionContext["model"],
     });
@@ -488,7 +488,7 @@ describe("synthesizeResults", () => {
   });
 
   it("returns an explicit no-output summary when ALL scouts produced nothing (skips LLM)", async () => {
-    const { synthesizeResults } = await import("../extensions/explore-core.ts");
+    const { synthesizeResults } = await import("../extensions/explore-synthesis.ts");
 
     const ctx = mockCtx("/tmp/test", {
       modelRegistry: {

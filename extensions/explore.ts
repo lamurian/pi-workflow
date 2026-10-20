@@ -3,9 +3,9 @@ import { Type } from "typebox";
 import {
   decomposeInstruction,
   runParallelExploration,
-  synthesizeResults,
   createLoader,
 } from "./explore-core.ts";
+import { synthesizeResults } from "./explore-synthesis.ts";
 
 // ─── /explore command registration ────────────────────────────────────────────
 
