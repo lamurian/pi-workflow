@@ -3,7 +3,7 @@ import { saveState, updateUi, type WorkflowState, type TaskContract, type Pendin
 import { createToolCallCollector, renderToolCallDigest } from "./findings-ledger.ts";
 import { buildContinuationTaskText, classifyProgress, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError } from "./unit-progress.ts";
 import { classifyAttemptOutcome, truncateAttemptText, type AttemptOutcome, type AttemptRecord } from "./halt-report.ts";
-import { getActiveUnitClient, setActiveUnitClient, type UnitTask } from "./implementer-runner.ts";
+import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts"; import type { UnitTask } from "./implementer-runner.ts";
 import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
 import { relayImplementerEvent } from "./implementer-activity.ts";
 import { openVerificationPause, type PauseOutcome } from "./hitl-pause.ts";

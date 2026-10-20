@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { readFileSync } from "node:fs";
-import { getActiveUnitClient, shutdownActiveClient } from "./implementer-runner.ts";
+import { getActiveUnitClient, shutdownActiveClient } from "./unit-client-registry.ts";
 import type { RpcImage } from "./rpc-unit-client.ts";
 import type { Behavior } from "./state.ts";
 

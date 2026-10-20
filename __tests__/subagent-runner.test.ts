@@ -745,7 +745,7 @@ describe("runScoutSubprocess kill handling", () => {
 
 describe("runRawPiProcess diagnostics (T7)", () => {
   it("reports the ENOENT message when PI_BIN names a missing binary", async () => {
-    const { runRawPiProcess } = await import("../extensions/implementer-runner.ts");
+    const { runRawPiProcess } = await import("../extensions/raw-process.ts");
     const prev = process.env.PI_BIN;
     process.env.PI_BIN = "/nonexistent/pi-binary-for-test";
     try {
@@ -763,7 +763,7 @@ describe("runRawPiProcess diagnostics (T7)", () => {
   });
 
   it("names the timeout on stderr when the kill signal fires", async () => {
-    const { runRawPiProcess } = await import("../extensions/implementer-runner.ts");
+    const { runRawPiProcess } = await import("../extensions/raw-process.ts");
     const prev = process.env.PI_BIN;
     process.env.PI_BIN = "node";
     try {

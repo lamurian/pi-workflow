@@ -30,7 +30,7 @@ import {
   shutdownActiveClient,
   setActiveUnitClient,
   getActiveUnitClient,
-} from "../extensions/implementer-runner.ts";
+} from "../extensions/unit-client-registry.ts";
 import { saveState, loadState } from "../extensions/state.ts";
 import type { RpcUnitClient, RpcImage } from "../extensions/rpc-unit-client.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
