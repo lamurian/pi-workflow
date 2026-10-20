@@ -254,7 +254,7 @@ describe("getImplementerTimeoutMs (T8)", () => {
   });
 
   it("retry text and unit prompt say the 900 s default", async () => {
-    const { buildRetryTask } = await import("../extensions/implement-loop.ts");
+    const { buildRetryTask } = await import("../extensions/unit-task-text.ts");
     const { loadContent } = await import("../extensions/utils.ts");
     const task: import("../extensions/state.ts").TaskContract = {
       title: "T",

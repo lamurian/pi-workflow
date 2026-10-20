@@ -8,12 +8,12 @@ import {
   composeHaltReport,
 } from "../extensions/implement.ts";
 import {
-  readGitHead,
   runOrchestratedImplement,
-  buildRetryTask,
   type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
+import { readGitHead } from "../extensions/git-ops.ts";
+import { buildRetryTask } from "../extensions/unit-task-text.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/subagent-runner.ts";
 import type {

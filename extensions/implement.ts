@@ -14,15 +14,16 @@ import { evaluateCompletionGate, renderTaskContract } from "./task-contract.ts";
 import { renderHaltReport } from "./halt-report.ts";
 import {
   runOrchestratedImplement,
-  buildEngineerNoteSection,
-  setUnitPrompt,
-  readGitHead,
-  cleanupOrchestration,
-  formatImplementerActivity,
-  type ImplementerActivityData,
   type OrchestratorResult,
   type UnitRunner,
 } from "./implement-loop.ts";
+import { buildEngineerNoteSection, setUnitPrompt } from "./unit-task-text.ts";
+import { readGitHead } from "./git-ops.ts";
+import { cleanupOrchestration } from "./hitl-pause.ts";
+import {
+  formatImplementerActivity,
+  type ImplementerActivityData,
+} from "./implementer-activity.ts";
 
 /**
  * Parse `/implement` arguments into a mode flag and an engineer's note.

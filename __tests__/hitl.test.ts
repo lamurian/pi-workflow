@@ -6,20 +6,24 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
+  runOrchestratedImplement,
+  type OrchestratorResult,
+  type UnitRunner,
+} from "../extensions/implement-loop.ts";
+import {
   relayImplementerEvent,
   formatImplementerActivity,
-  runOrchestratedImplement,
+} from "../extensions/implementer-activity.ts";
+import {
   runApprove,
   runSteer,
   handleWorkflowInput,
   cleanupOrchestration,
   getHitlWindow,
   setHitlWindow,
-  type OrchestratorResult,
-  type UnitRunner,
-} from "../extensions/implement-loop.ts";
+  getHitlTimeoutMs,
+} from "../extensions/hitl-pause.ts";
 import { registerImplementerActivityRenderer, composeCompletionReport, runImplement } from "../extensions/implement.ts";
-import { getHitlTimeoutMs } from "../extensions/implement-loop.ts";
 import {
   shutdownActiveClient,
   setActiveUnitClient,

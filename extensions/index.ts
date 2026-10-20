@@ -15,7 +15,7 @@ import {
   registerCompleteImplementationTool,
   registerImplementerActivityRenderer,
 } from "./implement.ts";
-import { runApprove, runSteer, cleanupOrchestration } from "./implement-loop.ts";
+import { runApprove, runSteer, cleanupOrchestration } from "./hitl-pause.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { getSkillsDir } from "./utils.ts";
