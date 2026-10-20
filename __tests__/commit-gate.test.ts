@@ -5,10 +5,10 @@ import {
   buildFixTask,
   buildInvestigation,
   classifyCommit,
-  classifyStagedDiff,
   detectFailingStage,
   type GateInput,
 } from "../extensions/commit-gate.ts";
+import { classifyStagedDiff } from "../extensions/staged-diff-guard.ts";
 import type { Behavior, TaskContract } from "../extensions/state.ts";
 
 const BEHAVIOR: Behavior = {

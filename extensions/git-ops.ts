@@ -1,10 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { computeTreeFingerprint } from "./unit-progress.ts";
-import {
-  classifyCommit,
-  classifyStagedDiff,
-  type GateOutcome,
-} from "./commit-gate.ts";
+import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
+import { classifyStagedDiff } from "./staged-diff-guard.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, TaskContract } from "./state.ts";
 
