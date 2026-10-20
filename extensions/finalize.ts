@@ -4,7 +4,9 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
 import { validateTask, preserveDoneStatuses } from "./task-contract.ts";
-import { isTestPath, deriveMatches, crossCheck, type DeriveResult } from "./test-scan.ts";
+import { isTestPath } from "./test-scan-profiles.ts";
+import { deriveMatches, type DeriveResult } from "./test-scan-derive.ts";
+import { crossCheck } from "./test-scan-check.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
 
@@ -36,7 +38,7 @@ function readCapped(full: string): string | null {
  * Enumerates files via `find` (fixed excludes), reads matched test files and
  * contract entries JS-side (size caps, binary sniff), derives per-entry
  * findings with the matched language profile, and cross-checks them against
- * the declared files. Pure decision logic lives in test-scan.ts.
+ * the declared files. Pure decision logic lives in the test-scan modules.
  *
  * @param pi    - ExtensionAPI reference (for exec access).
  * @param cwd   - Working directory to scan.

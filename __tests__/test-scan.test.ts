@@ -6,9 +6,9 @@ import {
   escapeRe,
   isTestPath,
   buildImportRegex,
-  deriveMatches,
-  crossCheck,
-} from "../extensions/test-scan.ts";
+} from "../extensions/test-scan-profiles.ts";
+import { deriveMatches } from "../extensions/test-scan-derive.ts";
+import { crossCheck } from "../extensions/test-scan-check.ts";
 import {
   renderEvidence,
   BASENAME_FANOUT_CAP,
