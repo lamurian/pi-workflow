@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { resolve, sep } from "node:path";
 import { computeTreeFingerprint } from "./unit-progress.ts";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
@@ -6,6 +7,27 @@ import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, TaskContract } from "./state.ts";
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Decide whether a behavior's sourceFile resolves outside the repo working tree.
+ *
+ * Behaviors whose sourceFile lives outside cwd (e.g. `../other-repo/x.go`) can
+ * never produce an in-repo diff: the commit gate would reject them as
+ * no-changes forever. Such behaviors are inferred never-commit — the loop
+ * marks them done from the unit report without any git add/commit.
+ *
+ * @param behavior - The behavior (its sourceFile is resolved against cwd).
+ * @param cwd      - The repository working directory.
+ * @returns True when sourceFile resolves to a path outside cwd; false when
+ *          the behavior has no sourceFile (keeps the commit path).
+ */
+export function isOutOfRepoBehavior(behavior: Behavior, cwd: string): boolean {
+  if (!behavior.sourceFile) return false;
+  const root = resolve(cwd);
+  const target = resolve(root, behavior.sourceFile);
+  if (target === root) return false;
+  return !target.startsWith(root + sep);
+}
 
 /**
  * Read the current git HEAD hash for a working directory.

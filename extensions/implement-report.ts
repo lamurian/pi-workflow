@@ -14,7 +14,10 @@ import type { TaskContract, WorkflowState } from "./state.ts";
  * "Deferred commands" section (manual, run outside the sandbox) after the
  * behavior list. A result with a non-empty satisfiedWithoutCommit (T11a)
  * renders a "Satisfied without a new commit:" section after the behavior
- * list; the section is omitted when empty or absent.
+ * list; the section is omitted when empty or absent. A result with a
+ * non-empty leftUncommitted renders a "Left uncommitted — commit these
+ * manually" section listing behavior id + sourceFile path; omitted when
+ * empty or absent.
  *
  * @param result - The settled orchestrator outcome (complete).
  * @param task   - The task contract (provides the done behavior ids).
@@ -42,6 +45,12 @@ export function composeCompletionReport(
     lines.push("", "Satisfied without a new commit:");
     for (const id of result.satisfiedWithoutCommit) {
       lines.push(`- ${id}`);
+    }
+  }
+  if (result.leftUncommitted?.length) {
+    lines.push("", "Left uncommitted — commit these manually:");
+    for (const entry of result.leftUncommitted) {
+      lines.push(`- ${entry.behaviorId}: ${entry.sourceFile}`);
     }
   }
   if (result.pendingManualChecks?.length) {

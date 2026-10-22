@@ -7,7 +7,7 @@ import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry
 import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
 import { relayImplementerEvent } from "./implementer-activity.ts";
 import { openVerificationPause, type PauseOutcome } from "./hitl-pause.ts";
-import { commitAndGate, getCommitTimeoutMs, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
+import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 
@@ -230,6 +230,23 @@ export async function runBehaviorLoop(
       saveState(pi, state);
       updateUi(state, ctx);
       ctx.ui.notify(`${behavior.id} already satisfied at HEAD — no commit needed`, "info");
+      break;
+    }
+
+    // Out-of-repo behaviors (sourceFile resolves outside cwd) are inferred never-commit: no manual pause, no git add/commit — the commit gate would reject them as no-changes forever. The unit report is the verification. Placed after the alreadySatisfied short-circuit so that keeps precedence; unit errors/partials above still retry as usual.
+    if (isOutOfRepoBehavior(behavior, cwd)) {
+      sealLastAttempt("landed");
+      behavior.status = "done";
+      if (attempt.client) {
+        await attempt.client.shutdown(2_000);
+        if (getActiveUnitClient() === attempt.client) setActiveUnitClient(undefined);
+      }
+      result.leftUncommitted!.push({ behaviorId: behavior.id, sourceFile: behavior.sourceFile! });
+      ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): done (left uncommitted)`);
+      state.lastHalt = undefined;
+      saveState(pi, state);
+      updateUi(state, ctx);
+      ctx.ui.notify(`${behavior.id} done — left uncommitted (sourceFile outside repo: ${behavior.sourceFile}); commit it manually`, "info");
       break;
     }
 

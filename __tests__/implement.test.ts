@@ -14,9 +14,9 @@ import {
   type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
-import { readGitHead } from "../extensions/git-ops.ts";
+import { isOutOfRepoBehavior, readGitHead } from "../extensions/git-ops.ts";
 import { buildRetryTask } from "../extensions/unit-task-text.ts";
-import type { WorkflowState, TaskContract } from "../extensions/state.ts";
+import type { WorkflowState, TaskContract, Behavior } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/implementer-report.ts";
 import type {
   ExtensionAPI,
@@ -2989,5 +2989,173 @@ describe("engineer's note: halt/resume persistence", () => {
     }
     assert.equal(state.phase, "idle", "completion switches the phase to idle");
     assert.equal(state.engineerNote, undefined, "completion clears the replaced note too");
+  });
+});
+
+// ═══ out-of-repo behaviors: path-inferred never-commit ═══
+describe("out-of-repo behaviors skip the commit gate", () => {
+  const behaviorBase = { description: "d", expectedOutput: "e", kind: "test", status: "active" } as const;
+
+  it("isOutOfRepoBehavior resolves the sourceFile against cwd; no sourceFile keeps the commit path", () => {
+    assert.equal(
+      isOutOfRepoBehavior({ ...behaviorBase, id: "T1", sourceFile: "../gateway-sdk-go/service.go" }, "/tmp/test"),
+      true,
+      "a sibling-directory sourceFile is out of repo",
+    );
+    assert.equal(
+      isOutOfRepoBehavior({ ...behaviorBase, id: "T2", sourceFile: "src/a.ts" }, "/tmp/test"),
+      false,
+      "an in-repo sourceFile stays on the commit path",
+    );
+    assert.equal(
+      isOutOfRepoBehavior({ ...behaviorBase, id: "T3", sourceFile: "/abs/outside.go" }, "/tmp/test"),
+      true,
+      "an absolute path outside cwd is out of repo",
+    );
+    assert.equal(
+      isOutOfRepoBehavior({ ...behaviorBase, id: "T4" }, "/tmp/test"),
+      false,
+      "behaviors without sourceFile keep the commit path",
+    );
+  });
+
+  function mixedTask(): TaskContract {
+    return {
+      title: "Mixed Task",
+      instruction: "do things",
+      files: ["src/a.ts"],
+      done: "all green",
+      behaviors: [
+        {
+          id: "T1",
+          description: "outside behavior",
+          expectedOutput: "e1",
+          kind: "test",
+          status: "active",
+          sourceFile: "../gateway-sdk-go/service.go",
+        },
+        {
+          id: "T2",
+          description: "inside behavior",
+          expectedOutput: "e2",
+          kind: "test",
+          status: "active",
+          sourceFile: "src/a.ts",
+        },
+      ],
+    };
+  }
+
+  it("marks the out-of-repo behavior done with zero git add/commit for it, records leftUncommitted, and the in-repo behavior still commits", async () => {
+    const pi = mockPi();
+    const timeline: string[] = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "add") {
+        timeline.push("exec:git add");
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        timeline.push("exec:git commit");
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: mixedTask() };
+    const ctx = ctxWithState(state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      notifyCalls.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      timeline.push(`unit:${unit.behaviorId}`);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId === "T1" ? "outside" : "inside"} behavior`,
+      };
+    });
+
+    assert.equal(result.complete, true, "the run completes");
+    assert.equal(state.phase, "idle");
+    assert.ok(
+      state.task!.behaviors.every((b: Behavior) => b.status === "done"),
+      "both behaviors are marked done",
+    );
+
+    // No commit-gate exec between the out-of-repo unit run and the in-repo unit run.
+    const between = timeline.slice(timeline.indexOf("unit:T1"), timeline.indexOf("unit:T2"));
+    assert.ok(!between.includes("exec:git add"), "no git add for the out-of-repo behavior");
+    assert.ok(!between.includes("exec:git commit"), "no git commit for the out-of-repo behavior");
+    assert.equal(
+      timeline.filter((e) => e === "exec:git commit").length,
+      1,
+      "only the in-repo behavior lands a commit",
+    );
+
+    assert.deepEqual(
+      result.leftUncommitted,
+      [{ behaviorId: "T1", sourceFile: "../gateway-sdk-go/service.go" }],
+      "the out-of-repo behavior is recorded as left uncommitted",
+    );
+    assert.ok(
+      notifyCalls.some((m) => /T1/.test(m) && /left uncommitted/i.test(m)),
+      "a notification names the left-uncommitted behavior",
+    );
+
+    const report = composeCompletionReport(result, state.task!);
+    const section = report.slice(report.indexOf("Left uncommitted"));
+    assert.match(report, /Left uncommitted — commit these manually/);
+    assert.match(section, /T1: \.\.\/gateway-sdk-go\/service\.go/);
+    assert.doesNotMatch(section, /T2/, "only the out-of-repo behavior is listed");
+  });
+
+  it("an out-of-repo behavior never feeds the no-changes fix task on retry", async () => {
+    const pi = mockPi();
+    // Clean tree, HEAD never moves — the classic no-changes trigger for in-repo behaviors.
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Outside Only",
+        instruction: "do things",
+        files: ["src/a.ts"],
+        done: "all green",
+        behaviors: [
+          {
+            id: "T1",
+            description: "outside behavior",
+            expectedOutput: "e1",
+            kind: "test",
+            status: "active",
+            sourceFile: "../gateway-sdk-go/service.go",
+          },
+        ],
+      },
+    };
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.taskText);
+      return { summary: "implemented T1", suggestedCommit: "feat: outside" };
+    });
+
+    assert.equal(spawns.length, 1, "no fix-task retry is spawned for an out-of-repo behavior");
+    assert.doesNotMatch(spawns[0] ?? "", /No changes detected/, "no impossible-verdict retry text");
+    assert.equal(result.complete, true);
+    assert.deepEqual(result.leftUncommitted, [{ behaviorId: "T1", sourceFile: "../gateway-sdk-go/service.go" }]);
   });
 });

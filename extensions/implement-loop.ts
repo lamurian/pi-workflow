@@ -43,6 +43,8 @@ export interface OrchestratorResult {
   landedCommits: string[];
   /** Behaviors marked done without a commit via the alreadySatisfied flag (T11a). */
   satisfiedWithoutCommit: string[];
+  /** Out-of-repo behaviors (sourceFile resolves outside cwd) done but never committed. */
+  leftUncommitted?: Array<{ behaviorId: string; sourceFile: string }>;
   /** Populated when the loop halted early. */
   haltedOn?: string;
   /** Failure detail when the loop halted. */
@@ -138,6 +140,7 @@ export async function runOrchestratedImplement(
     unitsRun: 0,
     landedCommits,
     satisfiedWithoutCommit: [],
+    leftUncommitted: [],
     deferredCommands: [],
     pendingManualChecks: [],
   };
