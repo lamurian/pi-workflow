@@ -1,6 +1,15 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { runDiscussion, detectDiscussionTopic, getLatestAssistantMessage } from "../extensions/discuss.ts";
+import {
+  runImplement,
+  isOrchestrationInFlight,
+  cancelOrchestration,
+} from "../extensions/implement.ts";
+import type { OrchestratorResult, UnitRunner } from "../extensions/implement-loop.ts";
+import { getHitlWindow } from "../extensions/hitl-pause.ts";
+import { getActiveUnitClient, setActiveUnitClient } from "../extensions/unit-client-registry.ts";
+import type { RpcUnitClient } from "../extensions/rpc-unit-client.ts";
 import { buildPhasePrompt } from "../extensions/prompt.ts";
 import { loadContent, getPackageRoot } from "../extensions/utils.ts";
 import {
@@ -838,5 +847,195 @@ describe("before_agent_start stale-state prevention", () => {
     const prompt = await buildPhasePrompt("discussing");
     assert.match(prompt, /Phase: Discuss/);
     assert.match(prompt, /Do \*\*NOT\*\* write or edit any files/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// B2: /discuss cancels an in-flight orchestration
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Poll until the predicate is true, or throw after the timeout.
+ *
+ * @param predicate - Condition to wait for.
+ * @param timeoutMs - Maximum wait in milliseconds.
+ */
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) {
+      throw new Error("waitFor: condition not met within timeout");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+/**
+ * Minimal live-client stub recording shutdown calls.
+ *
+ * @param record     - Shared counters mutated by the stub.
+ * @param onShutdown - Optional callback invoked inside shutdown (releases test gates).
+ * @returns A fake RpcUnitClient.
+ */
+function fakeLiveClient(
+  record: { shutdowns: number },
+  onShutdown?: () => void,
+): RpcUnitClient {
+  return {
+    isAlive: () => true,
+    shutdown: async () => {
+      record.shutdowns++;
+      onShutdown?.();
+    },
+    kill: () => {},
+    steer: () => {},
+    onEvent: () => () => {},
+    onExit: () => () => {},
+    rawStdout: () => "",
+    stderrText: () => "",
+  } as unknown as RpcUnitClient;
+}
+
+/**
+ * Finalizing workflow state with one active behavior of the given kind.
+ *
+ * @param kind - Behavior kind (manual opens a verification pause).
+ * @returns The workflow state.
+ */
+function finalizingStateFor(kind: "test" | "manual"): WorkflowState {
+  return {
+    phase: "finalizing",
+    specText: "topic",
+    task: {
+      title: "My Task",
+      instruction: "do the thing",
+      files: ["src/a.ts"],
+      done: "tests pass",
+      behaviors: [
+        { id: "M1", description: "manual check", expectedOutput: "verified", kind, status: "active" },
+      ],
+    },
+  };
+}
+
+describe("runDiscussion cancels an in-flight orchestration (B2)", () => {
+  it("settles the open pause cancelled, shuts the child down, and sends no report", async () => {
+    const pi = mockPi();
+    const state = finalizingStateFor("manual");
+    const ctx = mockCtx("/tmp/test", state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    const record = { shutdowns: 0 };
+    const client = fakeLiveClient(record);
+    const runner: UnitRunner = async () => {
+      setActiveUnitClient(client);
+      return { summary: "implemented M1", client };
+    };
+
+    let settled: Promise<OrchestratorResult> | undefined;
+    await runImplement("", pi, ctx, runner, (background) => {
+      settled = background;
+    });
+    assert.ok(settled, "onBackground seam must receive the background promise");
+    await waitFor(() => getHitlWindow() !== undefined);
+    assert.equal(isOrchestrationInFlight(), true, "orchestration must be in flight at the pause");
+
+    const sendsBefore = (pi.calls["sendUserMessage"] ?? []).length;
+    await runDiscussion("new topic after cancel", pi, ctx);
+
+    // Assert before awaiting settlement: the cancel notify must exist even if
+    // the loop hung (a hang then fails the settled await, not this check).
+    assert.ok(
+      notifyCalls.some((m) => /in-flight implementation cancelled by \/discuss/i.test(m)),
+      `expected a cancel notify, got: ${notifyCalls.join(" | ")}`,
+    );
+
+    const result = await settled!;
+    assert.equal(result.cancelled, true, "loop result must carry cancelled:true");
+    assert.equal(result.haltedOn, undefined, "cancellation is not a halt");
+    assert.ok(record.shutdowns >= 1, "live unit client must be shut down");
+    assert.equal(getHitlWindow(), undefined, "pause must be settled and cleared");
+    assert.equal(getActiveUnitClient(), undefined, "active client registry must be cleared");
+    assert.equal(state.lastHalt, undefined, "no lastHalt write on cancellation");
+    assert.equal(state.task!.behaviors[0]!.status, "active", "behavior must not be marked done");
+    const sends = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(
+      sends.length,
+      sendsBefore + 1,
+      "only the /discuss topic steer — no halt/completion report",
+    );
+    // The discussing state persisted by runDiscussion is the last state write.
+    const append = pi.calls["appendEntry"] ?? [];
+    const [, last] = append[append.length - 1] as [string, WorkflowState];
+    assert.equal(last.phase, "discussing", "discussing state must be the final write");
+  });
+
+  it("kill-induced child errors after cancellation do not become retries", async () => {
+    const pi = mockPi();
+    const state = finalizingStateFor("test");
+    const ctx = mockCtx("/tmp/test", state);
+    const record = { shutdowns: 0 };
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    // The unit subprocess blocks; the cancel-induced shutdown kills it, so
+    // the attempt returns an error — which must NOT spawn a retry.
+    const client = fakeLiveClient(record, () => releaseGate());
+    let spawns = 0;
+    const runner: UnitRunner = async () => {
+      spawns++;
+      setActiveUnitClient(client);
+      await gate;
+      return { summary: "", error: "child killed" };
+    };
+
+    let settled: Promise<OrchestratorResult> | undefined;
+    await runImplement("", pi, ctx, runner, (background) => {
+      settled = background;
+    });
+    assert.ok(settled, "onBackground seam must receive the background promise");
+    await waitFor(() => getActiveUnitClient() === client);
+
+    await runDiscussion("replacement topic", pi, ctx);
+
+    const result = await settled!;
+    assert.equal(result.cancelled, true, "loop result must carry cancelled:true");
+    assert.equal(spawns, 1, "kill-induced child error must not spawn a retry");
+    assert.equal(result.haltedOn, undefined, "cancellation is not a halt");
+    assert.equal(state.lastHalt, undefined, "no lastHalt write on cancellation");
+    const sends = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(sends.length, 1, "only the /discuss topic steer — no halt report");
+    assert.equal(isOrchestrationInFlight(), false, "in-flight flag cleared after settlement");
+  });
+
+  it("is unchanged with no orchestration in flight", async () => {
+    const pi = mockPi();
+    const ctx = mockCtx("/tmp/test");
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    assert.equal(isOrchestrationInFlight(), false);
+    await cancelOrchestration(ctx);
+
+    await runDiscussion("plain topic", pi, ctx);
+
+    assert.ok(
+      notifyCalls.every((m) => !/cancelled by \/discuss/i.test(m)),
+      "no cancel notify when nothing is in flight",
+    );
+    const sends = pi.calls["sendUserMessage"] ?? [];
+    assert.equal(sends.length, 1, "topic steer exactly as before");
+    const [text, opts] = sends[0] as [string, { deliverAs: string }];
+    assert.equal(text, "plain topic");
+    assert.deepEqual(opts, { deliverAs: "steer" });
+    const append = pi.calls["appendEntry"] ?? [];
+    const [, saved] = append[append.length - 1] as [string, WorkflowState];
+    assertIsDiscussionState(saved, "plain topic");
   });
 });

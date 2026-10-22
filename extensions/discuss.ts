@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState } from "./state.ts";
 import { transitionTo, updateUi, loadState } from "./state.ts";
+import { cancelOrchestration, isOrchestrationInFlight } from "./implement.ts";
 
 /**
  * Type guard for assistant message content which can be either a plain string
@@ -35,6 +36,19 @@ export async function runDiscussion(
   ctx: ExtensionContext,
 ): Promise<void> {
   const topic = args.trim() || "Let's discuss this issue.";
+  // B2: while an orchestrated implementation is in flight (e.g. parked at a
+  // verification pause), cancel it first: the pause settles cancelled, the
+  // child is shut down, and the background loop's remaining state writes
+  // finish BEFORE this transition persists the new discussing state — the
+  // old loop can no longer clobber it. No orchestration in flight: unchanged.
+  if (isOrchestrationInFlight()) {
+    await cancelOrchestration(ctx);
+    ctx.ui.notify(
+      "In-flight implementation cancelled by /discuss — its outcome will not " +
+        "be reported; run /implement again to resume from the persisted state.",
+      "info",
+    );
+  }
   const previous = loadState(ctx);
 
   const state: WorkflowState = {

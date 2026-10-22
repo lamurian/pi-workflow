@@ -37,6 +37,9 @@ export type UnitRunner = (
 export interface OrchestratorResult {
   /** True when every unit completed and the workflow returned to idle. */
   complete: boolean;
+  /** True when the run was cancelled via /discuss (B2): no state writes,
+   * no retries, and no halt/completion reports after cancellation. */
+  cancelled?: boolean;
   /** Number of units that ran (including retries). */
   unitsRun: number;
   /** Commit subjects landed so far, in order. */

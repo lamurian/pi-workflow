@@ -14,6 +14,9 @@ export interface HitlWindow {
   description: string;
   /** Resolves the pause promise when the user approves. */
   approve: () => void;
+  /** Resolves the pause promise when the run is cancelled (B2). Optional so
+   * existing test fixtures that only wire `approve` keep compiling. */
+  cancel?: () => void;
 }
 
 let hitlWindow: HitlWindow | undefined;
@@ -44,10 +47,13 @@ let hitlRearm: (() => void) | undefined;
 /** Pending HITL timer, if armed. */
 let hitlTimer: ReturnType<typeof setTimeout> | undefined;
 
-/** Outcome of a verification pause: approval (false) or clock expiry (true). */
+/** Outcome of a verification pause: approval (false), clock expiry (true),
+ * or cancellation (cancelled: true, B2 /discuss path). */
 export interface PauseOutcome {
   /** True when the HITL clock expired before the user approved. */
   timedOut: boolean;
+  /** True when the pause was settled by cancelOrchestration (B2). */
+  cancelled?: boolean;
 }
 
 /** Default HITL clock: 15 minutes of human time per pause. */
@@ -112,6 +118,26 @@ export function getHitlWindow(): HitlWindow | undefined {
  */
 export function setHitlWindow(window: HitlWindow | undefined): void {
   hitlWindow = window;
+}
+
+/**
+ * Cancel the open verification pause (B2: /discuss cancellation path).
+ *
+ * Unlike a plain clear, this RESOLVES the open pause promise with
+ * `cancelled: true` so the behavior loop wakes up at its post-pause
+ * checkpoint and returns a cancelled result instead of proceeding to the
+ * commit gate. Disarms the HITL clock. Safe when no pause is open.
+ *
+ * @returns True when a window was open and has been cancelled.
+ */
+export function cancelVerificationPause(): boolean {
+  const window = hitlWindow;
+  if (!window) return false;
+  hitlWindow = undefined;
+  disarmHitlClock();
+  if (window.cancel) window.cancel();
+  else window.approve();
+  return true;
 }
 
 /**
@@ -180,6 +206,7 @@ export function openVerificationPause(
       behaviorId: behavior.id,
       description: behavior.description,
       approve: () => settle({ timedOut: false }),
+      cancel: () => settle({ timedOut: false, cancelled: true }),
     };
     ctx.ui.notify(
       `${behavior.id} awaiting manual verification — type feedback (auto-forwarded) or /steer <msg>, /approve`,

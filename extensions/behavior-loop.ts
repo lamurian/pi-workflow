@@ -7,6 +7,7 @@ import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry
 import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
 import { relayImplementerEvent } from "./implementer-activity.ts";
 import { openVerificationPause, type PauseOutcome } from "./hitl-pause.ts";
+import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
@@ -148,6 +149,12 @@ export async function runBehaviorLoop(
   };
 
   while (retry <= RETRY_BUDGET + 1) {
+    // B2: cancellation checkpoint (top of loop) — /discuss cancelled the run while the unit attempt was in flight. Kill-induced child errors after the cancel surface here as attempts with an error; return immediately instead of retrying. No saveState, no lastHalt, no commit.
+    if (isOrchestrationCancelled()) {
+      result.cancelled = true;
+      ctx.ui.setStatus("implement", undefined);
+      return result;
+    }
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
       const progressed = attemptProgress;
@@ -254,6 +261,12 @@ export async function runBehaviorLoop(
     let pauseOutcome: PauseOutcome | undefined;
     if (behavior.kind === "manual" && attempt.client) {
       pauseOutcome = await openVerificationPause(ctx, behavior);
+      // B2: cancellation checkpoint (post-pause) — cancelOrchestration settled the pause with cancelled:true and owns the child shutdown via cleanupOrchestration. Return before the commit gate; no state writes after the discussing transition.
+      if (isOrchestrationCancelled() || pauseOutcome.cancelled) {
+        result.cancelled = true;
+        ctx.ui.setStatus("implement", undefined);
+        return result;
+      }
       await attempt.client.shutdown(2_000);
       if (getActiveUnitClient() === attempt.client) setActiveUnitClient(undefined);
     }

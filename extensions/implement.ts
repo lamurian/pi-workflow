@@ -19,6 +19,10 @@ import { buildEngineerNoteSection, setUnitPrompt } from "./unit-task-text.ts";
 import { readGitHead } from "./git-ops.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { composeCompletionReport, composeHaltReport } from "./implement-report.ts";
+import { beginOrchestration, endOrchestration, isOrchestrationCancelled, isOrchestrationInFlight } from "./orchestration-cancel.ts";
+
+// B2: contract-visible cancellation API (state lives in orchestration-cancel.ts).
+export { isOrchestrationInFlight, cancelOrchestration } from "./orchestration-cancel.ts";
 
 /**
  * Parse `/implement` arguments into a mode flag and an engineer's note.
@@ -35,15 +39,6 @@ export function parseImplementArgs(args: string): { solo: boolean; note: string 
   const note = tokens.filter((t) => t !== "--solo").join(" ").trim();
   return { solo, note };
 }
-
-/**
- * Module-level in-flight guard for the orchestrated /implement path.
- *
- * Fire-and-forget removed the accidental re-entry protection (the blocked
- * turn used to prevent a second slash command), so this explicit flag
- * refuses a second /implement while a background orchestration is running.
- */
-let orchestrationInFlight = false;
 
 /** Pinned refusal warning emitted while a background run holds the guard. */
 const IN_FLIGHT_WARNING =
@@ -94,7 +89,7 @@ export async function runImplement(
   onBackground?: (settled: Promise<OrchestratorResult>) => void,
 ): Promise<void> {
   // In-flight guard: refuse re-entry before any state load or mutation.
-  if (orchestrationInFlight) {
+  if (isOrchestrationInFlight()) {
     ctx.ui.notify(IN_FLIGHT_WARNING, "warning");
     return;
   }
@@ -143,7 +138,6 @@ export async function runImplement(
   // returns immediately (the RPC prompt response must beat the client's
   // deadline). The catch-to-lastHalt logic stays inside the background task.
   const activeCount = task.behaviors.filter((b) => b.status === "active").length;
-  orchestrationInFlight = true;
   const settled = runOrchestratedImplementSafely(
     pi,
     ctx,
@@ -153,6 +147,8 @@ export async function runImplement(
     note || state.engineerNote,
   )
     .then((result) => {
+      // B2: a cancelled run skips the completion/halt reports and notifications.
+      if (result.cancelled || isOrchestrationCancelled()) return result;
       if (result.complete) {
         ctx.ui.notify(
           `Orchestrated implementation complete: ${result.landedCommits.length} behavior(s), ` +
@@ -185,8 +181,9 @@ export async function runImplement(
     .finally(() => {
       // Cleared when the background task settles (complete, halt, or crash)
       // so a later /implement resumes normally.
-      orchestrationInFlight = false;
+      endOrchestration();
     });
+  beginOrchestration(settled);
   onBackground?.(settled);
   ctx.ui.notify(
     `Orchestration started in background: ${activeCount} unit(s) active. ` +
@@ -223,6 +220,17 @@ async function runOrchestratedImplementSafely(
   } catch (err) {
     // Crash path (T6): never leave an orphaned child or a stale pause.
     await cleanupOrchestration();
+    // B2: a kill-induced crash after cancellation must not persist lastHalt.
+    if (isOrchestrationCancelled()) {
+      return {
+        complete: false,
+        unitsRun: 0,
+        landedCommits: [],
+        satisfiedWithoutCommit: [],
+        leftUncommitted: [],
+        cancelled: true,
+      };
+    }
     const message = String((err as Error)?.message ?? err);
     const active = task.behaviors.find((b) => b.status === "active");
     const lastHalt: LastHalt = {
