@@ -38,6 +38,7 @@ export async function cleanupOrchestration(graceMs: number = 1_000): Promise<voi
   offInputHandler = undefined;
   hitlWindow = undefined;
   disarmHitlClock();
+  disarmSteerWatchdog();
   await shutdownActiveClient(graceMs);
 }
 
@@ -78,6 +79,73 @@ export function getHitlTimeoutMs(
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
   }
   return DEFAULT_HITL_TIMEOUT_MS;
+}
+
+/** Default steer-response watchdog: 60 seconds of implementer silence. */
+const DEFAULT_STEER_RESPONSE_TIMEOUT_MS = 60_000;
+
+/**
+ * Resolve the steer-response watchdog timeout.
+ *
+ * Bounds how long a forwarded steer may go without an implementer-activity
+ * event before the watchdog notifies with recovery options. Invalid or
+ * non-positive values fall back to the default.
+ *
+ * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns The timeout in milliseconds (&gt; 0).
+ */
+export function getSteerResponseTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = env.PI_STEER_RESPONSE_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return DEFAULT_STEER_RESPONSE_TIMEOUT_MS;
+}
+
+/** Pending steer-response watchdog (one verification pause at a time). */
+let steerWatchdog: { behaviorId: string; timer: ReturnType<typeof setTimeout> } | undefined;
+
+/**
+ * Arm (or rearm) the steer-response watchdog after a successful forward.
+ *
+ * If no implementer-activity event for `behaviorId` arrives within
+ * PI_STEER_RESPONSE_TIMEOUT_MS (default 60_000), a warning notify states
+ * that the implementer has not responded and lists recovery options:
+ * /approve to continue, or keep waiting for its response.
+ *
+ * @param ctx        - Extension context (UI access).
+ * @param behaviorId - Behavior whose feedback was forwarded.
+ */
+export function armSteerWatchdog(ctx: ExtensionContext, behaviorId: string): void {
+  disarmSteerWatchdog();
+  const timer = setTimeout(() => {
+    steerWatchdog = undefined;
+    ctx.ui.notify(
+      `${behaviorId}: the implementer has not responded to your feedback — ` +
+        "recovery options: /approve to continue, or keep waiting for its response",
+      "warning",
+    );
+  }, getSteerResponseTimeoutMs());
+  steerWatchdog = { behaviorId, timer };
+}
+
+/**
+ * Disarm a pending steer-response watchdog before it fires.
+ *
+ * Called on relayed implementer activity (behavior-matched) and on every
+ * pause-closure path (approve, timeout, cancel, cleanup).
+ *
+ * @param behaviorId - When given, only disarm if the watchdog is armed for
+ *                     this behavior; otherwise disarm whatever is pending.
+ */
+export function disarmSteerWatchdog(behaviorId?: string): void {
+  if (!steerWatchdog) return;
+  if (behaviorId !== undefined && steerWatchdog.behaviorId !== behaviorId) return;
+  clearTimeout(steerWatchdog.timer);
+  steerWatchdog = undefined;
 }
 
 /**
@@ -135,6 +203,7 @@ export function cancelVerificationPause(): boolean {
   if (!window) return false;
   hitlWindow = undefined;
   disarmHitlClock();
+  disarmSteerWatchdog();
   if (window.cancel) window.cancel();
   else window.approve();
   return true;
@@ -162,6 +231,7 @@ export function runApprove(_pi: ExtensionAPI, ctx: ExtensionContext): void {
   }
   hitlWindow = undefined;
   disarmHitlClock();
+  disarmSteerWatchdog();
   ctx.ui.notify(`${window.behaviorId} approved — committing.`, "info");
   window.approve();
 }
@@ -188,6 +258,7 @@ export function openVerificationPause(
     const settle = (outcome: PauseOutcome) => {
       hitlWindow = undefined;
       disarmHitlClock();
+      disarmSteerWatchdog();
       resolve(outcome);
     };
     const arm = () => {
@@ -241,6 +312,8 @@ export function runSteer(message: string, pi: ExtensionAPI, ctx: ExtensionContex
   }
   client.steer(message.trim(), readImageAttachments(message));
   resetHitlClock();
+  ctx.ui.notify(`${window.behaviorId}: feedback forwarded to the implementer`, "info");
+  armSteerWatchdog(ctx, window.behaviorId);
   ctx.ui.setStatus("implement", `✦ ${window.behaviorId}: feedback forwarded`);
 }
 
@@ -298,18 +371,35 @@ export function readImageAttachments(message: string): RpcImage[] {
  * child as a steer command; slash commands always reach the main agent, and
  * with no open window every input passes through.
  *
+ * Plain-text input during an open pause is never swallowed silently: a dead
+ * child gets a warning notify before the text continues to the main agent,
+ * and a live child gets a "feedback forwarded" notify plus the response
+ * watchdog.
+ *
  * @param event - The user input event.
+ * @param ctx   - Extension context (UI access for the visibility notifies).
  * @returns `{ action: "handled" }` when forwarded; otherwise continue.
  */
 export function handleWorkflowInput(
   event: { text: string; images?: Array<{ type: string; data: string; mimeType: string }> },
+  ctx: ExtensionContext,
 ): { action: "handled" } | { action: "continue" } {
   const window = hitlWindow;
-  const client = getActiveUnitClient();
-  if (!window || !client || !client.isAlive()) return { action: "continue" };
+  if (!window) return { action: "continue" };
   if (event.text.trim().startsWith("/")) return { action: "continue" };
+  const client = getActiveUnitClient();
+  if (!client || !client.isAlive()) {
+    ctx.ui.notify(
+      `${window.behaviorId} implementer subprocess is no longer alive — ` +
+        "your message reaches the main agent",
+      "warning",
+    );
+    return { action: "continue" };
+  }
   client.steer(event.text, (event.images ?? []) as RpcImage[]);
   resetHitlClock();
+  ctx.ui.notify(`${window.behaviorId}: feedback forwarded to the implementer`, "info");
+  armSteerWatchdog(ctx, window.behaviorId);
   return { action: "handled" };
 }
 
@@ -318,8 +408,9 @@ export function handleWorkflowInput(
  * cleanupOrchestration unregisters it on every exit path.
  *
  * @param pi - ExtensionAPI reference.
+ * @param ctx - Extension context (UI access; forwards notify on steer).
  */
-export function registerWorkflowInputHandler(pi: ExtensionAPI): void {
+export function registerWorkflowInputHandler(pi: ExtensionAPI, ctx: ExtensionContext): void {
   offInputHandler?.();
-  offInputHandler = pi.on("input", async (event) => handleWorkflowInput(event));
+  offInputHandler = pi.on("input", async (event) => handleWorkflowInput(event, ctx));
 }

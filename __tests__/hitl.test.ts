@@ -22,6 +22,9 @@ import {
   getHitlWindow,
   setHitlWindow,
   getHitlTimeoutMs,
+  getSteerResponseTimeoutMs,
+  disarmSteerWatchdog,
+  cancelVerificationPause,
 } from "../extensions/hitl-pause.ts";
 import { runImplement } from "../extensions/implement.ts";
 import { registerImplementerActivityRenderer } from "../extensions/implement-tools.ts";
@@ -474,26 +477,35 @@ describe("T4: steering during the verification pause", () => {
 
   it("plain input with an open window is consumed and forwarded as steer with images", () => {
     const { record, cleanup } = openPause();
+    const ctx = ctxWithUiSpies();
     try {
-      const result = handleWorkflowInput({
-        type: "input",
-        text: "the toolbar sits 12px too far left",
-        images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
-        source: "interactive",
-      });
+      const result = handleWorkflowInput(
+        {
+          type: "input",
+          text: "the toolbar sits 12px too far left",
+          images: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+          source: "interactive",
+        },
+        ctx,
+      );
       assert.deepEqual(result, { action: "handled" }, "plain input is consumed, not passed on");
       assert.equal(record.steers.length, 1, "one steer reaches the child");
       assert.equal(record.steers[0]!.message, "the toolbar sits 12px too far left");
       assert.equal(record.steers[0]!.images?.length, 1, "pasted images ride the steer");
     } finally {
       cleanup();
+      disarmSteerWatchdog();
     }
   });
 
   it("slash commands pass through even with an open window", () => {
     const { record, cleanup } = openPause();
+    const ctx = ctxWithUiSpies();
     try {
-      const result = handleWorkflowInput({ type: "input", text: "/task", source: "interactive" });
+      const result = handleWorkflowInput(
+        { type: "input", text: "/task", source: "interactive" },
+        ctx,
+      );
       assert.deepEqual(result, { action: "continue" }, "slash commands reach the main agent");
       assert.equal(record.steers.length, 0, "nothing is forwarded to the child");
     } finally {
@@ -505,12 +517,16 @@ describe("T4: steering during the verification pause", () => {
     const record: SteerRecord = { shutdowns: 0, steers: [] };
     setActiveUnitClient(fakeManualClient(record));
     setHitlWindow(undefined);
+    const ctx = ctxWithUiSpies();
     try {
-      const result = handleWorkflowInput({
-        type: "input",
-        text: "how is the run going?",
-        source: "interactive",
-      });
+      const result = handleWorkflowInput(
+        {
+          type: "input",
+          text: "how is the run going?",
+          source: "interactive",
+        },
+        ctx,
+      );
       assert.deepEqual(result, { action: "continue" });
       assert.equal(record.steers.length, 0, "nothing is forwarded outside a pause");
     } finally {
@@ -852,9 +868,12 @@ describe("T6: orphan safety", () => {
     setActiveUnitClient(undefined);
     const pi = piWithAdvancingHead();
     const ctx = ctxWithUiSpies();
-    assert.deepEqual(handleWorkflowInput({ type: "input", text: "hello", source: "interactive" }), {
-      action: "continue",
-    });
+    assert.deepEqual(
+      handleWorkflowInput({ type: "input", text: "hello", source: "interactive" }, ctx),
+      {
+        action: "continue",
+      },
+    );
     runSteer("hello", pi, ctx);
     runApprove(pi, ctx);
     const warnings = ctx.notifyCalls.filter(([, kind]) => kind === "warning");
@@ -901,5 +920,180 @@ describe("T6: orphan safety", () => {
     const result = await settled;
     assert.equal(result.complete, true, "approval lets the run settle");
     assert.equal(getHitlWindow(), undefined, "no window remains after settlement");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// B3 — steer visibility: notify on forward, notify on dead child, watchdog
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("B3: steer visibility", () => {
+  /** A registered client whose subprocess has exited. */
+  function deadClient(): RpcUnitClient {
+    const client = fakeManualClient({ shutdowns: 0 }) as unknown as {
+      isAlive: () => boolean;
+    };
+    client.isAlive = () => false;
+    return client as unknown as RpcUnitClient;
+  }
+
+  it("forwarding feedback to a live child notifies with the behavior id", () => {
+    const pi = piWithAdvancingHead();
+    const ctx = ctxWithUiSpies();
+    const record = { shutdowns: 0, steers: [] as Array<{ message: string; images?: RpcImage[] }> };
+    setActiveUnitClient(fakeManualClient(record));
+    setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+    try {
+      runSteer("check the gutter again", pi, ctx);
+      const input = handleWorkflowInput(
+        { type: "input", text: "plain text feedback", source: "interactive" },
+        ctx,
+      );
+      assert.deepEqual(input, { action: "handled" }, "the open pause consumes the input");
+      const forwards = ctx.notifyCalls.filter(([m]) =>
+        /B3: feedback forwarded to the implementer/.test(m),
+      );
+      assert.equal(forwards.length, 2, "both /steer and plain input announce the forward");
+      assert.ok(forwards.every(([, kind]) => kind === "info"), "forwards are info notifies");
+      assert.equal(record.steers.length, 2, "both messages reached the child");
+    } finally {
+      setHitlWindow(undefined);
+      setActiveUnitClient(undefined);
+      disarmSteerWatchdog();
+    }
+  });
+
+  it("a dead child emits a notify and the text continues to the main agent", () => {
+    const ctx = ctxWithUiSpies();
+    setActiveUnitClient(deadClient());
+    setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+    try {
+      const result = handleWorkflowInput(
+        { type: "input", text: "the tool still crashes", source: "interactive" },
+        ctx,
+      );
+      assert.deepEqual(result, { action: "continue" }, "the message reaches the main agent");
+      const warnings = ctx.notifyCalls.filter(([, kind]) => kind === "warning");
+      assert.equal(warnings.length, 1, "one warning notify instead of a silent swallow");
+      assert.match(warnings[0]![0], /B3 implementer subprocess is no longer alive/);
+      assert.match(warnings[0]![0], /reaches the main agent/);
+    } finally {
+      setHitlWindow(undefined);
+      setActiveUnitClient(undefined);
+    }
+  });
+
+  it("getSteerResponseTimeoutMs defaults to 60s and honors PI_STEER_RESPONSE_TIMEOUT_MS", () => {
+    assert.equal(getSteerResponseTimeoutMs({}), 60_000, "60-second default");
+    assert.equal(getSteerResponseTimeoutMs({ PI_STEER_RESPONSE_TIMEOUT_MS: "2000" }), 2_000);
+    assert.equal(
+      getSteerResponseTimeoutMs({ PI_STEER_RESPONSE_TIMEOUT_MS: "nonsense" }),
+      60_000,
+      "invalid falls back",
+    );
+    assert.equal(
+      getSteerResponseTimeoutMs({ PI_STEER_RESPONSE_TIMEOUT_MS: "-1" }),
+      60_000,
+      "non-positive falls back",
+    );
+  });
+
+  it("an unanswered forward fires the watchdog notify with recovery options", async () => {
+    const prev = process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+    process.env.PI_STEER_RESPONSE_TIMEOUT_MS = "2000";
+    vi.useFakeTimers();
+    try {
+      const pi = piWithAdvancingHead();
+      const ctx = ctxWithUiSpies();
+      setActiveUnitClient(fakeManualClient({ shutdowns: 0 }));
+      setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+      runSteer("anyone there?", pi, ctx);
+      assert.ok(
+        ctx.notifyCalls.some(([m]) => /B3: feedback forwarded to the implementer/.test(m)),
+        "the forward notifies",
+      );
+      assert.ok(
+        !ctx.notifyCalls.some(([m]) => /has not responded/.test(m)),
+        "no watchdog before the timeout elapses",
+      );
+
+      await vi.advanceTimersByTimeAsync(getSteerResponseTimeoutMs());
+      const watchdog = ctx.notifyCalls.find(([m]) => /has not responded/.test(m));
+      assert.ok(watchdog, "the watchdog fires when no activity event arrives");
+      assert.match(watchdog![0], /B3/, "the watchdog names the behavior");
+      assert.match(watchdog![0], /\/approve/, "recovery options include /approve to continue");
+      assert.match(watchdog![0], /keep waiting/, "recovery options include keeping waiting");
+      assert.equal(watchdog![1], "warning");
+    } finally {
+      cancelVerificationPause();
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+      else process.env.PI_STEER_RESPONSE_TIMEOUT_MS = prev;
+    }
+  });
+
+  it("a relayed implementer event for the behavior disarms the watchdog", async () => {
+    const prev = process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+    process.env.PI_STEER_RESPONSE_TIMEOUT_MS = "2000";
+    vi.useFakeTimers();
+    try {
+      const pi = piWithAdvancingHead();
+      const ctx = ctxWithUiSpies();
+      setActiveUnitClient(fakeManualClient({ shutdowns: 0 }));
+      setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+      runSteer("status?", pi, ctx);
+      relayImplementerEvent(
+        pi,
+        ctx,
+        "B3",
+        "1/1",
+        { type: "turn_end", message: { role: "assistant", content: [] }, toolResults: [] },
+      );
+      await vi.advanceTimersByTimeAsync(5_000);
+      assert.ok(
+        !ctx.notifyCalls.some(([m]) => /has not responded/.test(m)),
+        "the relayed event disarmed the watchdog before it fired",
+      );
+    } finally {
+      cancelVerificationPause();
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+      else process.env.PI_STEER_RESPONSE_TIMEOUT_MS = prev;
+    }
+  });
+
+  it("closing the pause (approve or cancel) disarms the watchdog", async () => {
+    const prev = process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+    process.env.PI_STEER_RESPONSE_TIMEOUT_MS = "2000";
+    vi.useFakeTimers();
+    try {
+      const pi = piWithAdvancingHead();
+      const ctx = ctxWithUiSpies();
+      setActiveUnitClient(fakeManualClient({ shutdowns: 0 }));
+      setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+      runSteer("ping", pi, ctx);
+      runApprove(pi, ctx);
+      await vi.advanceTimersByTimeAsync(5_000);
+      assert.ok(
+        !ctx.notifyCalls.some(([m]) => /has not responded/.test(m)),
+        "approval disarmed the watchdog",
+      );
+
+      // Cancel path: arm again, cancel the pause — still no watchdog.
+      setHitlWindow({ behaviorId: "B3", description: "steer visibility", approve: () => {} });
+      runSteer("ping again", pi, ctx);
+      cancelVerificationPause();
+      await vi.advanceTimersByTimeAsync(5_000);
+      assert.ok(
+        !ctx.notifyCalls.some(([m]) => /has not responded/.test(m)),
+        "cancellation disarmed the watchdog",
+      );
+    } finally {
+      setHitlWindow(undefined);
+      setActiveUnitClient(undefined);
+      vi.useRealTimers();
+      if (prev === undefined) delete process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
+      else process.env.PI_STEER_RESPONSE_TIMEOUT_MS = prev;
+    }
   });
 });

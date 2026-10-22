@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { disarmSteerWatchdog } from "./hitl-pause.ts";
 
 // ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
 
@@ -101,6 +102,9 @@ export function relayImplementerEvent(
   position: string,
   event: Record<string, unknown>,
 ): void {
+  // B3: any relayed activity for the behavior proves the implementer is
+  // alive and responsive — disarm its steer-response watchdog.
+  disarmSteerWatchdog(behaviorId);
   if (event.type === "turn_end") {
     const compact = summarizeTurn(event);
     ctx.ui.setStatus("implement", `✦ ${behaviorId} (${position}): ${compact}`);

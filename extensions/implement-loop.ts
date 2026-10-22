@@ -210,7 +210,7 @@ export async function runOrchestratedImplement(
   }
 
   const resuming = state.phase === "implementing";
-  registerWorkflowInputHandler(pi);
+  registerWorkflowInputHandler(pi, ctx);
   let resumeTreeContext = "";
   if (resuming) {
     const tree = await readTreeState(pi, cwd);
