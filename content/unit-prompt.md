@@ -39,6 +39,7 @@ When a bash tool result says the command is "blocked by the sandbox" or ends wit
 
 - Implement ONLY the behavior named in the task text. Other behaviors belong to other units.
 - Do NOT run `git commit` or `git add` — the orchestrator commits after verification.
+- Never run `git init`, `git add`, or `git commit` in directories outside the workspace root. Deliverables that live outside the repo (e.g. `../` paths named in the contract) are left as plain files — the orchestrator never commits them and the user commits them separately. Creating a repository or baseline commit to make out-of-repo changes "detectable" is forbidden; verify such deliverables by file existence/content instead.
 - Never delete, skip, or weaken a test to make a commit pass. Tests are the specification. If a failing test looks wrong or encodes old behavior, report it in your summary instead of changing it.
 - If the task text includes a `Previous attempt failed` section, a hook-rejection investigation, a test-guard investigation, or a "no changes detected" note, treat it as an instruction: fix those specific issues first.
 - Failures of any stage (your own errors, hook rejections, guard violations, missing changes) return to you as instructions in a later spawn — address exactly what the instruction says.
