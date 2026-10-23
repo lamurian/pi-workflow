@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
+import type { FileEntry } from "./state.ts";
 import { validateTask, preserveDoneStatuses } from "./task-contract.ts";
 import { isTestPath } from "./test-scan-profiles.ts";
 import { deriveMatches, type DeriveResult } from "./test-scan-derive.ts";
@@ -42,7 +43,7 @@ function readCapped(full: string): string | null {
  *
  * @param pi    - ExtensionAPI reference (for exec access).
  * @param cwd   - Working directory to scan.
- * @param files - The contract's declared files entries.
+ * @param files - The contract's declared file entries ({ path, status }).
  * @returns Evidence + advisory warnings, or null when the scan is unavailable
  *          (exec failure, non-zero exit, empty listing) — callers degrade to
  *          "scan unavailable" without blocking the save.
@@ -50,7 +51,7 @@ function readCapped(full: string): string | null {
 export async function runContractScan(
   pi: ExtensionAPI,
   cwd: string,
-  files: string[],
+  files: readonly FileEntry[],
 ): Promise<{ evidence: string[]; warnings: string[] } | null> {
   try {
     const findArgs = [".", "-type", "f"];
@@ -63,14 +64,15 @@ export async function runContractScan(
       .filter(Boolean);
     if (listing.length === 0) return null;
     const onDisk = new Set(listing);
+    const paths = files.map((f) => f.path);
     const contents = new Map<string, string>();
     for (const p of listing) {
-      if (!isTestPath(p) && !files.includes(p)) continue;
+      if (!isTestPath(p) && !paths.includes(p)) continue;
       const text = readCapped(join(cwd, p));
       if (text !== null) contents.set(p, text);
     }
     const findings = new Map<string, DeriveResult>();
-    for (const f of files) findings.set(f, deriveMatches(f, contents));
+    for (const f of files) findings.set(f.path, deriveMatches(f.path, contents));
     const result = crossCheck(files, findings, onDisk);
     return { evidence: result.evidence, warnings: result.warnings };
   } catch {
@@ -135,7 +137,20 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
     parameters: Type.Object({
       title: Type.String({ description: "Short task title" }),
       instruction: Type.String({ description: "What to implement" }),
-      files: Type.Array(Type.String(), { description: "Files affected" }),
+      files: Type.Array(
+        Type.Object({
+          path: Type.String({ description: "Repo-relative file path" }),
+          status: Type.Union(
+            [Type.Literal("A"), Type.Literal("M"), Type.Literal("D")],
+            { description: "A = added, M = modified, D = deleted" },
+          ),
+        }),
+        {
+          description:
+            "Authoritative file allowlist: every file the task adds (A), " +
+            "modifies (M) or deletes (D), listed with its status",
+        },
+      ),
       done: Type.String({ description: "Definition of done" }),
       behaviors: Type.Array(
         Type.Object({

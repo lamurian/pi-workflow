@@ -909,7 +909,7 @@ function finalizingStateFor(kind: "test" | "manual"): WorkflowState {
     task: {
       title: "My Task",
       instruction: "do the thing",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "tests pass",
       behaviors: [
         { id: "M1", description: "manual check", expectedOutput: "verified", kind, status: "active" },

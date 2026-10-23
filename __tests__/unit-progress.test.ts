@@ -74,7 +74,7 @@ function singleBehaviorTask(): TaskContract {
   return {
     title: "Progress Task",
     instruction: "do things",
-    files: ["src/a.ts"],
+    files: [{ path: "src/a.ts", status: "M" }],
     done: "all green",
     behaviors: [
       { id: "T1", description: "the behavior", expectedOutput: "e1", kind: "test", status: "active" },

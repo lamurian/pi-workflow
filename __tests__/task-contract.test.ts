@@ -4,7 +4,8 @@ import {
   validateTask,
   parseTestOutput,
   evaluateCompletionGate,
-  renderTaskContract,
+  formatTask,
+  formatFiles,
 } from "../extensions/task-contract.ts";
 import { handlePreCompact } from "../extensions/compaction.ts";
 import type { WorkflowState } from "../extensions/state.ts";
@@ -17,7 +18,7 @@ function implementingState(overrides: Partial<WorkflowState> = {}): WorkflowStat
     task: {
       title: "T",
       instruction: "do it",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "tests pass",
       behaviors: [
         {
@@ -40,7 +41,7 @@ describe("validateTask", () => {
     const r = validateTask({
       title: "T",
       instruction: "i",
-      files: ["a"],
+      files: [{ path: "a", status: "M" }],
       done: "d",
       behaviors: [
         { id: "T1", description: "x", expectedOutput: "y", kind: "test" },
@@ -74,13 +75,79 @@ describe("validateTask", () => {
   });
 });
 
+// ═══ validateTask files allowlist (T1) ═══
+describe("validateTask files D/M/A allowlist (T1)", () => {
+  function payload(files: unknown) {
+    return { title: "T", instruction: "i", files, done: "d", behaviors: [] };
+  }
+
+  it("accepts [{ path, status }] entries and normalizes them", () => {
+    const r = validateTask(
+      payload([
+        { path: "src/a.ts", status: "M" },
+        { path: "tests/a.test.ts", status: "A" },
+        { path: "src/legacy.ts", status: "D" },
+      ]),
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.deepEqual(r.task.files, [
+      { path: "src/a.ts", status: "M" },
+      { path: "tests/a.test.ts", status: "A" },
+      { path: "src/legacy.ts", status: "D" },
+    ]);
+  });
+
+  it("rejects plain-string entries with a specific reason", () => {
+    const r = validateTask(payload(["src/a.ts"]));
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /files\[0\]/);
+    assert.match(r.reason, /\{ path, status \}/);
+    assert.match(r.reason, /A, M or D/);
+  });
+
+  it("rejects an unknown status with a specific reason", () => {
+    const r = validateTask(payload([{ path: "src/a.ts", status: "X" }]));
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /files\[0\]\.status must be A, M or D/);
+  });
+
+  it("rejects an empty path with a specific reason", () => {
+    const r = validateTask(payload([{ path: "  ", status: "M" }]));
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /files\[0\]\.path must be a non-empty string/);
+  });
+
+  it("rejects duplicate paths with a specific reason naming the path", () => {
+    const r = validateTask(
+      payload([
+        { path: "src/a.ts", status: "M" },
+        { path: "src/a.ts", status: "D" },
+      ]),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /files\[1\]\.path duplicates an earlier entry: src\/a\.ts/);
+  });
+
+  it("rejects a non-array files field", () => {
+    const r = validateTask(payload("src/a.ts"));
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /files must be an array/);
+  });
+});
+
 // ═══ validateTask contract-quality warnings (T1) ═══
 describe("validateTask contract-quality warnings (T1)", () => {
   function qualityPayload(expectedOutput: string, kind = "test") {
     return {
       title: "T",
       instruction: "i",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "d",
       behaviors: [
         {
@@ -255,22 +322,50 @@ describe("evaluateCompletionGate", () => {
   });
 });
 
-// ═══ renderTaskContract ═══
-describe("renderTaskContract", () => {
+// ═══ formatTask ═══
+describe("formatTask", () => {
   it("lists behaviors and flags removed ones", () => {
     const s = implementingState({
       task: {
-        title: "My Task", instruction: "i", files: ["a.ts"], done: "d",
+        title: "My Task", instruction: "i", files: [{ path: "a.ts", status: "M" }], done: "d",
         behaviors: [
           { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
           { id: "T2", description: "z", expectedOutput: "w", kind: "manual", status: "removed" },
         ],
       },
     });
-    const out = renderTaskContract(s.task!);
+    const out = formatTask(s.task!);
     assert.match(out, /My Task/);
     assert.match(out, /T1/);
     assert.match(out, /\[removed\]/);
+  });
+
+  it("renders declared files as 'path (STATUS)'", () => {
+    const s = implementingState({
+      task: {
+        title: "My Task", instruction: "i",
+        files: [
+          { path: "src/a.ts", status: "M" },
+          { path: "tests/a.test.ts", status: "A" },
+          { path: "src/legacy.ts", status: "D" },
+        ],
+        done: "d",
+        behaviors: [
+          { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+        ],
+      },
+    });
+    const out = formatTask(s.task!);
+    assert.match(out, /Files: src\/a\.ts \(M\), tests\/a\.test\.ts \(A\), src\/legacy\.ts \(D\)/);
+    assert.match(out, /src\/a\.ts \(M\)/);
+  });
+
+  it("formatFiles renders the comma list and an empty string for no files", () => {
+    assert.equal(
+      formatFiles([{ path: "src/a.ts", status: "M" }]),
+      "src/a.ts (M)",
+    );
+    assert.equal(formatFiles([]), "");
   });
 });
 
@@ -290,7 +385,7 @@ describe("compaction preserves the task contract", () => {
     const s = implementingState({
       phase: "finalizing",
       task: {
-        title: "Contracted", instruction: "i", files: ["a.ts"], done: "d",
+        title: "Contracted", instruction: "i", files: [{ path: "a.ts", status: "M" }], done: "d",
         behaviors: [
           { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
         ],

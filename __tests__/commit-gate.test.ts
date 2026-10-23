@@ -22,7 +22,7 @@ const BEHAVIOR: Behavior = {
 const TASK: TaskContract = {
   title: "Orch Task",
   instruction: "do things",
-  files: ["src/a.ts"],
+  files: [{ path: "src/a.ts", status: "M" }],
   done: "all green",
   behaviors: [BEHAVIOR],
 };

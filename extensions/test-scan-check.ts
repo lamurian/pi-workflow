@@ -2,11 +2,16 @@
 // Pure module, split from test-scan.ts to stay under the 300-line rule.
 
 import type { DeriveResult, MatchMethod } from "./test-scan-derive.ts";
+import type { FileEntry } from "./state.ts";
 
 // ─── Cross-check classifier ────────────────────────────────────────────────────
 
 /** Advisory warnings produced by crossCheck. */
-export type ScanWarningKind = "undeclared-referencing" | "declared-not-found" | "no-evidence";
+export type ScanWarningKind =
+  | "undeclared-referencing"
+  | "declared-not-found"
+  | "declared-add-exists"
+  | "no-evidence";
 
 /** Evidence + warnings for one contract. */
 export interface CrossCheckResult {
@@ -21,39 +26,48 @@ export interface CrossCheckResult {
  *
  * Pure: takes findings already derived per entry. Renders evidence with
  * confidence tags; zero-hit entries render "unverified", never "clean".
+ * `declared-not-found` skips entries declared as added (A — a not-yet-created
+ * path is expected); an A entry that already exists on disk gets the
+ * advisory `declared-add-exists` warning instead.
  *
- * @param files - The contract's declared files entries.
- * @param findings - Per-entry deriveMatches results, keyed by files entry.
- * @param onDisk - Paths known to exist (for declared-not-found detection).
+ * @param files - The contract's declared file entries ({ path, status }).
+ * @param findings - Per-entry deriveMatches results, keyed by files entry path.
+ * @param onDisk - Paths known to exist (for declared-not-found / add-exists).
  * @returns Evidence lines and advisory warnings.
  */
 export function crossCheck(
-  files: readonly string[],
+  files: readonly FileEntry[],
   findings: ReadonlyMap<string, DeriveResult>,
   onDisk: ReadonlySet<string>,
 ): CrossCheckResult {
   const evidence: string[] = [];
   const warnings: string[] = [];
-  const declared = new Set(files);
+  const declared = new Set(files.map((f) => f.path));
   let totalMatches = 0;
 
   for (const entry of files) {
-    const found = findings.get(entry);
+    const found = findings.get(entry.path);
     const matches = found?.matches ?? [];
     totalMatches += matches.length;
-    if (found?.note) evidence.push(`${entry}: ${found.note}`);
+    if (found?.note) evidence.push(`${entry.path}: ${found.note}`);
     if (matches.length === 0) {
       evidence.push(
-        `${entry}: unverified — no derivation hit (default export, indirect reference, or no affected tests); confirm by reading the tests or declare known paths in files`,
+        `${entry.path}: unverified — no derivation hit (default export, indirect reference, or no affected tests); confirm by reading the tests or declare known paths in files`,
       );
     } else {
       for (const m of matches) {
-        evidence.push(`${entry} -> ${m.path} [${m.method}, ${m.confidence}]`);
+        evidence.push(`${entry.path} -> ${m.path} [${m.method}, ${m.confidence}]`);
       }
     }
-    if (!onDisk.has(entry)) {
+    if (!onDisk.has(entry.path)) {
+      // A = added: the file is expected not to exist yet, so no warning.
+      if (entry.status === "A") continue;
       warnings.push(
-        `declared-not-found: ${entry} matches nothing on disk — likely a typo or a not-yet-created path; verify before /implement`,
+        `declared-not-found: ${entry.path} matches nothing on disk — likely a typo or a not-yet-created path; verify before /implement`,
+      );
+    } else if (entry.status === "A") {
+      warnings.push(
+        `declared-add-exists: ${entry.path} is declared as added (A) but already exists on disk — declare it as modified (M) instead, or confirm the contract intentionally replaces it`,
       );
     }
   }

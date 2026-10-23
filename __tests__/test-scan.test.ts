@@ -164,7 +164,7 @@ describe("crossCheck classifier", () => {
     const findings = new Map([
       ["src/auth.ts", { matches: [{ path: "tests/flows.test.ts", method: "import-path" as const, confidence: "high" as const }] }],
     ]);
-    const r = crossCheck(["src/auth.ts"], findings, new Set(["src/auth.ts"]));
+    const r = crossCheck([{ path: "src/auth.ts", status: "M" }], findings, new Set(["src/auth.ts"]));
     assert.ok(
       r.warnings.some((w) => /undeclared-referencing/.test(w) && /tests\/flows\.test\.ts/.test(w)),
       `expected undeclared-referencing warning, got ${JSON.stringify(r.warnings)}`,
@@ -180,7 +180,11 @@ describe("crossCheck classifier", () => {
       ["src/c.ts", { matches: [{ path: "tests/shared.test.ts", method: "import-path" as const, confidence: "high" as const }] }],
     ]);
     const declared = ["src/a.ts", "src/b.ts", "src/c.ts"];
-    const r = crossCheck(declared, findings, new Set(declared));
+    const r = crossCheck(
+      declared.map((p) => ({ path: p, status: "M" as const })),
+      findings,
+      new Set(declared),
+    );
     const undeclaredLines = r.warnings.filter((w) => /undeclared-referencing/.test(w));
     assert.equal(
       undeclaredLines.length,
@@ -203,7 +207,11 @@ describe("crossCheck classifier", () => {
       ["src/b.ts", { matches: [{ path: "tests/one.test.ts", method: "basename" as const, confidence: "low" as const }] }],
     ]);
     const declared = ["src/a.ts", "src/b.ts"];
-    const r = crossCheck(declared, findings, new Set(declared));
+    const r = crossCheck(
+      declared.map((p) => ({ path: p, status: "M" as const })),
+      findings,
+      new Set(declared),
+    );
     const undeclaredLines = r.warnings.filter((w) => /undeclared-referencing/.test(w));
     // 3 match pairs (a->one, a->two, b->one) but only 2 distinct paths.
     assert.equal(
@@ -217,15 +225,48 @@ describe("crossCheck classifier", () => {
   });
 
   it("flags declared entries that match nothing on disk", () => {
-    const r = crossCheck(["src/typo.ts"], new Map(), new Set());
+    const r = crossCheck([{ path: "src/typo.ts", status: "M" }], new Map(), new Set());
     assert.ok(
       r.warnings.some((w) => /declared-not-found/.test(w) && /src\/typo\.ts/.test(w)),
       `expected declared-not-found warning, got ${JSON.stringify(r.warnings)}`,
     );
   });
 
+  it("skips declared-not-found for A entries (new files are expected to be absent)", () => {
+    const r = crossCheck([{ path: "src/newfeature.ts", status: "A" }], new Map(), new Set());
+    assert.ok(
+      !r.warnings.some((w) => /declared-not-found/.test(w)),
+      `A entries must not trigger declared-not-found, got ${JSON.stringify(r.warnings)}`,
+    );
+  });
+
+  it("flags A entries that already exist on disk with declared-add-exists", () => {
+    const r = crossCheck(
+      [{ path: "src/a.ts", status: "A" }],
+      new Map(),
+      new Set(["src/a.ts"]),
+    );
+    assert.ok(
+      r.warnings.some((w) => /declared-add-exists/.test(w) && /src\/a\.ts/.test(w)),
+      `expected declared-add-exists warning, got ${JSON.stringify(r.warnings)}`,
+    );
+    assert.ok(!r.warnings.some((w) => /declared-not-found/.test(w)));
+  });
+
+  it("M entries present on disk produce neither not-found nor add-exists", () => {
+    const r = crossCheck(
+      [{ path: "src/a.ts", status: "M" }],
+      new Map([["src/a.ts", { matches: [] }]]),
+      new Set(["src/a.ts"]),
+    );
+    assert.deepEqual(
+      r.warnings.filter((w) => /declared-(not-found|add-exists)/.test(w)),
+      [],
+    );
+  });
+
   it("emits a no-evidence note for all-new additive contracts", () => {
-    const r = crossCheck(["src/newfeature.ts"], new Map(), new Set());
+    const r = crossCheck([{ path: "src/newfeature.ts", status: "A" }], new Map(), new Set());
     assert.ok(
       r.warnings.some((w) => /no-evidence/.test(w)),
       `expected no-evidence note, got ${JSON.stringify(r.warnings)}`,
@@ -233,7 +274,7 @@ describe("crossCheck classifier", () => {
   });
 
   it("zero-hit entries render unverified, never clean", () => {
-    const r = crossCheck(["src/auth.ts"], new Map([["src/auth.ts", { matches: [] }]]), new Set(["src/auth.ts"]));
+    const r = crossCheck([{ path: "src/auth.ts", status: "M" }], new Map([["src/auth.ts", { matches: [] }]]), new Set(["src/auth.ts"]));
     assert.ok(r.evidence.some((e) => /src\/auth\.ts/.test(e) && /unverified/.test(e)));
     assert.ok(!r.evidence.some((e) => /\bclean\b/.test(e)), "evidence must never say clean");
   });
@@ -242,7 +283,7 @@ describe("crossCheck classifier", () => {
     const findings = new Map([
       ["src/auth.ts", { matches: [{ path: "tests/flows.test.ts", method: "symbol" as const, confidence: "high" as const }] }],
     ]);
-    const r = crossCheck(["src/auth.ts"], findings, new Set(["src/auth.ts"]));
+    const r = crossCheck([{ path: "src/auth.ts", status: "M" }], findings, new Set(["src/auth.ts"]));
     const line = r.evidence.find((e) => /tests\/flows\.test\.ts/.test(e));
     assert.ok(line);
     assert.match(line!, /symbol/);

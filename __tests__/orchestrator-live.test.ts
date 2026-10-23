@@ -149,7 +149,7 @@ function contract(): TaskContract {
   return {
     title: "Scratch feature",
     instruction: "Add greet and shout helpers",
-    files: ["src/greet.js", "src/shout.js"],
+    files: [{ path: "src/greet.js", status: "M" }, { path: "src/shout.js", status: "M" }],
     done: "npm test green",
     behaviors: [
       { id: "T1", description: "greet helper", expectedOutput: "greet() returns hello", kind: "test", status: "active" },
@@ -325,7 +325,7 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
       const state = finalizingState({
         title: "Hook feature",
         instruction: "Add greet helper",
-        files: ["src/greet.js"],
+        files: [{ path: "src/greet.js", status: "M" }],
         done: "hooks green",
         behaviors: [
           { id: "T1", description: "greet helper", expectedOutput: "greet() returns hello", kind: "test", status: "active" },

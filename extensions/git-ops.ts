@@ -159,7 +159,7 @@ export async function commitAndGate(
       .map((b) => b.sourceFile!);
     const staged = classifyStagedDiff({
       nameStatus: nameStatusRes.stdout ?? "",
-      declaredFiles: task.files,
+      declaredFiles: task.files.map((f) => f.path),
       testKindSourceFiles,
       attempt,
       unifiedDiff: unifiedRes.stdout ?? "",

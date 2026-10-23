@@ -1,5 +1,5 @@
 import { RETRY_BUDGET } from "./commit-gate.ts";
-import { renderTaskContract } from "./task-contract.ts";
+import { formatFiles, formatTask } from "./task-contract.ts";
 import type { Behavior, TaskContract } from "./state.ts";
 import type { UnitAttempt } from "./implement-loop.ts";
 
@@ -64,11 +64,11 @@ export function buildUnitTask(behavior: Behavior, task: TaskContract): string {
     "## Contract context (do not implement beyond this behavior)",
     `Title: ${task.title}`,
     `Instruction: ${task.instruction}`,
-    `Files: ${task.files.join(", ")}`,
+    `Files: ${formatFiles(task.files)}`,
     `Definition of done: ${task.done}`,
     "",
     "## Contract (for reference)",
-    renderTaskContract(task),
+    formatTask(task),
     "",
     "End with the JSON report block (summary, suggestedCommit) as instructed.",
   ]

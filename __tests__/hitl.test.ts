@@ -293,7 +293,7 @@ describe("T2: zero-token activity relay", () => {
       task: {
         title: "Relay Task",
         instruction: "do it",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "green",
         behaviors: [
           { id: "T1", description: "a behavior", expectedOutput: "e", kind: "test", status: "active" },
@@ -364,7 +364,7 @@ describe("T3: manual verification pause", () => {
     return {
       title: "Mixed Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "test behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -584,7 +584,7 @@ describe("T4: steering during the verification pause", () => {
       task: {
         title: "Input Task",
         instruction: "x",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "green",
         behaviors: [
           { id: "T1", description: "a behavior", expectedOutput: "e", kind: "test", status: "active" },
@@ -627,7 +627,7 @@ describe("T5: HITL clock and deferral", () => {
     return {
       title: "Manual Only",
       instruction: "x",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "green",
       behaviors: [
         { id: "T1", description: "visual check", expectedOutput: "e", kind: "manual", status: "active" },
@@ -740,7 +740,7 @@ describe("T5: HITL clock and deferral", () => {
     const task: TaskContract = {
       title: "T",
       instruction: "x",
-      files: ["a.ts"],
+      files: [{ path: "a.ts", status: "M" }],
       done: "green",
       behaviors: [{ id: "T1", description: "d", expectedOutput: "e", kind: "test", status: "done" }],
     };
@@ -840,7 +840,7 @@ describe("T6: orphan safety", () => {
       task: {
         title: "Orphan Task",
         instruction: "x",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "green",
         behaviors: [
           { id: "T2", description: "gutter", expectedOutput: "e", kind: "manual", status: "active" },
@@ -885,7 +885,7 @@ describe("T6: orphan safety", () => {
     const task: TaskContract = {
       title: "Guard Pause Task",
       instruction: "x",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "green",
       behaviors: [
         { id: "T1", description: "visual check", expectedOutput: "e", kind: "manual", status: "active" },

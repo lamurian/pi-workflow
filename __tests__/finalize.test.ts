@@ -66,7 +66,7 @@ function getSaveTask(pi: ExtensionAPI & { calls: Record<string, unknown[]> }) {
 const VALID = {
   title: "My Task",
   instruction: "do the thing",
-  files: ["src/a.ts"],
+  files: [{ path: "src/a.ts", status: "M" }],
   done: "tests pass",
   behaviors: [
     { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
@@ -363,7 +363,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: ["src/a.ts"] },
+      { ...VALID, files: [{ path: "src/a.ts", status: "M" }] },
       undefined,
       undefined,
       ctx,
@@ -436,7 +436,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: ["src/a.ts", "tests/a.test.ts"] },
+      { ...VALID, files: [{ path: "src/a.ts", status: "M" }, { path: "tests/a.test.ts", status: "M" }] },
       undefined,
       undefined,
       ctx,
@@ -448,7 +448,7 @@ describe("save_task scan wiring (T3)", () => {
     assert.doesNotMatch(res.content[0].text, /scan unavailable/);
   });
 
-  it("all-new files contract yields the no-evidence note", async () => {
+  it("all-new files contract (status A) yields the no-evidence note but no declared-not-found", async () => {
     const dir = tmpProject({ "tests/existing.test.ts": "nothing relevant\n" });
     const listing = "./tests/existing.test.ts\n";
     const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
@@ -462,7 +462,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: ["src/newfeature.ts"] },
+      { ...VALID, files: [{ path: "src/newfeature.ts", status: "A" }] },
       undefined,
       undefined,
       ctx,
@@ -470,8 +470,36 @@ describe("save_task scan wiring (T3)", () => {
 
     assert.notEqual(res.isError, true);
     assert.match(res.content[0].text, /no-evidence/);
-    assert.match(res.content[0].text, /declared-not-found/);
-    assert.match(notifyCalls[0]!, /warnings: 2/);
+    assert.doesNotMatch(
+      res.content[0].text,
+      /declared-not-found/,
+      "A entries are expected not to exist yet — declared-not-found must be skipped",
+    );
+    assert.match(notifyCalls[0]!, /warnings: 1/, "only the no-evidence note remains");
+  });
+
+  it("an A entry that already exists on disk yields the declared-add-exists warning", async () => {
+    const dir = tmpProject({
+      "src/a.ts": "export function handler() { return 200; }\n",
+      "tests/flows.test.ts": 'import { handler } from "../a"\n',
+    });
+    const listing = ["./src/a.ts", "./tests/flows.test.ts"].join("\n") + "\n";
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s, dir);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      { ...VALID, files: [{ path: "src/a.ts", status: "A" }] },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true);
+    assert.match(res.content[0].text, /declared-add-exists/);
+    assert.match(res.content[0].text, /src\/a\.ts/);
   });
 
   it("renders evidence through renderEvidence: collapsed summary, no per-match explosion (T4)", async () => {
@@ -493,7 +521,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: ["src/messages/en/research.json"] },
+      { ...VALID, files: [{ path: "src/messages/en/research.json", status: "M" }] },
       undefined,
       undefined,
       ctx,
@@ -538,7 +566,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: Object.keys(files).filter((f) => f.startsWith("src/")) },
+      { ...VALID, files: Object.keys(files).filter((f) => f.startsWith("src/")).map((f) => ({ path: f, status: "M" as const })) },
       undefined,
       undefined,
       ctx,
@@ -640,7 +668,7 @@ function contract(behaviors: Behavior[]): TaskContract {
   return {
     title: "My Task",
     instruction: "do the thing",
-    files: ["src/a.ts"],
+    files: [{ path: "src/a.ts", status: "M" }],
     done: "tests pass",
     behaviors,
   };

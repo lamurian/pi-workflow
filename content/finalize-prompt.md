@@ -13,7 +13,7 @@ You are drafting the atomic implementation contract from this discussion.
 
 - `title` — short task name.
 - `instruction` — what to implement.
-- `files` — files affected. Declare every test path the contract updates or removes here (see Test classification).
+- `files` — the **authoritative file allowlist**, entries of the form `{ path, status }`. Every file the task touches must be listed with its status: `A` (added — including new test and implementation files), `M` (modified) or `D` (deleted). The allowlist is enforced during implementation: a unit may only write or edit declared `A`/`M` paths and only delete declared `D` paths. Declare every test path the contract updates or removes here (see Test classification).
 - `done` — definition of done (manual verification for non-test work).
 - `behaviors[]` — each behavior: `id`, `description`, `expectedOutput`, `kind`, `status`, optional `sourceFile`.
 
@@ -31,8 +31,8 @@ You are drafting the atomic implementation contract from this discussion.
 `save_task` returns **scan evidence**: per-`files`-entry match lines with method and confidence tags (`[symbol, high]`, `[basename, low]`, `unverified`), plus advisory warnings (`undeclared-referencing`, `declared-not-found`, `no-evidence`). Classify every evidence item:
 
 - **preserved** — the test asserts behavior the contract keeps. Do not declare it; the guard protects it automatically.
-- **superseded** — the test asserts old behavior the contract changes. Declare the path in `files`, and describe the required test update in the superseding behavior's `instruction` (folded, never its own behavior).
-- **obsolete** — the test covers behavior the contract removes. Declare the path in `files`; for pure-removal contracts describe the removal in a manual behavior ("remove legacy path + its tests; suite green").
+- **superseded** — the test asserts old behavior the contract changes. Declare the path in `files` (status `M`, or `D` when the contract removes it), and describe the required test update in the superseding behavior's `instruction` (folded, never its own behavior).
+- **obsolete** — the test covers behavior the contract removes. Declare the path in `files` with status `D`; for pure-removal contracts describe the removal in a manual behavior ("remove legacy path + its tests; suite green").
 - **out-of-scope** — the test is already dead or broken for reasons unrelated to this contract. Report it to the user as a recommendation for a separate `/discuss`. Never fold it into this contract.
 
 A collapsed `[basename, low]` fan-out line (one summary line counting many matches, e.g. `src/messages/en/research.json: 88 test files match [basename, low] — e.g. … — too generic to enumerate`) is **one item**, not 88. Treat it as generic-basename noise: the basename matched incidentally, not because the tests exercise the entry. Do not enumerate or classify the sampled paths individually; grep-verify only if the entry is plausibly affected by the contract's change.
@@ -42,7 +42,7 @@ An `unverified` confidence tag means derivation found no hit (default export, in
 ## Rules
 
 - Behaviors that carry the business rules are testable. Scaffolding, scripts, and config are manual.
-- Declare superseded and obsolete test paths in `files`. Undeclared test paths are protected by the staged-diff guard: deleting or skipping them halts implementation.
+- Declare superseded and obsolete test paths in `files` with their status. Undeclared test paths are protected by the staged-diff guard: deleting or skipping them halts implementation.
 - Set `status: "active"` for all behaviors in the contract.
 - Be specific. Vague `expectedOutput` cannot be tested.
 - Advisory warnings never block the save, but read every one — each names a contract-quality issue you can fix before `/implement`.

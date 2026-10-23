@@ -9,7 +9,7 @@ import {
   type TaskContract,
   type LastHalt,
 } from "./state.ts";
-import { renderTaskContract } from "./task-contract.ts";
+import { formatTask } from "./task-contract.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
@@ -105,6 +105,18 @@ export async function runImplement(
   const task = state.task;
   if (!task) {
     ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
+    return;
+  }
+  // Legacy refusal: contracts persisted before the D/M/A allowlist carry
+  // plain-string file entries. They cannot be enforced as an authoritative
+  // allowlist, so the user must re-finalize before implementing.
+  if (task.files.some((f) => typeof f === "string")) {
+    ctx.ui.notify(
+      "This task contract predates the authoritative D/M/A file allowlist: its " +
+        "files are plain strings. Re-run /discuss, then /finalize to re-save the " +
+        "contract with { path, status } entries, then run /implement again.",
+      "warning",
+    );
     return;
   }
   const resuming = state.phase === "implementing";
@@ -296,7 +308,7 @@ export async function buildTddPrompt(
       "Do NOT include the behavior id in the subject.\n"
     : "";
   return renderTemplate(template, {
-    task: renderTaskContract(task),
+    task: formatTask(task),
     commitInstruction,
   });
 }

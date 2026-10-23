@@ -1,4 +1,4 @@
-import type { WorkflowState, TaskContract, Behavior } from "./state.ts";
+import type { WorkflowState, TaskContract, Behavior, FileEntry } from "./state.ts";
 
 /** Normalized, validated task contract produced by validateTask. */
 export type TaskValidation =
@@ -47,6 +47,43 @@ function collectBehaviorWarnings(b: Behavior): string[] {
 }
 
 /**
+ * Validate one declared file entry of the contract's allowlist.
+ *
+ * @param raw - Unvalidated entry from the files array.
+ * @param i   - Index of the entry (for reason messages).
+ * @returns The normalized entry, or a rejection reason.
+ */
+function validateFileEntry(raw: unknown, i: number):
+  | { ok: true; entry: FileEntry }
+  | { ok: false; reason: string } {
+  if (typeof raw === "string") {
+    return {
+      ok: false,
+      reason:
+        `files[${i}] must be an object { path, status } with status A, M or D ` +
+        `(got the plain string "${raw}") — every file must declare whether it is ` +
+        `added (A), modified (M) or deleted (D)`,
+    };
+  }
+  if (raw === null || typeof raw !== "object") {
+    return { ok: false, reason: `files[${i}] must be an object { path, status }` };
+  }
+  const entry = raw as Record<string, unknown>;
+  if (typeof entry.path !== "string" || entry.path.trim() === "") {
+    return { ok: false, reason: `files[${i}].path must be a non-empty string` };
+  }
+  if (entry.status !== "A" && entry.status !== "M" && entry.status !== "D") {
+    return {
+      ok: false,
+      reason:
+        `files[${i}].status must be A, M or D (got ${JSON.stringify(entry.status)}) ` +
+        `— A = added, M = modified, D = deleted`,
+    };
+  }
+  return { ok: true, entry: { path: entry.path, status: entry.status } };
+}
+
+/**
  * Deterministically validate a raw save_task payload.
  *
  * Checks every field of the contract. On success returns a normalized
@@ -71,8 +108,25 @@ export function validateTask(raw: unknown): TaskValidation {
   if (typeof t.done !== "string" || t.done.trim() === "") {
     return { ok: false, reason: "done is required" };
   }
-  if (!Array.isArray(t.files) || t.files.some((f) => typeof f !== "string")) {
-    return { ok: false, reason: "files must be an array of strings" };
+  if (!Array.isArray(t.files)) {
+    return {
+      ok: false,
+      reason: "files must be an array of { path, status } entries (status A, M or D)",
+    };
+  }
+  const files: FileEntry[] = [];
+  const seenPaths = new Set<string>();
+  for (let i = 0; i < t.files.length; i++) {
+    const parsed = validateFileEntry(t.files[i], i);
+    if (!parsed.ok) return parsed;
+    if (seenPaths.has(parsed.entry.path)) {
+      return {
+        ok: false,
+        reason: `files[${i}].path duplicates an earlier entry: ${parsed.entry.path}`,
+      };
+    }
+    seenPaths.add(parsed.entry.path);
+    files.push(parsed.entry);
   }
   if (!Array.isArray(t.behaviors)) {
     return { ok: false, reason: "behaviors must be an array" };
@@ -113,7 +167,7 @@ export function validateTask(raw: unknown): TaskValidation {
     task: {
       title: t.title,
       instruction: t.instruction,
-      files: t.files as string[],
+      files,
       done: t.done,
       behaviors,
     },
@@ -237,15 +291,26 @@ export function evaluateCompletionGate(state: WorkflowState): string | null {
 }
 
 /**
+ * Render declared file entries as a comma list of "path (STATUS)" items.
+ *
+ * @param files - The contract's declared file entries.
+ * @returns e.g. `src/a.ts (M), tests/a.test.ts (A)`; empty string for no files.
+ */
+export function formatFiles(files: readonly FileEntry[]): string {
+  return files.map((f) => `${f.path} (${f.status})`).join(", ");
+}
+
+/**
  * Render a task contract as markdown for prompts, widgets, and compaction.
+ * Declared files render as "path (STATUS)" so the D/M/A allowlist is visible.
  *
  * @param task - The task contract to render.
  * @returns Markdown string listing title, files, done, and behaviors.
  */
-export function renderTaskContract(task: TaskContract): string {
+export function formatTask(task: TaskContract): string {
   const lines: string[] = [];
   lines.push(`### ${task.title}`);
-  lines.push(`Files: ${task.files.join(", ")}`);
+  lines.push(`Files: ${formatFiles(task.files)}`);
   lines.push(`Instruction: ${task.instruction}`);
   lines.push(`Done: ${task.done}`);
   lines.push("Behaviors:");

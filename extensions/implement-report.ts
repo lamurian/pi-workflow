@@ -1,4 +1,4 @@
-import { renderTaskContract } from "./task-contract.ts";
+import { formatTask } from "./task-contract.ts";
 import { renderHaltReport } from "./halt-report.ts";
 import type { OrchestratorResult } from "./implement-loop.ts";
 import type { TaskContract, WorkflowState } from "./state.ts";
@@ -131,7 +131,7 @@ export function generateReport(state: WorkflowState): string {
   const lines: string[] = [];
   lines.push("# Implementation Report");
   if (task) {
-    lines.push("", `## ${task.title}`, "", renderTaskContract(task));
+    lines.push("", `## ${task.title}`, "", formatTask(task));
   }
   lines.push("", "## Test Results");
   lines.push(`- Passed: ${results?.passed ?? 0}`);

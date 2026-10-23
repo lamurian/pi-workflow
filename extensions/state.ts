@@ -33,14 +33,25 @@ export interface Behavior {
   sourceFile?: string;
 }
 
+/** Status of a declared file in the contract's authoritative allowlist. */
+export type FileStatus = "A" | "M" | "D";
+
+/** One declared file in the contract's authoritative allowlist. */
+export interface FileEntry {
+  /** Repo-relative path. */
+  path: string;
+  /** A = added, M = modified, D = deleted. */
+  status: FileStatus;
+}
+
 /** The atomic implementation contract produced by /finalize. */
 export interface TaskContract {
   /** Short task title. */
   title: string;
   /** What to implement. */
   instruction: string;
-  /** Files affected. */
-  files: string[];
+  /** Authoritative file allowlist: every file the task adds, modifies or deletes. */
+  files: FileEntry[];
   /** Definition of done. */
   done: string;
   /** Behaviors covered by the task. */

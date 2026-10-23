@@ -4,7 +4,7 @@ import type {
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
 import { loadState } from "./state.ts";
-import { renderTaskContract } from "./task-contract.ts";
+import { formatTask } from "./task-contract.ts";
 
 /**
  * Intercept session_before_compact to preserve the task contract and spec.
@@ -40,7 +40,7 @@ export async function handlePreCompact(
     : "";
 
   const taskSection = state.task
-    ? `\n\n## Task Contract\n${renderTaskContract(state.task)}`
+    ? `\n\n## Task Contract\n${formatTask(state.task)}`
     : "";
 
   const nextSteps = `\n\n## Next Steps\nContinue ${state.phase.replace(/_/g, " ")} phase.`;

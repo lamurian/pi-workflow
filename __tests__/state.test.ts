@@ -95,7 +95,7 @@ describe("state machine finalizing phase (T2)", () => {
       phase: "finalizing",
       specText: "topic",
       task: {
-        title: "Round", instruction: "i", files: ["a"], done: "d",
+        title: "Round", instruction: "i", files: [{ path: "a", status: "M" }], done: "d",
         behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "manual", status: "active" }],
       },
     };

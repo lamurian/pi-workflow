@@ -15,7 +15,7 @@ import {
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import { isOutOfRepoBehavior, readGitHead } from "../extensions/git-ops.ts";
-import { buildRetryTask } from "../extensions/unit-task-text.ts";
+import { buildRetryTask, buildUnitTask } from "../extensions/unit-task-text.ts";
 import type { WorkflowState, TaskContract, Behavior } from "../extensions/state.ts";
 import type { ImplementerReport } from "../extensions/implementer-report.ts";
 import type {
@@ -74,7 +74,7 @@ function finalizingState(): WorkflowState {
     task: {
       title: "My Task",
       instruction: "do the thing",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "tests pass",
       behaviors: [
         { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
@@ -204,13 +204,63 @@ describe("runImplement", () => {
   });
 });
 
+// ═══ legacy contract refusal (T1) ═══
+describe("runImplement refuses legacy string-file contracts (T1)", () => {
+  function legacyState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "My Task",
+        instruction: "do the thing",
+        // Persisted before the D/M/A allowlist: plain-string entries.
+        files: ["src/a.ts"] as unknown as TaskContract["files"],
+        done: "tests pass",
+        behaviors: [
+          { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  it("refuses a persisted string-entry contract with a re-finalize message and stays finalizing", async () => {
+    const pi = mockPi();
+    const state = legacyState();
+    const ctx = ctxWithState(state);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    await runImplement("", pi, ctx);
+
+    assert.equal(state.phase, "finalizing", "phase must not advance on a legacy contract");
+    assert.equal((pi.calls["sendUserMessage"] ?? []).length, 0, "no steer must be sent");
+    assert.equal(notifyCalls.length, 1);
+    assert.match(notifyCalls[0]!, /\/discuss/);
+    assert.match(notifyCalls[0]!, /\/finalize/);
+    assert.match(notifyCalls[0]!, /\{ path, status \}/);
+  });
+
+  it("also refuses in --solo mode", async () => {
+    const pi = mockPi();
+    const state = legacyState();
+    const ctx = ctxWithState(state);
+
+    await runImplement("--solo", pi, ctx);
+
+    assert.equal(state.phase, "finalizing");
+    assert.equal((pi.calls["sendUserMessage"] ?? []).length, 0);
+  });
+});
+
 // ═══ B1: fire-and-forget orchestration launch ═══
 describe("B1: fire-and-forget orchestration launch", () => {
   function twoBehaviorTask(): TaskContract {
     return {
       title: "Fire Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -306,7 +356,7 @@ describe("B2: in-flight guard", () => {
       task: {
         title: "Guard Task",
         instruction: "do the thing",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "all green",
         behaviors: [
           { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
@@ -448,7 +498,7 @@ describe('B3: live footer status (key "implement")', () => {
     return {
       title: "Status Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: behaviorIds.map((id, i) => ({
         id,
@@ -632,7 +682,7 @@ describe("B4: completion report as an agent turn", () => {
       task: {
         title: "Report Task",
         instruction: "do the thing",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "all green",
         behaviors: [
           { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
@@ -763,7 +813,7 @@ describe("B5: halt report as an agent turn", () => {
     return {
       title: "Halt Task",
       instruction: "do the thing",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1064,7 +1114,7 @@ describe("T1: git gate reads ExecResult.code", () => {
     return {
       title: "Code Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1170,7 +1220,7 @@ describe("T1: HEAD-gate success path", () => {
     return {
       title: "Orch Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1358,7 +1408,7 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     return {
       title: "Hook Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1536,7 +1586,7 @@ describe("T11: resume safety", () => {
       task: {
         title: "Resume Task",
         instruction: "do things",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "all green",
         behaviors: [
           { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1656,7 +1706,7 @@ describe("T6: exception safety in runImplement", () => {
     return {
       title: "Crash Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1725,7 +1775,7 @@ describe("T4: retry once, halt with handoff, resume on re-run", () => {
     return {
       title: "T4 Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -1893,7 +1943,7 @@ describe("T6: manual behaviors flagged in the final report", () => {
       task: {
         title: "Ship the thing",
         instruction: "do the thing",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "tests green + docs updated",
         behaviors: [
           { id: "T1", description: "adds retry backoff", expectedOutput: "retries", kind: "test", status: "done" },
@@ -1921,7 +1971,7 @@ describe("T6: manual behaviors flagged in the final report", () => {
       task: {
         title: "Ship the thing",
         instruction: "do the thing",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "tests green",
         behaviors: [
           { id: "T1", description: "adds retry backoff", expectedOutput: "retries", kind: "test", status: "done" },
@@ -2067,7 +2117,7 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     return {
       title: "Guard Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         {
@@ -2217,7 +2267,7 @@ describe("blockedCommands: mustRunNow pause-halt", () => {
     return {
       title: "Code Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2329,7 +2379,7 @@ describe("blockedCommands: deferrable collection", () => {
     return {
       title: "Code Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2426,7 +2476,7 @@ describe("blockedCommands: resume assumes the pending command was run", () => {
     return {
       title: "Code Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2515,6 +2565,30 @@ describe("blockedCommands: resume assumes the pending command was run", () => {
   });
 });
 
+// ═══ buildUnitTask renders the D/M/A allowlist (T1) ═══
+describe("buildUnitTask file rendering (T1)", () => {
+  it("renders each declared file as 'path (STATUS)'", () => {
+    const task: TaskContract = {
+      title: "Allowlist Task",
+      instruction: "do the thing",
+      files: [
+        { path: "src/a.ts", status: "M" },
+        { path: "tests/a.test.ts", status: "A" },
+        { path: "src/legacy.ts", status: "D" },
+      ],
+      done: "tests pass",
+      behaviors: [
+        { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+      ],
+    };
+
+    const text = buildUnitTask(task.behaviors[0]!, task);
+
+    assert.match(text, /Files: src\/a\.ts \(M\), tests\/a\.test\.ts \(A\), src\/legacy\.ts \(D\)/);
+    assert.match(text, /src\/a\.ts \(M\)/, "contract block carries the status too");
+  });
+});
+
 describe("buildRetryTask: timeout and missingReport branches", () => {
   function fixture(): {
     behavior: Parameters<typeof buildRetryTask>[0];
@@ -2523,7 +2597,7 @@ describe("buildRetryTask: timeout and missingReport branches", () => {
     const task: TaskContract = {
       title: "Header Task",
       instruction: "add a header",
-      files: ["src/App.tsx"],
+      files: [{ path: "src/App.tsx", status: "M" }],
       done: "tests green",
       behaviors: [
         {
@@ -2605,7 +2679,7 @@ describe("engineer's note: orchestrated forwarding", () => {
     return {
       title: "Note Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2710,7 +2784,7 @@ describe("engineer's note: retry and fix task texts", () => {
     return {
       title: "Note Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2826,7 +2900,7 @@ describe("engineer's note: retry and fix task texts", () => {
       task: {
         title: "Hook Note Task",
         instruction: "do things",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "all green",
         behaviors: [
           { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -2866,7 +2940,7 @@ describe("engineer's note: halt/resume persistence", () => {
     return {
       title: "Note Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
@@ -3023,7 +3097,7 @@ describe("out-of-repo behaviors skip the commit gate", () => {
     return {
       title: "Mixed Task",
       instruction: "do things",
-      files: ["src/a.ts"],
+      files: [{ path: "src/a.ts", status: "M" }],
       done: "all green",
       behaviors: [
         {
@@ -3131,7 +3205,7 @@ describe("out-of-repo behaviors skip the commit gate", () => {
       task: {
         title: "Outside Only",
         instruction: "do things",
-        files: ["src/a.ts"],
+        files: [{ path: "src/a.ts", status: "M" }],
         done: "all green",
         behaviors: [
           {
