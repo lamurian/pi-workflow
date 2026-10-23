@@ -1,6 +1,15 @@
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   WARM_STEER_CAP,
   canSteerWarmChild,
@@ -16,6 +25,9 @@ import type { UnitTask } from "../extensions/implementer-runner.ts";
 import { WRAP_UP_STEER_MESSAGE } from "../extensions/implementer-runner.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "../extensions/unit-client-registry.ts";
 import type { RpcUnitClient } from "../extensions/rpc-unit-client.ts";
+import { parseImplementerReport } from "../extensions/implementer-report.ts";
+import { buildUnitTask } from "../extensions/unit-task-text.ts";
+import { resetWorkflowConfigCache } from "../extensions/paths.ts";
 import {
   beginOrchestration,
   cancelOrchestration,
@@ -50,9 +62,9 @@ function mockPi(): ExtensionAPI & { calls: Record<string, unknown[]> } {
   } as unknown as ExtensionAPI & { calls: typeof calls };
 }
 
-function ctxWithState(state: WorkflowState): ExtensionContext {
+function ctxWithState(state: WorkflowState, cwd = "/tmp/test"): ExtensionContext {
   return {
-    cwd: "/tmp/test",
+    cwd,
     sessionManager: {
       getBranch: () => [{ type: "custom", customType: "workflow-state", data: state }],
     },
@@ -90,14 +102,39 @@ interface GitGateOptions {
   failCode?: number;
   /** Whether `git status --short` reports a dirty tree. */
   dirty?: () => boolean;
+  /** Whether `git rev-parse --git-path hooks/pre-commit` reports a hook path. */
+  hookPresent?: boolean;
+  /** Exit code for `git hook run --ignore-missing pre-commit`. */
+  hookExit?: number;
+  /** stdout of the hook run. */
+  hookOutput?: string;
 }
 
-/** Exec mock driving the commit gate: rev-parse/status/diff/commit sequences. */
+/** Exec mock driving the commit gate: rev-parse/status/diff/commit/hook sequences. */
 function piWithGate(opts: GitGateOptions = {}) {
   const pi = mockPi();
+  const execLog: string[][] = [];
   let head = 0;
   let commitAttempts = 0;
+  (pi as unknown as Record<string, unknown>).execLog = execLog;
   pi.exec = (async (cmd: string, args: string[]) => {
+    if (cmd === "git") execLog.push(args);
+    if (cmd === "git" && args[0] === "rev-parse" && args.includes("--git-path")) {
+      return {
+        stdout: opts.hookPresent ? ".git/hooks/pre-commit\n" : "\n",
+        stderr: "",
+        code: 0,
+        killed: false,
+      };
+    }
+    if (cmd === "git" && args[0] === "hook") {
+      return {
+        stdout: opts.hookOutput ?? "",
+        stderr: "",
+        code: opts.hookExit ?? 0,
+        killed: false,
+      };
+    }
     if (cmd === "git" && args[0] === "rev-parse") {
       return { stdout: `head${head}\n`, stderr: "", code: 0, killed: false };
     }
@@ -119,6 +156,18 @@ function piWithGate(opts: GitGateOptions = {}) {
     return { stdout: "", stderr: "", code: 0, killed: false };
   }) as ExtensionAPI["exec"];
   return pi;
+}
+
+type GatePi = ExtensionAPI & { execLog: string[][] };
+
+/** Real temp dir with an executable .git/hooks/pre-commit, for hook-present checks. */
+function makeHookRepo(): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-t6-hook-"));
+  mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+  const hook = join(dir, ".git", "hooks", "pre-commit");
+  writeFileSync(hook, "#!/bin/sh\nexit 0\n");
+  chmodSync(hook, 0o755);
+  return dir;
 }
 
 // ─── Fake kept-alive client ───────────────────────────────────────────────────
@@ -442,6 +491,207 @@ describe("orchestrator warm retries", () => {
     }
     assert.equal(warm.record.shutdowns, 1, "the live child is shut down on cancel");
     assert.equal(getActiveUnitClient(), undefined);
+  });
+});
+
+// ═══ T6: red step (enforceTdd) ═══
+describe("red step tied to implement.enforceTdd", () => {
+  /** Fresh loop run with the cancelled flag reset (cancelOrchestration is sticky). */
+  async function runLoop(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState, runner: UnitRunner) {
+    beginOrchestration(Promise.resolve());
+    try {
+      return await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    } finally {
+      endOrchestration();
+    }
+  }
+
+  it("parseImplementerReport reads an optional phase", () => {
+    const red = parseImplementerReport(assistantLine(reportJson("tests written", { phase: "red" })));
+    assert.equal(red.phase, "red");
+    const plain = parseImplementerReport(assistantLine(reportJson("done")));
+    assert.equal(plain.phase, undefined, "a report without phase has none");
+  });
+
+  it("without a live client the red result goes into a fresh continuation, not RETRY_BUDGET", async () => {
+    const pi = piWithGate({ landOnCommit: 1 }); // hookPresent defaults to false
+    const state = warmTask();
+    const ctx = ctxWithState(state);
+    const calls: UnitTask[] = [];
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      if (calls.length === 1) {
+        return { summary: "tests written", phase: "red", suggestedCommit: "feat(core): base" };
+      }
+      return { summary: "implemented", suggestedCommit: "feat(core): done T1" };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true, "the continuation lands the commit");
+    assert.match(calls[0]!.taskText, /"phase": "red"/, "the test-kind task asks for a red report");
+    const execLog = (pi as GatePi).execLog;
+    assert.ok(execLog.some((args) => args[0] === "hook"), "a red report triggers the pre-commit run");
+    assert.match(calls[1]!.taskText, /red unobservable/, "hook missing -> red cannot be observed, proceed");
+    assert.doesNotMatch(calls[1]!.taskText, /retry \d+\/5/, "the continuation is not charged to RETRY_BUDGET");
+    assert.equal(result.unitsRun, 2, "base attempt plus one continuation");
+  });
+
+  it("a live child is steered 'red observed, implement now' with the output tail", async () => {
+    const dir = makeHookRepo();
+    const pi = piWithGate({ landOnCommit: 1, hookPresent: true, hookExit: 1, hookOutput: "lint failed" });
+    const state = warmTask();
+    const ctx = ctxWithState(state, dir);
+    const calls: UnitTask[] = [];
+    let steersSeen = 0;
+    const warm = makeWarmClient((_message, emit) => {
+      steersSeen++;
+      if (steersSeen === 1) {
+        emit(assistantLine(reportJson("tests written", { phase: "red" })));
+      } else {
+        emit(assistantLine(reportJson("implemented", { suggestedCommit: "feat(core): fix T1" })));
+      }
+    });
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      setActiveUnitClient(warm.client);
+      return { summary: "red ready", phase: "red", client: warm.client };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true, "the steered implementation lands");
+    assert.equal(calls.length, 1, "the red result rides a steer, not a fresh spawn");
+    assert.equal(warm.record.steers.length, 2, "red steer, then the final round");
+    assert.match(warm.record.steers[0]!, /red observed, implement now/, "non-zero hook exit -> red observed");
+    assert.match(warm.record.steers[0]!, /lint failed/, "the hook output tail rides the steer");
+    assert.doesNotMatch(warm.record.steers[0]!, /retry \d+\/5/, "red steers are not budget-charged");
+    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"]);
+  });
+
+  it("a zero hook exit steers 'red not observed'", async () => {
+    const dir = makeHookRepo();
+    const pi = piWithGate({ landOnCommit: 1, hookPresent: true, hookExit: 0 });
+    const state = warmTask();
+    const ctx = ctxWithState(state, dir);
+    const calls: UnitTask[] = [];
+    let steersSeen = 0;
+    const warm = makeWarmClient((_message, emit) => {
+      steersSeen++;
+      if (steersSeen === 1) {
+        emit(assistantLine(reportJson("tests written", { phase: "red" })));
+      } else {
+        emit(assistantLine(reportJson("implemented", { suggestedCommit: "feat(core): fix T1" })));
+      }
+    });
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      setActiveUnitClient(warm.client);
+      return { summary: "red ready", phase: "red", client: warm.client };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true);
+    assert.match(warm.record.steers[0]!, /red not observed/, "exit 0 -> the test does not fail yet");
+    assert.match(warm.record.steers[0]!, /assert the new behavior|alreadySatisfied/, "the steer says what to do");
+  });
+
+  it("red steers count toward the 5-steer cap, then a fresh continuation takes over", async () => {
+    const dir = makeHookRepo();
+    const pi = piWithGate({ landOnCommit: 1, hookPresent: true, hookExit: 1, hookOutput: "boom" });
+    const state = warmTask();
+    const ctx = ctxWithState(state, dir);
+    const calls: UnitTask[] = [];
+    const warm = makeWarmClient((_message, emit) => {
+      emit(assistantLine(reportJson("still red", { phase: "red" })));
+    });
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      if (calls.length === 1) {
+        setActiveUnitClient(warm.client);
+        return { summary: "red", phase: "red", client: warm.client };
+      }
+      return { summary: "implemented fresh", suggestedCommit: "feat(core): fix T1" };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true, "the fresh continuation lands after the cap");
+    assert.equal(warm.record.steers.length, WARM_STEER_CAP, "exactly 5 red steers before the cap");
+    assert.equal(calls.length, 2, "the 6th red report goes to a fresh continuation");
+    assert.match(calls[1]!.taskText, /red observed, implement now/, "the check result lands in the continuation task");
+    assert.doesNotMatch(calls[1]!.taskText, /retry \d+\/5/, "still not charged to RETRY_BUDGET");
+  });
+
+  it("a red steer does not charge RETRY_BUDGET: the next fix round is still retry 1/5", async () => {
+    const dir = makeHookRepo();
+    const pi = piWithGate({ landOnCommit: 2, hookPresent: true, hookExit: 1, hookOutput: "boom" });
+    const state = warmTask();
+    const ctx = ctxWithState(state, dir);
+    const calls: UnitTask[] = [];
+    let steersSeen = 0;
+    const warm = makeWarmClient((_message, emit) => {
+      steersSeen++;
+      if (steersSeen === 1) {
+        emit(assistantLine(reportJson("implemented first try", { suggestedCommit: "feat(core): try" })));
+      } else {
+        emit(assistantLine(reportJson("fixed", { suggestedCommit: "feat(core): fix T1" })));
+      }
+    });
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      setActiveUnitClient(warm.client);
+      return { summary: "red ready", phase: "red", client: warm.client };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true);
+    assert.equal(warm.record.steers.length, 2, "one red steer, one fix steer");
+    assert.match(warm.record.steers[0]!, /red observed, implement now/);
+    assert.match(
+      warm.record.steers[1]!,
+      /## Previous attempt failed \(retry 1\/5\)/,
+      "the fix round after the red steer is still retry 1/5",
+    );
+    assert.equal(result.unitsRun, 1, "both rounds were warm steers");
+  });
+
+  it("implement.enforceTdd false removes the red phase and the check", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-t6-notdd-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "workflow.json"), JSON.stringify({ implement: { enforceTdd: false } }));
+    resetWorkflowConfigCache();
+    try {
+      const pi = piWithGate({ landOnCommit: 1 });
+      const state = warmTask();
+      const ctx = ctxWithState(state, dir);
+      const calls: UnitTask[] = [];
+      const runner: UnitRunner = async (unit) => {
+        calls.push(unit);
+        return { summary: "done", phase: "red", suggestedCommit: "feat(core): done T1" };
+      };
+
+      const result = await runLoop(pi, ctx, state, runner);
+
+      assert.equal(result.complete, true, "the attempt lands without a red phase");
+      assert.doesNotMatch(calls[0]!.taskText, /"phase": "red"/, "no red phase in the task text");
+      assert.ok(
+        !(pi as GatePi).execLog.some((args) => args[0] === "hook"),
+        "no pre-commit run is triggered",
+      );
+    } finally {
+      resetWorkflowConfigCache();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("manual-kind behaviors get no red section even with enforceTdd true", () => {
+    const state = warmTask();
+    const manual = { ...state.task!.behaviors[0]!, kind: "manual" as const };
+    const text = buildUnitTask(manual, state.task!, { enforceTdd: true });
+    assert.doesNotMatch(text, /"phase": "red"/, "the red phase is test-kind only");
   });
 });
 

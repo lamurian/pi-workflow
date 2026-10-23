@@ -8,7 +8,9 @@ import { relayImplementerEvent } from "./implementer-activity.ts";
 import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
-import { buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
+import { runPrecommitCheck } from "./precommit-check.ts";
+import { loadWorkflowConfig } from "./paths.ts";
+import { buildRedContinuationTask, buildRedSteerMessage, buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
@@ -35,16 +37,10 @@ export interface BehaviorLoopDeps {
 }
 
 /**
- * Run the unit/retry/commit loop for one active behavior: base attempt, partial
- * continuations, budget-charged retries, the mustRunNow pause, the
- * already-satisfied short-circuit, and the commit gate with fix rounds. Fix
- * rounds after a hook-rejected or no-changes verdict are steered into the
- * kept-alive test-kind child (T5 warm retries) while it is alive and below the
- * 5-steer cap; otherwise a fresh fix unit is spawned. The child is shut down
- * on landing, halt, cancel and every completion path. Shared driver state
- * (result, attemptHistory, landedCommits, workflow state) is mutated in place;
- * behavior.status flips to "done" on landing or already-satisfied. The driver
- * captures resume-context prefixes per behavior via deps.
+ * Run the unit/retry/commit loop for one active behavior: base attempt, partials,
+ * budget-charged retries, the mustRunNow pause, already-satisfied, the commit gate
+ * with fix rounds (T5 warm steers, T6 red phase) and the fresh-spawn fallback.
+ * Driver state and behavior.status are mutated in place.
  *
  * @param behavior   - The active behavior to run.
  * @param unitIndex  - 0-based position among the active units (UI progress).
@@ -61,14 +57,14 @@ export async function runBehaviorLoop(
   const { pi, ctx, state, task, runUnit, result, landedCommits, attemptHistory, findingsSection, recordFindings } = deps;
   const { noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt } = deps;
   const cwd = ctx.cwd;
+  const enforceTdd = (await loadWorkflowConfig(cwd)).implement?.enforceTdd !== false;
   // T8: attempt history is per behavior — a landed behavior's history is irrelevant to a later behavior's halt report.
   attemptHistory.length = 0;
-  // Progress visibility: a unit subprocess can run for minutes with captured stdio — announce start and landing so a healthy run never looks frozen.
+  // Progress visibility: announce start and landing so a minutes-long captured-stdio run never looks frozen.
   ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
-  // B3: live footer status under the distinct "implement" key; the "workflow" key from state.ts updateUi is never written by these frames.
   const position = `${unitIndex + 1}/${totalUnits}`;
-  ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`);
-  const baseCore = taskPrefix + buildUnitTask(behavior, task) + noteSection + resumeTreeContext;
+  ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`); // B3: the "workflow" key from state.ts updateUi is never written by these frames.
+  const baseCore = taskPrefix + buildUnitTask(behavior, task, { enforceTdd }) + noteSection + resumeTreeContext;
   const baseTask: UnitTask = {
     behaviorId: behavior.id,
     taskText: haltPrefix + baseCore + findingsSection(),
@@ -77,18 +73,15 @@ export async function runBehaviorLoop(
 
   const relay = (event: Record<string, unknown>) =>
     relayImplementerEvent(pi, ctx, behavior.id, position, event);
-  // T5: the kept-alive child absorbs hook-rejected/no-changes fixes as warm
-  // steers while alive and below WARM_STEER_CAP; everything else fresh-spawns.
+  // T5: the kept-alive child absorbs hook-rejected/no-changes fixes as warm steers below WARM_STEER_CAP.
   let liveChild: RpcUnitClient | undefined;
   let warmSteersUsed = 0;
-  /** Halt the behavior after shutting the kept-alive child down (T5). */
   const haltWithChild = async (behaviorId: string, error: string, pendingCommand?: PendingCommand) => {
     await shutdownWarmChild(liveChild);
     liveChild = undefined;
     return halt(behaviorId, error, pendingCommand);
   };
-  // T8/T6: the attempt recorder fingerprints the tree before every round (fresh
-  // spawn or warm steer), records findings, classifies the outcome, keeps history.
+  // T8/T6: the recorder fingerprints the tree before every round, records findings, classifies outcomes, keeps history.
   const recorder = createAttemptRecorder({
     behaviorId: behavior.id, cwd, runUnit, relay, recordFindings,
     fingerprint: () => readTreeFingerprint(pi, cwd),
@@ -96,15 +89,16 @@ export async function runBehaviorLoop(
     history: attemptHistory,
   });
   let attemptProgress = false;
-  // T11a: HEAD before the last round, compared with HEAD after it for the already-satisfied check (the flag alone never skips the commit gate).
-  let attemptHeadBefore: string | null = null;
+  let attemptHeadBefore: string | null = null; // T11a: HEAD before the last round, compared with HEAD after it (the flag alone never skips the commit gate).
+  const adoptRound = () => {
+    attemptProgress = recorder.progress();
+    attemptHeadBefore = recorder.headBefore();
+  };
   let attempt = await recorder.runFresh(baseTask);
   liveChild = attempt.client;
-  attemptProgress = recorder.progress();
-  attemptHeadBefore = recorder.headBefore();
+  adoptRound();
   result.unitsRun++;
-  // T6: continuation units per behavior, bounded and never charged to the retry budget; reset per behavior.
-  let continuations = 0;
+  let continuations = 0; // T6: per-behavior continuations, bounded and never charged to RETRY_BUDGET.
   let retry = 1;
   // T7: consecutive timed-out/partial attempts that neither moved the tree fingerprint nor added findings; two in a row halt the behavior early.
   let noProgressStreak = 0;
@@ -115,11 +109,9 @@ export async function runBehaviorLoop(
     liveChild = undefined;
     attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind });
     liveChild = attempt.client;
-    attemptProgress = recorder.progress();
-    attemptHeadBefore = recorder.headBefore();
+    adoptRound();
     result.unitsRun++;
   };
-  /** Run one budget-charged retry attempt (status, run, count) with the given task text. */
   const runRetry = async (taskText: string) => {
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
     await runFollowUp(taskText);
@@ -132,6 +124,22 @@ export async function runBehaviorLoop(
       result.cancelled = true;
       ctx.ui.setStatus("implement", undefined);
       return result;
+    }
+    // T6: red phase — the pre-commit result rides a warm steer (5-steer cap, never RETRY_BUDGET) or a fresh continuation.
+    if (enforceTdd && behavior.kind === "test" && attempt.phase === "red" && !attempt.error && !attempt.missingReport) {
+      const redMessage = buildRedSteerMessage(await runPrecommitCheck(pi, cwd));
+      if (canSteerWarmChild(liveChild, warmSteersUsed)) {
+        warmSteersUsed++;
+        attempt = await recorder.runSteer(liveChild!, redMessage);
+        adoptRound();
+        continue;
+      }
+      if (decideContinuation({ progressed: true, continuations }) === "continue") {
+        continuations++;
+        await runFollowUp(buildRedContinuationTask(redMessage, baseCore) + noteSection + findingsSection());
+        continue;
+      }
+      return haltWithChild(behavior.id, `Unit ${behavior.id} ran out of red-phase continuations: ${redMessage}`);
     }
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
@@ -275,21 +283,17 @@ export async function runBehaviorLoop(
       return haltWithChild(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
     }
 
-    // T5: hook-rejected/no-changes fixes go to the same live test-kind child as
-    // a steer (counts toward RETRY_BUDGET, not unitsRun) while below the cap;
-    // otherwise fall back to the fresh-spawn fix unit.
+    // T5: hook-rejected/no-changes fixes steer into the live test-kind child below the cap; else fresh-spawn.
     const fixText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
     if (behavior.kind === "test" && canSteerWarmChild(liveChild, warmSteersUsed)) {
       warmSteersUsed++;
       attempt = await recorder.runSteer(liveChild!, fixText);
-      attemptProgress = recorder.progress();
-      attemptHeadBefore = recorder.headBefore();
-      retry++;
+      adoptRound();
     } else {
       await runFollowUp(fixText);
-      retry++;
     }
+    retry++;
   }
   return undefined;
 }
