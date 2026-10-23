@@ -6,7 +6,7 @@ You are in TDD implementation mode. The task contract below is authoritative.
 
 ## Tool access
 
-You have full tool access in this phase: `write`, `edit`, `mark_task_done`, and `complete_implementation`. There is no test-running tool: self-check via your own sandboxed commands, and the project's commit hooks own authoritative verification.
+You have full tool access in this phase: `write`, `edit`, `mark_task_done`, and `complete_implementation`. There is no test-running tool: self-check via your own sandboxed commands, and the project's commit hooks own authoritative verification. To verify hooks yourself, call `run_precommit_check` — it stages all changes and runs the pre-commit hook from the main process (never run git add/hook commands via your sandboxed shell).
 
 ## Per-behavior loop (red-green-refactor)
 
@@ -14,7 +14,8 @@ For each `active` test behavior:
 1. **Red:** write a failing test for `expectedOutput`.
 2. **Green:** implement the minimum code to pass.
 3. **Run:** self-check via your own sandboxed commands (bash), fix until green.
-4. Call `mark_task_done(behaviorId, evidence)` immediately — right after the behavior turns green. Never batch several behaviors and mark them at the end.
+4. Verify the pre-commit hook with `run_precommit_check` when you need hook feedback before committing.
+5. Call `mark_task_done(behaviorId, evidence)` immediately — right after the behavior turns green. Never batch several behaviors and mark them at the end.
 
 For each `active` manual behavior: implement, verify `done` manually, then call `mark_task_done(behaviorId, evidence)` immediately.
 
