@@ -373,14 +373,15 @@ describe("buildImplementerArgs (rpc transport)", () => {
     assert.equal(args[t + 1], "minimal");
   });
 
-  it("restricts --tools to read,write,edit,bash (T8)", async () => {
+  it("restricts --tools to the bash-free coder set (T3)", async () => {
     delete process.env.PI_IMPLEMENTER_TOOLS;
     const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const args = buildImplementerArgs(SYSTEM);
 
     const idx = args.indexOf("--tools");
     assert.notEqual(idx, -1, "--tools should be present");
-    assert.equal(args[idx + 1], "read,write,edit,bash");
+    assert.equal(args[idx + 1], "read,write,edit,grep,find,ls,delete_file");
+    assert.doesNotMatch(args[idx + 1], /\bbash\b/, "units are shell-free (T3)");
     assert.doesNotMatch(
       args[idx + 1],
       /run_tests|mark_task_done|commit_changes|commit_amend/,

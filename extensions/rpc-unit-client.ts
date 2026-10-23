@@ -33,6 +33,9 @@ export interface RpcUnitClientOptions {
   systemPrompt: string;
   /** Working directory for the subprocess. */
   cwd: string;
+  /** Extra environment variables merged over process.env for the child
+   * (e.g. PI_CONTRACT_GUARD_FILE pointing at the allowlist payload). */
+  env?: Record<string, string>;
 }
 
 /**
@@ -79,7 +82,7 @@ let commandSeq = 0;
  * incrementally as strict JSONL (LF-delimited). Never throws — spawn
  * failures surface through the exit event with the error in stderr text.
  *
- * @param options - System prompt, cwd.
+ * @param options - System prompt, cwd, optional extra env for the child.
  * @returns A live client handle for the child process.
  */
 export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient {
@@ -87,6 +90,7 @@ export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient
   const invocation = getPiInvocation(args);
   const proc: ChildProcess = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,
+    env: { ...process.env, ...options.env },
     shell: false,
     stdio: ["pipe", "pipe", "pipe"],
   });

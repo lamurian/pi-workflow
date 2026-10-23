@@ -9,6 +9,7 @@ import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts"
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
 import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
+import { writeContractGuardFile } from "./contract-guard-file.ts";
 import { buildEngineerNoteSection, loadUnitPrompt } from "./unit-task-text.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
 
@@ -33,46 +34,65 @@ export type UnitRunner = (
   onEvent?: (event: Record<string, unknown>) => void,
 ) => Promise<UnitAttempt>;
 
-/** Result of the orchestrator loop. */
+/**
+ * Result of the orchestrator loop.
+ *
+ * Completion: `complete`, `unitsRun`, `landedCommits`,
+ * `satisfiedWithoutCommit`, `leftUncommitted`. Halt: `haltedOn`, `error`,
+ * `treeState`, `pendingCommand`, `deferredCommands`, `pendingManualChecks`,
+ * `attempts`, `commitsSinceBaseline`, `findings`, `diagnosis`,
+ * `recommendation`, plus `cancelled` for a /discuss cancellation.
+ */
 export interface OrchestratorResult {
-  /** True when every unit completed and the workflow returned to idle. */
   complete: boolean;
-  /** True when the run was cancelled via /discuss (B2): no state writes,
-   * no retries, and no halt/completion reports after cancellation. */
   cancelled?: boolean;
-  /** Number of units that ran (including retries). */
   unitsRun: number;
-  /** Commit subjects landed so far, in order. */
   landedCommits: string[];
-  /** Behaviors marked done without a commit via the alreadySatisfied flag (T11a). */
   satisfiedWithoutCommit: string[];
-  /** Out-of-repo behaviors (sourceFile resolves outside cwd) done but never committed. */
   leftUncommitted?: Array<{ behaviorId: string; sourceFile: string }>;
-  /** Populated when the loop halted early. */
   haltedOn?: string;
-  /** Failure detail when the loop halted. */
   error?: string;
-  /** `git status --short` snapshot captured at halt time. */
   treeState?: string;
-  /** Sandbox-blocked command the user must run before resuming (pause-halt). */
   pendingCommand?: PendingCommand;
-  /** Deferrable sandbox-blocked commands reported by units (informational). */
   deferredCommands?: BlockedCommand[];
-  /** Manual behaviors whose verification timed out — committed but unconfirmed. */
   pendingManualChecks?: PendingManualCheck[];
-  /** Per-attempt history recorded for the halted behavior (T8). */
   attempts?: AttemptRecord[];
-  /** Commit subjects since the /implement baseline, git log baseline..HEAD (T8). */
   commitsSinceBaseline?: string[];
-  /** Shared findings ledger snapshot at halt time; the report renders its tail (T8). */
   findings?: Finding[];
-  /** Derived one-line halt diagnosis (T8). */
   diagnosis?: string;
-  /** Derived one-line recommended next action (T8). */
   recommendation?: string;
 }
 
 // ─── Orchestrator loop ─────────────────────────────────────────────────────────
+
+/**
+ * Build the default unit runner for one /implement run: writes the
+ * contract-guard payload to `.git/pi-workflow/contract-guard.json` before
+ * every spawn (base attempt, retry, fix, continuation) and runs the unit
+ * with `PI_CONTRACT_GUARD_FILE` pointing at it so the child contract-guard
+ * extension can enforce the allowlist in-turn.
+ *
+ * @param pi    - ExtensionAPI (used for the baseline `git ls-tree` query).
+ * @param state - Current workflow state (supplies baselineHead).
+ * @param task  - The task contract (supplies the declared files).
+ * @returns A UnitRunner that writes the guard file, then spawns the unit.
+ */
+export function createDefaultUnitRunner(
+  pi: ExtensionAPI,
+  state: WorkflowState,
+  task: TaskContract,
+): UnitRunner {
+  return async (unit, cwd, signal, onEvent) => {
+    const guardPath = await writeContractGuardFile(
+      pi, cwd, task.files, state.baselineHead ?? "HEAD",
+    );
+    return runImplementerUnit(
+      loadUnitPrompt(), unit.taskText, cwd, signal, undefined,
+      onEvent, unit.kind === "manual",
+      { PI_CONTRACT_GUARD_FILE: guardPath },
+    );
+  };
+}
 
 /**
  * Run the orchestrator loop over a task contract (HEAD-gate design).
@@ -81,28 +101,24 @@ export interface OrchestratorResult {
  * with the unit's suggested subject — the project's pre-commit hooks fire and
  * own verification. HEAD before/after classifies the attempt: landed (done),
  * hook-rejected (investigation + fix subagent, RETRY_BUDGET retries), or
- * no-changes (same budget). A mustRunNow blockedCommands report pauses
- * immediately (no commit, no retry consumption) with pendingCommand on the
- * halt handoff. Commit-process timeouts halt as infrastructure
- * failures. Every halt persists lastHalt into workflow state so failures are
- * diagnosable from the session log. Already-done behaviors are skipped, so
- * re-running resumes cleanly. Progress notifications (unit start + landed
- * commit) keep a multi-minute run visibly alive in the UI.
+ * no-changes (same budget). Commit-process timeouts halt as infrastructure
+ * failures; every halt persists lastHalt into workflow state. Already-done
+ * behaviors are skipped, so re-running resumes cleanly.
  *
  * The per-behavior unit/retry/commit loop lives in runBehaviorLoop
  * (behavior-loop.ts); this driver owns unit filtering, halt wiring, the
  * shared findings ledger, resume context, and the empty-units gate.
  *
- * A non-empty engineerNote is appended to every unit's task text: the base
- * attempt, every retry (buildRetryTask), and every fix subagent (whose
- * original task text already carries it). On completion the loop clears
- * state.engineerNote along with the phase switch to idle.
+ * A non-empty engineerNote is appended to every unit's task text; on
+ * completion the loop clears state.engineerNote with the phase switch to
+ * idle.
  *
  * @param pi           - ExtensionAPI reference.
  * @param ctx          - Extension context (cwd, UI).
  * @param state        - Current workflow state (mutated in place).
  * @param task         - The task contract.
- * @param runUnit      - Injectable unit runner (defaults to the real subprocess).
+ * @param runUnit      - Injectable unit runner (defaults to createDefaultUnitRunner:
+ *                       write the guard file, then spawn with PI_CONTRACT_GUARD_FILE).
  * @param engineerNote - Optional engineer's note forwarded from /implement.
  * @returns Loop outcome including landed commits and halt details.
  */
@@ -111,7 +127,7 @@ export async function runOrchestratedImplement(
   ctx: ExtensionContext,
   state: WorkflowState,
   task: TaskContract,
-  runUnit: UnitRunner = (unit, cwd, signal, onEvent) => runImplementerUnit(loadUnitPrompt(), unit.taskText, cwd, signal, undefined, onEvent, unit.kind === "manual"),
+  runUnit: UnitRunner = createDefaultUnitRunner(pi, state, task),
   engineerNote?: string,
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
@@ -124,8 +140,8 @@ export async function runOrchestratedImplement(
 
   /**
    * Append a unit attempt's report findings to the shared ledger and
-   * persist the state. Exact duplicates are skipped; when nothing new
-   * lands, no persist happens.
+   * persist the state (exact duplicates skipped; no persist when nothing
+   * new lands).
    *
    * @returns True when at least one new finding landed in the ledger.
    */
@@ -148,15 +164,13 @@ export async function runOrchestratedImplement(
     pendingManualChecks: [],
   };
 
-  // T8: per-attempt history of the currently-halted-behavior candidate.
-  // Reset per behavior; on halt it feeds the attempt table, the diagnosis
-  // derivation and lastHalt persistence.
+  // T8: per-attempt history of the currently-halted-behavior candidate;
+  // reset per behavior, feeds the attempt table, diagnosis and lastHalt.
   const attemptHistory: AttemptRecord[] = [];
 
   // Steering (T4): while a verification pause is open, plain user input at
-  // the main prompt is consumed and forwarded to the live child; slash
-  // commands and everything outside a pause pass through. Unregistered on
-  // every exit path via cleanupOrchestration.
+  // the main prompt is forwarded to the live child; unregistered on every
+  // exit path via cleanupOrchestration.
 
   const halt = async (
     behaviorId: string,
@@ -168,10 +182,8 @@ export async function runOrchestratedImplement(
     result.error = error;
     result.treeState = await readTreeState(pi, cwd);
     if (pendingCommand) result.pendingCommand = pendingCommand;
-    // T8: enrich the halt — cumulative commits since the /implement
-    // baseline (per-run fallback stays in composeHaltReport), the halted
-    // behavior's attempt history, the findings tail, and a derived
-    // diagnosis + recommended next action. All of it persists to lastHalt.
+    // T8: enrich the halt with baseline commits, attempt history, findings
+    // tail and a derived diagnosis — all persisted to lastHalt.
     const commits = await readCommitsSinceBaseline(pi, cwd, state.baselineHead);
     if (commits?.length) result.commitsSinceBaseline = commits;
     result.attempts = attemptHistory.map((entry) => ({ ...entry }));
@@ -223,12 +235,9 @@ export async function runOrchestratedImplement(
   }
 
   const totalUnits = units.length;
-  // Resume after a mustRunNow pause-halt: the user was asked to run the
-  // blocked command outside the sandbox. Assume it was executed — the
-  // unit must not attempt it (its sandbox still blocks it). Capture the
-  // note before the loop (a landed commit clears state.lastHalt), attach
-  // it only to the behavior that halted, then clear it so later behaviors
-  // never inherit it.
+  // Resume after a mustRunNow pause-halt: assume the user ran the blocked
+  // command. Capture the note before the loop (a landed commit clears
+  // state.lastHalt) and attach it only to the behavior that halted.
   let pendingNote: { behaviorId: string; note: string } | undefined;
   if (state.lastHalt?.pendingCommand) {
     const pending = state.lastHalt.pendingCommand;

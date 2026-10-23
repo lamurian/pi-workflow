@@ -95,6 +95,8 @@ function hasParseableReport(text: string): boolean {
  *                       orchestrator can pause for human verification with the
  *                       child still alive. Only honored on the success path;
  *                       failures always shut the child down.
+ * @param env          - Extra environment for the child (e.g.
+ *                       PI_CONTRACT_GUARD_FILE), merged over process.env.
  * @returns Parsed report, plus `client` when kept alive and
  *          `error`/`timedOut`/`missingReport` on failure.
  */
@@ -106,8 +108,9 @@ export async function runImplementerUnit(
   timeoutMs: number = getImplementerTimeoutMs(),
   onEvent?: (event: Record<string, unknown>) => void,
   keepAlive = false,
+  env?: Record<string, string>,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
-  const client = spawnRpcUnitClient({ systemPrompt, cwd });
+  const client = spawnRpcUnitClient({ systemPrompt, cwd, env });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });
 }

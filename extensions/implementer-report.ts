@@ -1,7 +1,22 @@
 // ─── Implementer subprocess (orchestrator units) ─────────────────────────────
 
-/** Tools granted to an implementer subprocess: read + filesystem + bash only. */
-const DEFAULT_IMPLEMENTER_TOOLS = "read,write,edit,bash";
+import { fileURLToPath } from "node:url";
+
+/** Bash-free tools granted to an implementer subprocess by default. */
+const DEFAULT_IMPLEMENTER_TOOLS = "read,write,edit,grep,find,ls,delete_file";
+
+/**
+ * Absolute path of the child contract-guard extension.
+ *
+ * Resolved from this module's location so the unit spawn can load it
+ * explicitly via `--no-extensions -e <path>` regardless of the cwd the
+ * subprocess is spawned in.
+ *
+ * @returns Absolute filesystem path of extensions/contract-guard/index.ts.
+ */
+export function contractGuardExtensionPath(): string {
+  return fileURLToPath(new URL("./contract-guard/index.ts", import.meta.url));
+}
 
 /** A sandbox-blocked command reported by an implementer unit. */
 export interface BlockedCommand {
@@ -34,7 +49,8 @@ export interface ImplementerReport {
 /**
  * Resolve the tool allowlist for implementer subprocesses.
  *
- * Defaults to `read,write,edit,bash`; the `PI_IMPLEMENTER_TOOLS` env var
+ * Defaults to `read,write,edit,grep,find,ls,delete_file`; the
+ * `PI_IMPLEMENTER_TOOLS` env var
  * overrides the full list for environments where tool names differ (e.g.
  * a renamed shell tool) or a tighter grant is wanted.
  *
@@ -53,11 +69,14 @@ export function getImplementerTools(
  *
  * Spawns a long-lived `pi --mode rpc` child: the task text travels over
  * stdin as a JSONL `prompt` command (never in argv), keeping stdin open
- * for later steering. Lean flags skip extension/skill/session loading for
- * fast startup and determinism. Tools are restricted to the implementer
- * allowlist (default `read,write,edit,bash`) — the unit cannot commit or
- * touch workflow state; the orchestrator owns both. Does NOT pass --model
- * so the subprocess uses the user's default model.
+ * for later steering. Lean flags skip session/skill loading for fast
+ * startup and determinism; `--no-extensions` disables extension
+ * discovery while `-e` loads exactly one extension: the child
+ * contract-guard that enforces the contract's file allowlist in-turn.
+ * Units are bash-free: the tools are restricted to the implementer
+ * allowlist (default `read,write,edit,grep,find,ls,delete_file`) — no
+ * shell, no commit, no workflow state; the orchestrator owns all three.
+ * Does NOT pass --model so the subprocess uses the user's default model.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
  * @returns Array of CLI arguments for the implementer subprocess.
@@ -67,6 +86,7 @@ export function buildImplementerArgs(systemPrompt: string): string[] {
     "--mode", "rpc",
     "--no-session",
     "--no-extensions",
+    "-e", contractGuardExtensionPath(),
     "--no-skills",
     "--offline",
     "--thinking", "minimal",
