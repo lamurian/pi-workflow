@@ -273,7 +273,7 @@ export async function runBehaviorLoop(
 
     const subject = pickCommitSubject(attempt, behavior);
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
-    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry);
+    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead);
     // T8: the commit-gate verdict seals the last attempt's outcome in the halt report's attempt table (landed attempts reset with the next behavior's history).
     if (commit.outcome !== null) sealLastAttempt(commit.outcome.kind);
 
@@ -295,6 +295,17 @@ export async function runBehaviorLoop(
       updateUi(state, ctx);
       ctx.ui.notify(`Landed commit for ${behavior.id}: ${subject}`, "info");
       break;
+    }
+
+    if (commit.outcome.kind === "contract-guard") {
+      return halt(
+        behavior.id,
+        `Staged diff for ${behavior.id} violates the contract's file allowlist — the ` +
+          `declared files are authoritative. Fix the change to match the declarations, ` +
+          `or re-declare the affected paths via /discuss -> /finalize with A/M/D status, ` +
+          `then /implement resumes.\n\n` +
+          commit.outcome.investigation,
+      );
     }
 
     if (commit.outcome.kind === "test-guard") {

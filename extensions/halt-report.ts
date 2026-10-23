@@ -30,6 +30,7 @@ export type AttemptOutcome =
   | "hook-rejected"
   | "no-changes"
   | "test-guard"
+  | "contract-guard"
   | "blocked"
   | "commit-timeout"
   | "landed"
@@ -148,6 +149,14 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
       recommendation:
         "Split this behavior into smaller behaviors via /discuss -> /finalize, " +
         "or raise PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.",
+    };
+  }
+  if (outcomes.includes("contract-guard")) {
+    return {
+      diagnosis: "staged diff violates the declared file allowlist",
+      recommendation:
+        "Re-declare the affected paths via /discuss -> /finalize (list them in files " +
+        "with A/M/D status), then run /implement again.",
     };
   }
   if (outcomes.includes("test-guard")) {

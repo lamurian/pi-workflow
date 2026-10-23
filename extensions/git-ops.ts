@@ -3,6 +3,7 @@ import { resolve, sep } from "node:path";
 import { computeTreeFingerprint } from "./unit-progress.ts";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
+import { classifyBaselineDiff } from "./contract-guard-core.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, TaskContract } from "./state.ts";
 
@@ -133,6 +134,8 @@ export function pickCommitSubject(
  * @param behavior - The behavior being committed (for investigations).
  * @param task     - The task contract (declared files + test-kind sourceFiles).
  * @param attempt  - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
+ * @param baselineHead - HEAD recorded when /implement started; the staged diff
+ *                       is measured against it (falls back to HEAD).
  * @returns The classified commit attempt.
  */
 export async function commitAndGate(
@@ -142,6 +145,7 @@ export async function commitAndGate(
   behavior: Behavior,
   task: TaskContract,
   attempt: number,
+  baselineHead?: string,
 ): Promise<CommitAttempt> {
   const timeoutMs = getCommitTimeoutMs();
   const headBefore = await readGitHead(pi, cwd);
@@ -150,15 +154,33 @@ export async function commitAndGate(
   let timedOut = false;
   try {
     await pi.exec("git", ["add", "--all"], { cwd });
+    // Authoritative allowlist guard: name-status measured against the /implement
+    // baseline (falling back to HEAD). On a violation the commit is never
+    // invoked — the loop halts with a contract-guard outcome.
+    const baselineRef = baselineHead ?? "HEAD";
+    const nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
+    const allowlist = classifyBaselineDiff({
+      nameStatus: nameStatusRes,
+      files: task.files,
+      baselineRef,
+    });
+    if (allowlist.violations.length > 0) {
+      return {
+        outcome: {
+          kind: "contract-guard",
+          investigation: allowlist.investigation,
+          violations: allowlist.violations,
+        },
+      };
+    }
     // Staged-diff tamper guard: inspect before committing. On a violation the
     // commit is never invoked — the loop halts with a test-guard outcome.
-    const nameStatusRes = await pi.exec("git", ["diff", "--cached", "--name-status"], { cwd });
     const unifiedRes = await pi.exec("git", ["diff", "--cached"], { cwd });
     const testKindSourceFiles = task.behaviors
       .filter((b) => b.kind === "test" && b.sourceFile)
       .map((b) => b.sourceFile!);
     const staged = classifyStagedDiff({
-      nameStatus: nameStatusRes.stdout ?? "",
+      nameStatus: nameStatusRes,
       declaredFiles: task.files.map((f) => f.path),
       testKindSourceFiles,
       attempt,
@@ -201,6 +223,42 @@ export async function commitAndGate(
   });
   if (outcome.kind === "landed") return { outcome: null, subject };
   return { outcome };
+}
+
+/**
+ * Read `git diff --cached --name-status --no-renames <ref>` for the allowlist
+ * and test-guard checks. Falls back to HEAD output on a failed diff so a bad
+ * baseline never bricks the gate (hooks still gate the commit).
+ *
+ * @param pi  - ExtensionAPI reference.
+ * @param cwd - Working directory.
+ * @param ref - Baseline ref (baselineHead or "HEAD").
+ * @returns Raw name-status output, or "" when git fails.
+ */
+async function runBaselineNameStatus(
+  pi: ExtensionAPI,
+  cwd: string,
+  ref: string,
+): Promise<string> {
+  try {
+    const res = await pi.exec(
+      "git",
+      ["diff", "--cached", "--name-status", "--no-renames", ref],
+      { cwd },
+    );
+    if (res.code === 0) return res.stdout ?? "";
+    if (ref !== "HEAD") {
+      const fallback = await pi.exec(
+        "git",
+        ["diff", "--cached", "--name-status", "--no-renames", "HEAD"],
+        { cwd },
+      );
+      if (fallback.code === 0) return fallback.stdout ?? "";
+    }
+    return "";
+  } catch {
+    return "";
+  }
 }
 
 /**

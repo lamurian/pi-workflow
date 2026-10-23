@@ -15,7 +15,9 @@ export type GateOutcome =
   /** The commit process itself timed out — infrastructure, not a hook failure. */
   | { kind: "commit-timeout"; investigation: string }
   /** The staged diff deletes, skips, or retries-touches undeclared tests. */
-  | { kind: "test-guard"; investigation: string; violations: string[] };
+  | { kind: "test-guard"; investigation: string; violations: string[] }
+  /** The staged diff against the baseline violates the contract's file allowlist. */
+  | { kind: "contract-guard"; investigation: string; violations: string[] };
 
 /** Everything the gate needs to classify one commit attempt. */
 export interface GateInput {
@@ -164,6 +166,13 @@ export function buildFixTask(
       `test paths, re-declare them via /discuss -> /finalize listing those paths ` +
       `in files, then /implement resumes. Do NOT delete or weaken tests to land ` +
       `this commit.`;
+  } else if (outcome.kind === "contract-guard") {
+    body =
+      `${outcome.investigation}\n\n` +
+      `The contract's files list is an AUTHORITATIVE allowlist, enforced by the ` +
+      `orchestrator before every commit: every staged path must be declared with ` +
+      `exactly its staged status. Fix the change to match the declarations, or ` +
+      `re-declare the paths via /discuss -> /finalize, then /implement resumes.`;
   } else if (outcome.kind === "hook-rejected") {
     body =
       `${outcome.investigation}\n\n## Raw hook output\n\n${outcome.hookOutput || "(empty)"}`;

@@ -149,7 +149,14 @@ function contract(): TaskContract {
   return {
     title: "Scratch feature",
     instruction: "Add greet and shout helpers",
-    files: [{ path: "src/greet.js", status: "M" }, { path: "src/shout.js", status: "M" }],
+    // Statuses are relative to the /implement baseline: none of these files
+    // exist at baseline, so every one is declared A (including test files).
+    files: [
+      { path: "src/greet.js", status: "A" },
+      { path: "src/shout.js", status: "A" },
+      { path: "test/t1.test.js", status: "A" },
+      { path: "test/t2.test.js", status: "A" },
+    ],
     done: "npm test green",
     behaviors: [
       { id: "T1", description: "greet helper", expectedOutput: "greet() returns hello", kind: "test", status: "active" },
@@ -325,7 +332,10 @@ describe.skipIf(!RUN_LIVE)("orchestrator live smoke (M2)", () => {
       const state = finalizingState({
         title: "Hook feature",
         instruction: "Add greet helper",
-        files: [{ path: "src/greet.js", status: "M" }],
+        files: [
+          { path: "src/greet.js", status: "A" },
+          { path: "test/t1.test.js", status: "A" },
+        ],
         done: "hooks green",
         behaviors: [
           { id: "T1", description: "greet helper", expectedOutput: "greet() returns hello", kind: "test", status: "active" },

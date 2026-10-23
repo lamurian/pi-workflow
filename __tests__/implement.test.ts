@@ -2117,7 +2117,13 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     return {
       title: "Guard Task",
       instruction: "do things",
-      files: [{ path: "src/a.ts", status: "M" }],
+      // The test-kind sourceFile is declared D so the contract allowlist stays
+      // clean and the staged-diff guard's sourceFile-deletion rule is what
+      // trips (undeclared paths now halt earlier as contract-guard).
+      files: [
+        { path: "src/a.ts", status: "M" },
+        { path: "tests/a.test.ts", status: "D" },
+      ],
       done: "all green",
       behaviors: [
         {
@@ -2153,13 +2159,13 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
         return { stdout: "", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
-        return { stdout: "D\tpkg/old_test.go\n", stderr: "", code: 0, killed: false };
+        return { stdout: "D\ttests/a.test.ts\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "diff") {
         return {
           stdout:
-            "diff --git a/pkg/old_test.go b/pkg/old_test.go\n" +
-            "--- a/pkg/old_test.go\n+++ b/pkg/old_test.go\n" +
+            "diff --git a/tests/a.test.ts b/tests/a.test.ts\n" +
+            "--- a/tests/a.test.ts\n+++ b/tests/a.test.ts\n" +
             "@@ -1,2 +0,0 @@\n" +
             "-func TestOld(t *testing.T) { assert.True(t, true) }\n",
           stderr: "",
@@ -2202,7 +2208,7 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     assert.match(result.error ?? "", /test-guard|Staged-diff guard/i);
     assert.ok(state.lastHalt, "halt persists lastHalt");
     assert.equal(state.lastHalt!.behaviorId, "T1");
-    assert.match(state.lastHalt!.error, /D\tpkg\/old_test\.go/, "lastHalt carries the name-status lines");
+    assert.match(state.lastHalt!.error, /D\ttests\/a\.test\.ts/, "lastHalt carries the name-status lines");
     assert.match(state.lastHalt!.error, /re-declare/, "lastHalt carries re-declare guidance");
     assert.match(state.lastHalt!.error, /\/finalize/, "lastHalt names the /discuss -> /finalize path");
   });
