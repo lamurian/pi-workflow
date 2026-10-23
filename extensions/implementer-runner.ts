@@ -56,7 +56,7 @@ export interface UnitRunnerOptions {
  * @param text - Final assistant message text (may be empty).
  * @returns True when a valid report block exists.
  */
-function hasParseableReport(text: string): boolean {
+export function hasParseableReport(text: string): boolean {
   const match = text.match(/```json\s*([\s\S]*?)```/);
   if (!match) return false;
   try {

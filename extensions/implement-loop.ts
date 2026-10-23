@@ -86,9 +86,12 @@ export function createDefaultUnitRunner(
     const guardPath = await writeContractGuardFile(
       pi, cwd, task.files, state.baselineHead ?? "HEAD",
     );
+    // T5: keep the child alive after every report — test-kind children absorb
+    // hook-rejected/no-changes fixes as warm steers; the behavior loop shuts
+    // them down on landing, halt, cancel and completion paths.
     return runImplementerUnit(
       loadUnitPrompt(), unit.taskText, cwd, signal, undefined,
-      onEvent, unit.kind === "manual",
+      onEvent, true,
       { PI_CONTRACT_GUARD_FILE: guardPath },
     );
   };
@@ -97,21 +100,18 @@ export function createDefaultUnitRunner(
 /**
  * Run the orchestrator loop over a task contract (HEAD-gate design).
  *
- * For each active behavior, in order: run the unit (subprocess), then commit
+ * For each active behavior: run the unit (kept-alive subprocess), then commit
  * with the unit's suggested subject — the project's pre-commit hooks fire and
  * own verification. HEAD before/after classifies the attempt: landed (done),
- * hook-rejected (investigation + fix subagent, RETRY_BUDGET retries), or
- * no-changes (same budget). Commit-process timeouts halt as infrastructure
- * failures; every halt persists lastHalt into workflow state. Already-done
- * behaviors are skipped, so re-running resumes cleanly.
+ * hook-rejected, or no-changes — both retried via warm steers into the live
+ * child when possible (T5), else fresh fix units, RETRY_BUDGET times. Halts
+ * persist lastHalt into workflow state; already-done behaviors are skipped.
  *
  * The per-behavior unit/retry/commit loop lives in runBehaviorLoop
  * (behavior-loop.ts); this driver owns unit filtering, halt wiring, the
  * shared findings ledger, resume context, and the empty-units gate.
- *
  * A non-empty engineerNote is appended to every unit's task text; on
- * completion the loop clears state.engineerNote with the phase switch to
- * idle.
+ * completion the loop clears state.engineerNote with the phase switch to idle.
  *
  * @param pi           - ExtensionAPI reference.
  * @param ctx          - Extension context (cwd, UI).
@@ -139,9 +139,8 @@ export async function runOrchestratedImplement(
   const findingsSection = () => renderFindingsSection(state.findings);
 
   /**
-   * Append a unit attempt's report findings to the shared ledger and
-   * persist the state (exact duplicates skipped; no persist when nothing
-   * new lands).
+   * Append a unit attempt's report findings to the shared ledger and persist
+   * the state (exact duplicates skipped; no persist when nothing new lands).
    *
    * @returns True when at least one new finding landed in the ledger.
    */
