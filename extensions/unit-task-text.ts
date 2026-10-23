@@ -2,6 +2,7 @@ import { RETRY_BUDGET } from "./commit-gate.ts";
 import { formatFiles, formatTask } from "./task-contract.ts";
 import type { PrecommitCheckResult } from "./precommit-check.ts";
 import type { Behavior, TaskContract } from "./state.ts";
+import { buildContextPreload } from "./unit-context-preload.ts";
 import type { UnitAttempt } from "./implement-loop.ts";
 
 // ─── Task text builders ────────────────────────────────────────────────────────
@@ -51,6 +52,8 @@ export function buildEngineerNoteSection(note: string): string {
 export interface UnitTaskOptions {
   /** When explicitly true, test-kind tasks gain a red-phase section (T6). */
   enforceTdd?: boolean;
+  /** When set, declared M/D file contents are preloaded into the task text (T7). */
+  preloadCwd?: string;
 }
 
 /**
@@ -93,6 +96,7 @@ export function buildUnitTask(
     "",
     "## Contract (for reference)",
     formatTask(task),
+    options.preloadCwd ? buildContextPreload(task.files, options.preloadCwd) : "",
     redSection,
     "End with the JSON report block (summary, suggestedCommit) as instructed.",
   ]
