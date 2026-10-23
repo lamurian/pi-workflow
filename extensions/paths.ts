@@ -92,6 +92,13 @@ export interface ImplementConfig {
    * @example "npm run test:ci"
    */
   testCommand?: string;
+  /**
+   * Test command overrides as argv arrays: when set (non-empty after
+   * validation), they are used as-is and manifest detection is skipped
+   * entirely (suite source "config").
+   * @example [["npm", "run", "test:ci"]]
+   */
+  testCommands?: string[][];
 }
 
 /** Top-level workflow configuration from workflow.json. */
