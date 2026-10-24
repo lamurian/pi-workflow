@@ -13,7 +13,7 @@ You are drafting the atomic implementation contract from this discussion.
 
 - `title` — short task name.
 - `instruction` — what to implement.
-- `files` — the **authoritative file allowlist**, entries of the form `{ path, status }`. Every file the task touches must be listed with its status: `A` (added — including new test and implementation files), `M` (modified) or `D` (deleted). The allowlist is enforced during implementation: a unit may only write or edit declared `A`/`M` paths and only delete declared `D` paths. Declare every test path the contract updates or removes here (see Test classification).
+- `files` — the **authoritative file allowlist**, entries of the form `{ path, status }`. Every file the task touches must be listed with its status: `A` (added — including new test and implementation files), `M` (modified) or `D` (deleted). The allowlist is enforced during implementation: a unit may only write or edit declared `A`/`M` paths and only delete declared `D` paths. Declare every test path the contract updates or removes here (see Test classification). When `save_task` detects test suites, the `.pi/extensions/test.ts` entry is **auto-injected** into `files` by the tool itself (`A` when untracked, `M` when git tracks it) — keep that entry: it is how the implementer unit is allowed to regenerate the generated test extension in place.
 - `done` — definition of done (manual verification for non-test work).
 - `behaviors[]` — each behavior: `id`, `description`, `expectedOutput`, `kind`, `status`, optional `sourceFile`.
 

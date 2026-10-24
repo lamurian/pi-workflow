@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_SUITE_TIMEOUT_MS,
@@ -20,7 +20,12 @@ import {
   generateTestExtension,
   resolveTestExtensionPath,
 } from "../extensions/test-tool-ensure.ts";
-import type { TestSuiteDetection } from "../extensions/test-tool-detect.ts";
+import {
+  detectTestSuites,
+  projectFacts,
+  type TestSuiteDetection,
+} from "../extensions/test-tool-detect.ts";
+import { loadContent } from "../extensions/utils.ts";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -421,5 +426,79 @@ describe("ensureTestTool", () => {
     assert.ok(content.includes(JSON.stringify(["npm", "run", "test:ci"])), "configured argv used as-is");
     assert.equal(result.source, "config");
     assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "A" });
+  });
+});
+
+// ═══ T5 — dogfood: pi-workflow ships its own generated test extension ═══
+describe("dogfood: pi-workflow's own generated test extension (T5)", () => {
+  const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+  it("detects the repo's own suite: package.json scripts.test + package-lock -> npm run test", () => {
+    const detection = detectTestSuites(projectFacts(repoRoot));
+    assert.equal(detection.source, "detected", "manifest scan with no config override");
+    assert.deepEqual(
+      detection.suites,
+      [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
+      "package-lock.json (no pnpm/yarn/bun lock) pins the runner to npm",
+    );
+  });
+
+  it(".pi/extensions/test.ts exists and equals generateTestExtension output for that suite", () => {
+    const detection = detectTestSuites(projectFacts(repoRoot));
+    const file = join(repoRoot, ".pi", "extensions", "test.ts");
+    assert.ok(existsSync(file), ".pi/extensions/test.ts must exist in pi-workflow itself (dogfood)");
+    const content = readFileSync(file, "utf8");
+    assert.equal(
+      content,
+      generateTestExtension(detection.suites),
+      "the dogfooded file must equal the generator output for the repo's detected suite",
+    );
+    assert.ok(content.includes(GENERATED_MARKER), "the marker guards regeneration");
+    assert.equal(resolveTestExtensionPath(repoRoot), file, "resolution finds the repo's file");
+  });
+});
+
+// ═══ T5 — README documents detection, generation, auto-declaration ═══
+describe("README test-tool documentation (T5)", () => {
+  const readme = (): string => readFileSync(new URL("../README.md", import.meta.url), "utf8");
+
+  it("documents manifest-based test-suite detection with the lockfile runner", () => {
+    const content = readme();
+    assert.match(
+      content,
+      /test-suite detection|detects? (?:the )?(?:project's )?test suites/i,
+      "suite detection must be documented",
+    );
+    assert.match(content, /lockfile/i, "the lockfile-derived runner must be documented");
+  });
+
+  it("documents generation of .pi/extensions/test.ts", () => {
+    const content = readme();
+    assert.match(content, /\.pi\/extensions\/test\.ts/, "the generated file path must be named");
+    assert.match(content, /generat/i, "generation must be documented");
+  });
+
+  it("documents auto-declaration of the generated entry in the files allowlist", () => {
+    const content = readme();
+    assert.match(
+      content,
+      /auto-declar/i,
+      "auto-declaration of the generated entry must be documented",
+    );
+  });
+});
+
+// ═══ T5 — finalize-prompt.md and tdd-prompt.md updates ═══
+describe("prompt content updates (T5)", () => {
+  it("finalize-prompt.md notes the auto-injected .pi/extensions/test.ts entry", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /\.pi\/extensions\/test\.ts/, "the generated file is named");
+    assert.match(content, /auto-injected/i, "the auto-injection into files is noted");
+  });
+
+  it("tdd-prompt.md directs the solo agent to the test tool when present", async () => {
+    const content = await loadContent("tdd-prompt.md");
+    assert.match(content, /prefer the `test` tool/i, "the solo agent prefers the test tool");
+    assert.match(content, /when present/i, "the direction is conditional on the tool being present");
   });
 });
