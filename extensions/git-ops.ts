@@ -3,9 +3,15 @@ import { resolve, sep } from "node:path";
 import { computeTreeFingerprint } from "./unit-progress.ts";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
-import { classifyBaselineDiff } from "./contract-guard-core.ts";
+import {
+  classifyBaselineDiff,
+  formatDeclaredList,
+  planUnstage,
+  type DeclaredFile,
+} from "./contract-guard-core.ts";
+import { deriveAllowlist } from "./contract-derive.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
-import type { Behavior, TaskContract } from "./state.ts";
+import type { Behavior, ContractV2, TaskContract } from "./state.ts";
 
 // ─── Git helpers ───────────────────────────────────────────────────────────────
 
@@ -99,6 +105,29 @@ export interface CommitAttempt {
   outcome: Exclude<GateOutcome, { kind: "landed" }> | null;
   /** Best-effort subject when the commit landed. */
   subject?: string;
+  /**
+   * Remediation note (T6): one line per auto-unstaged cross-task-contaminated
+   * path, naming the path, its owning task(s) and the exact
+   * `git restore --staged -- <path>` command — the work stays on disk for
+   * its owning task. Absent when nothing was unstaged.
+   */
+  remediation?: string[];
+}
+
+/**
+ * Append the cross-task remediation note to a guard investigation.
+ *
+ * @param investigation - The base investigation text.
+ * @param remediation   - Remediation-note lines (empty leaves the text as-is).
+ * @returns The investigation with the remediation block appended.
+ */
+function withRemediation(investigation: string, remediation: string[]): string {
+  if (remediation.length === 0) return investigation;
+  return (
+    investigation +
+    "\n\nCross-task contamination auto-unstaged before gating (work stays on disk):\n" +
+    remediation.map((line) => `  - ${line}`).join("\n")
+  );
 }
 
 /**
@@ -136,7 +165,12 @@ export function pickCommitSubject(
  * @param attempt  - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
  * @param baselineHead - HEAD recorded when /implement started; the staged diff
  *                       is measured against it (falls back to HEAD).
- * @returns The classified commit attempt.
+ * @param contract     - The v2 contract (T6): enables per-task ownership —
+ *                       staged paths owned by other tasks are auto-unstaged
+ *                       before gating and reported in `remediation`; absent
+ *                       (v1 sessions) the plain files list gates unchanged.
+ * @returns The classified commit attempt (with the remediation note when
+ *          cross-task contamination was unstaged).
  */
 export async function commitAndGate(
   pi: ExtensionAPI,
@@ -146,23 +180,33 @@ export async function commitAndGate(
   task: TaskContract,
   attempt: number,
   baselineHead?: string,
+  contract?: ContractV2,
 ): Promise<CommitAttempt> {
   const timeoutMs = getCommitTimeoutMs();
   const headBefore = await readGitHead(pi, cwd);
   let commitOutput = "";
   let commitExitCode = 1;
   let timedOut = false;
+  /** Remediation-note lines for cross-task contamination unstaged at commit (T6). */
+  const remediation: string[] = [];
   try {
     await pi.exec("git", ["add", "--all"], { cwd });
     // Authoritative allowlist guard: name-status measured against the /implement
     // baseline (falling back to HEAD). On a violation the commit is never
-    // invoked — the loop halts with a contract-guard outcome.
+    // invoked — the loop halts with a contract-guard outcome. v2 sessions gate
+    // on the derived allowlist (refs enable per-task ownership; taskId makes a
+    // staged D on another task's path a hard violation); v1 sessions keep the
+    // plain files list without a task id.
     const baselineRef = baselineHead ?? "HEAD";
-    const nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
+    const declared: readonly DeclaredFile[] = contract
+      ? deriveAllowlist(contract)
+      : task.files;
+    let nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
     const allowlist = classifyBaselineDiff({
       nameStatus: nameStatusRes,
-      files: task.files,
+      files: declared,
       baselineRef,
+      ...(contract ? { taskId: behavior.id } : {}),
     });
     if (allowlist.violations.length > 0) {
       return {
@@ -172,6 +216,66 @@ export async function commitAndGate(
           violations: allowlist.violations,
         },
       };
+    }
+    // T6: auto-unstage cross-task contamination BEFORE gating. Staged paths
+    // declared but owned by OTHER tasks leave the index via
+    // `git restore --staged -- <path>` (the work stays on disk for the owning
+    // task), the owned subset proceeds to the commit, and every unstage is
+    // reported in the remediation note. Only truly undeclared/ownerless
+    // staged paths halt the commit — they are never unstaged.
+    if (contract) {
+      const plan = planUnstage(declared, nameStatusRes, behavior.id);
+      if (plan.undeclared.length > 0) {
+        const violations = plan.undeclared.map(
+          (path) =>
+            `staged path with no owning task: ${path} — declared, but no task refs own it`,
+        );
+        const investigation = [
+          `## Contract-guard: staged diff vs ${baselineRef}`,
+          "",
+          "Name-status:",
+          ...nameStatusRes.split("\n").filter(Boolean).map((line) => `  ${line}`),
+          "",
+          `Declared files: ${formatDeclaredList(declared)}`,
+          "",
+          "Violations:",
+          ...violations.map((v) => `  - ${v}`),
+          "",
+          "The contract's files list is authoritative — a contract change needs " +
+            "/discuss -> /finalize.",
+        ].join("\n");
+        return { outcome: { kind: "contract-guard", violations, investigation } };
+      }
+      for (const contaminated of plan.contamination) {
+        const res = await pi.exec(
+          "git",
+          ["restore", "--staged", "--", contaminated.path],
+          { cwd },
+        );
+        if (res.code !== 0) {
+          // Never proceed to the commit with contamination still staged.
+          return {
+            outcome: {
+              kind: "contract-guard",
+              violations: [
+                `failed to unstage cross-task contamination: ${contaminated.path} ` +
+                  `(owned by task ${contaminated.ownerTasks.join(", ")})`,
+              ],
+              investigation:
+                `git restore --staged -- ${contaminated.path} failed (exit ${res.code}):\n` +
+                (res.stderr || res.stdout || "(no output)"),
+            },
+          };
+        }
+        remediation.push(
+          `unstaged ${contaminated.path} (owned by task ${contaminated.ownerTasks.join(", ")}) — ` +
+            `git restore --staged -- ${contaminated.path}; the work stays on disk for its owning task`,
+        );
+      }
+      if (remediation.length > 0) {
+        // Re-read the staged diff so every later gate sees only the owned subset.
+        nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
+      }
     }
     // Staged-diff tamper guard: inspect before committing. On a violation the
     // commit is never invoked — the loop halts with a test-guard outcome.
@@ -190,9 +294,10 @@ export async function commitAndGate(
       return {
         outcome: {
           kind: "test-guard",
-          investigation: staged.investigation,
+          investigation: withRemediation(staged.investigation, remediation),
           violations: staged.violations,
         },
+        ...(remediation.length > 0 ? { remediation } : {}),
       };
     }
     const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
@@ -205,8 +310,9 @@ export async function commitAndGate(
     commitExitCode = 1;
   }
   const headAfter = await readGitHead(pi, cwd);
+  const carried = remediation.length > 0 ? { remediation } : {};
   if (!timedOut && headBefore !== null && headAfter !== null && headAfter !== headBefore) {
-    return { outcome: null, subject };
+    return { outcome: null, subject, ...carried };
   }
   // HEAD did not move: gather tree evidence for the investigation only now.
   const statusAfter = timedOut ? "" : await readTreeState(pi, cwd);
@@ -221,8 +327,14 @@ export async function commitAndGate(
     diffStat,
     timeoutMs,
   });
-  if (outcome.kind === "landed") return { outcome: null, subject };
-  return { outcome };
+  if (outcome.kind === "landed") return { outcome: null, subject, ...carried };
+  return {
+    outcome: {
+      ...outcome,
+      investigation: withRemediation(outcome.investigation, remediation),
+    },
+    ...carried,
+  };
 }
 
 /**

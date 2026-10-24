@@ -211,9 +211,11 @@ export async function runBehaviorLoop(
 
     const subject = pickCommitSubject(attempt, behavior);
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
-    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead);
+    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead, state.contractV2);
     // T8: the commit-gate verdict seals the last attempt's outcome in the halt report's attempt table (landed attempts reset with the next behavior's history).
     if (commit.outcome !== null) recorder.sealLast(commit.outcome.kind);
+    // T6: cross-task contamination auto-unstaged at commit — the remediation note (path + owning task) joins the attempt report via the shared findings ledger.
+    if (commit.remediation?.length) recordFindings(behavior.id, commit.remediation);
 
     if (commit.outcome === null) {
       await shutdownWarmChild(liveChild); // T5: landing ends the behavior — no live child survives it
@@ -233,7 +235,13 @@ export async function runBehaviorLoop(
       state.lastHalt = undefined;
       saveState(pi, state);
       updateUi(state, ctx);
-      ctx.ui.notify(`Landed commit for ${behavior.id}: ${subject}`, "info");
+      ctx.ui.notify(
+        `Landed commit for ${behavior.id}: ${subject}` +
+          (commit.remediation?.length
+            ? ` — ${commit.remediation.length} cross-task path(s) auto-unstaged (work kept on disk)`
+            : ""),
+        "info",
+      );
       break;
     }
 

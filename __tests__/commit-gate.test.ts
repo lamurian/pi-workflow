@@ -1,5 +1,16 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   RETRY_BUDGET,
   buildFixTask,
@@ -9,7 +20,8 @@ import {
   type GateInput,
 } from "../extensions/commit-gate.ts";
 import { classifyStagedDiff } from "../extensions/staged-diff-guard.ts";
-import type { Behavior, TaskContract } from "../extensions/state.ts";
+import { commitAndGate } from "../extensions/git-ops.ts";
+import type { Behavior, ContractV2, TaskContract } from "../extensions/state.ts";
 
 const BEHAVIOR: Behavior = {
   id: "T1",
@@ -264,5 +276,229 @@ describe("classifyStagedDiff (T4)", () => {
     assert.match(taskText, /enforced/i);
     assert.match(taskText, /pkg\/old_test\.go/);
     assert.match(taskText, /Original task/);
+  });
+});
+
+// ═══ T6: commit path — auto-unstage cross-task contamination ═══
+
+/** v2 contract: T1 owns src/mine.ts + tests/a.test.ts; T2 owns src/theirs.ts. */
+const CONTAMINATION_CONTRACT: ContractV2 = {
+  title: "Ownership Task",
+  instruction: "shared context only",
+  done: "green",
+  sources: [
+    { path: "src/mine.ts", status: "M", tasks: ["T1"] },
+    { path: "src/theirs.ts", status: "M", tasks: ["T2"] },
+  ],
+  tests: [{ path: "tests/a.test.ts", status: "A", tasks: ["T1"] }],
+  tasks: [
+    { id: "T1", description: "mine", expectedOutput: ["lands the owned subset"], status: "active" },
+    { id: "T2", description: "theirs", expectedOutput: ["lands later"], status: "active" },
+  ],
+};
+
+/** One recorded git command with the stdout it returned. */
+interface T6Call {
+  cmd: string;
+  args: string[];
+  stdout: string;
+}
+
+/**
+ * Exec mock for the T6 commit path: records every git command with its
+ * stdout, advances HEAD on commit, and honors `git restore --staged -- <path>`
+ * by dropping that path from every later name-status read.
+ *
+ * @param nameStatus - Fixture output for `git diff --cached --name-status`.
+ * @returns The mock ExtensionAPI plus the recorded call log.
+ */
+function piT6(nameStatus: string): { pi: ExtensionAPI; calls: T6Call[] } {
+  const calls: T6Call[] = [];
+  const restored = new Set<string>();
+  let head = 0;
+  const stagedNow = () =>
+    nameStatus
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .filter((line) => !restored.has(line.split("\t")[1] ?? ""))
+      .map((line) => `${line}\n`)
+      .join("");
+  const pi = {
+    on: () => () => {},
+    registerCommand: () => {},
+    registerTool: () => {},
+    appendEntry: () => {},
+    sendUserMessage: () => {},
+    getActiveTools: () => ["read"],
+    getAllTools: () => [{ name: "read" }],
+    setActiveTools: () => {},
+    exec: (async (cmd: string, args: string[]) => {
+      let stdout = "";
+      if (cmd === "git" && args[0] === "rev-parse") stdout = `head${head}\n`;
+      else if (cmd === "git" && args[0] === "restore") {
+        restored.add(args[args.length - 1] ?? "");
+      } else if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
+        stdout = stagedNow();
+      } else if (cmd === "git" && args[0] === "commit") {
+        head++;
+        stdout = "[main t6] landed\n";
+      }
+      const result = { stdout, stderr: "", code: 0, killed: false };
+      if (cmd === "git") calls.push({ cmd, args, stdout });
+      return result;
+    }),
+  } as unknown as ExtensionAPI;
+  return { pi, calls };
+}
+
+describe("commitUnstagesCrossTaskContamination", () => {
+  it("unstages other-task paths via git restore --staged, commits the owned subset, and reports the remediation note", async () => {
+    const { pi, calls } = piT6("M\tsrc/mine.ts\nM\tsrc/theirs.ts\n");
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(
+      attempt.outcome,
+      null,
+      `expected the owned subset to land, got ${JSON.stringify(attempt.outcome)}`,
+    );
+    const restore = calls.find((c) => c.args[0] === "restore");
+    assert.deepEqual(
+      restore ? [restore.cmd, ...restore.args] : undefined,
+      ["git", "restore", "--staged", "--", "src/theirs.ts"],
+      "the contaminated path is unstaged with the exact remediation command",
+    );
+    assert.ok(
+      calls.some((c) => c.args[0] === "commit"),
+      "the owned subset still reaches git commit",
+    );
+    // The gates after the unstage only see the committing task's paths.
+    const reads = calls.filter(
+      (c) => c.args[0] === "diff" && c.args.includes("--name-status"),
+    );
+    assert.equal(reads.length, 2, "the staged diff is re-read after the unstage");
+    assert.match(reads[0]!.stdout, /src\/theirs\.ts/, "before: contamination is staged");
+    assert.doesNotMatch(reads[1]!.stdout, /src\/theirs\.ts/, "after: contamination is gone");
+    assert.match(reads[1]!.stdout, /src\/mine\.ts/, "after: the owned path is still staged");
+    // The attempt report carries the remediation note: path + owner task + command.
+    const note = (attempt.remediation ?? []).join("\n");
+    assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
+    assert.match(note, /T2/, "the note names the owner task");
+    assert.match(
+      note,
+      /git restore --staged -- src\/theirs\.ts/,
+      "the note carries the exact command",
+    );
+    assert.match(note, /stays on disk/, "the note states the work stays on disk");
+  });
+});
+
+describe("commitStillHaltsOnUndeclaredPath", () => {
+  it("halts with the contract-change hint, never commits, and never unstages an undeclared path", async () => {
+    const { pi, calls } = piT6("M\tsrc/mine.ts\nM\tsrc/nowhere.ts\n");
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "contract-guard");
+    const investigation = attempt.outcome?.investigation ?? "";
+    assert.match(investigation, /src\/nowhere\.ts/, "the undeclared path is named");
+    assert.match(
+      investigation,
+      /\/discuss -> \/finalize/,
+      "the contract-change hint is present",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit never runs on an undeclared path",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "restore"),
+      "undeclared paths are never unstaged",
+    );
+    assert.equal(attempt.remediation, undefined, "no remediation note on a halting commit");
+  });
+});
+
+describe("remediationKeepsWorkOnDisk", () => {
+  it("the unstage never removes files from disk and keeps the foreign work out of the commit", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "pi-t6-remediation-"));
+    const gitIn = (...args: string[]): string => {
+      const res = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr ?? ""}`);
+      return (res.stdout ?? "").trim();
+    };
+    gitIn("init", "-q");
+    gitIn("config", "user.email", "t6@test");
+    gitIn("config", "user.name", "t6");
+    gitIn("config", "commit.gpgsign", "false");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    writeFileSync(join(repo, "src", "mine.ts"), "mine v1\n");
+    writeFileSync(join(repo, "src", "theirs.ts"), "theirs v1\n");
+    gitIn("add", "--all");
+    gitIn("commit", "-q", "-m", "chore: baseline");
+    const baseline = gitIn("rev-parse", "HEAD");
+    writeFileSync(join(repo, "src", "mine.ts"), "mine v2\n");
+    writeFileSync(join(repo, "src", "theirs.ts"), "theirs v2\n");
+
+    const execShim = async (
+      command: string,
+      args: string[],
+    ): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> => {
+      const res = spawnSync(command, args, { cwd: repo, encoding: "utf8" });
+      return {
+        stdout: res.stdout ?? "",
+        stderr: res.stderr ?? "",
+        code: res.status ?? 1,
+        killed: false,
+      };
+    };
+    const attempt = await commitAndGate(
+      { exec: execShim } as unknown as ExtensionAPI,
+      repo,
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      baseline,
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    // The unstaged file survives on disk with the owning task's edits intact.
+    assert.ok(existsSync(join(repo, "src", "theirs.ts")), "the file stays on disk");
+    assert.equal(
+      readFileSync(join(repo, "src", "theirs.ts"), "utf8"),
+      "theirs v2\n",
+      "the owning task's work is untouched",
+    );
+    // The commit carries only the committing task's paths.
+    assert.equal(gitIn("show", "HEAD:src/mine.ts"), "mine v2");
+    assert.equal(gitIn("show", "HEAD:src/theirs.ts"), "theirs v1", "foreign work is not committed");
+    // The foreign work remains as an UNSTAGED modification (index-only unstage);
+    // gitIn trims stdout, so the porcelain leading space may be gone.
+    assert.match(
+      gitIn("status", "--porcelain"),
+      /^ ?M src\/theirs\.ts$/m,
+      "the contaminated path is an unstaged modification, not deleted",
+    );
+    const note = (attempt.remediation ?? []).join("\n");
+    assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
+    assert.match(note, /T2/, "the note names the owner task");
   });
 });
