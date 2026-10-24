@@ -59,11 +59,9 @@ function tmpCwd(): string {
 interface MockPiOptions {
   /** sourceInfo.path of a registered `test` tool; undefined = no test tool. */
   testToolPath?: string;
-  /** Exit code of `git ls-files --error-unmatch` (0 = tracked). */
-  lsFilesCode?: number;
 }
 
-/** Mock ExtensionAPI with getAllTools + a recording exec (git ls-files seam). */
+/** Mock ExtensionAPI with getAllTools + a recording exec (T7: no git seam — nothing is tracked or declared). */
 function mockPi(opts: MockPiOptions = {}) {
   const execCalls: Array<{ cmd: string; args: string[] }> = [];
   const tools = opts.testToolPath
@@ -80,15 +78,6 @@ function mockPi(opts: MockPiOptions = {}) {
     getAllTools: () => tools,
     exec: async (cmd: string, args: string[]) => {
       execCalls.push({ cmd, args });
-      if (cmd === "git" && args[0] === "ls-files") {
-        const code = opts.lsFilesCode ?? 1;
-        return {
-          stdout: code === 0 ? `${TEST_EXTENSION_RELATIVE}\n` : "",
-          stderr: code === 0 ? "" : "error: pathspec did not match",
-          code,
-          killed: false,
-        };
-      }
       return { stdout: "", stderr: "", code: 0, killed: false };
     },
     execCalls,
@@ -164,6 +153,58 @@ async function withTimeoutEnv<T>(value: string | undefined, run: () => Promise<T
   }
 }
 
+/**
+ * Set/clear the unit-payload env vars around a generated-tool run.
+ *
+ * The host process may carry an ambient PI_UNIT_FILE / PI_CONTRACT_GUARD_FILE
+ * (the orchestrator writes one per unit spawn), so every default-scope run in
+ * these tests must control both explicitly instead of inheriting real packages.
+ */
+async function withUnitEnv<T>(unitFile: string | undefined, run: () => Promise<T>): Promise<T> {
+  const prevUnit = process.env.PI_UNIT_FILE;
+  const prevLegacy = process.env.PI_CONTRACT_GUARD_FILE;
+  if (unitFile === undefined) {
+    delete process.env.PI_UNIT_FILE;
+    delete process.env.PI_CONTRACT_GUARD_FILE;
+  } else {
+    process.env.PI_UNIT_FILE = unitFile;
+    delete process.env.PI_CONTRACT_GUARD_FILE;
+  }
+  try {
+    return await run();
+  } finally {
+    if (prevUnit === undefined) delete process.env.PI_UNIT_FILE;
+    else process.env.PI_UNIT_FILE = prevUnit;
+    if (prevLegacy === undefined) delete process.env.PI_CONTRACT_GUARD_FILE;
+    else process.env.PI_CONTRACT_GUARD_FILE = prevLegacy;
+  }
+}
+
+/** Write a unit payload carrying the given derived packages (T7). */
+function writeUnitPayload(packages: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-unit-"));
+  tmpDirs.push(dir);
+  const file = join(dir, "unit.json");
+  writeFileSync(file, JSON.stringify({ repoRoot: dir, unit: { id: "T1", packages } }));
+  return file;
+}
+
+/**
+ * Run a generated tool's execute with a controlled env: unit payload and
+ * PI_TEST_TIMEOUT_MS never leak in from the host process (T7).
+ */
+async function runTool(
+  definition: ToolDef,
+  params: Record<string, unknown> = {},
+  options: { cwd?: string; unitFile?: string; timeoutMs?: string } = {},
+): Promise<Awaited<ReturnType<ToolDef["execute"]>>> {
+  return withUnitEnv(options.unitFile, () =>
+    withTimeoutEnv(options.timeoutMs, () =>
+      definition.execute("id", params, undefined, undefined, { cwd: options.cwd ?? "/proj" }),
+    ),
+  );
+}
+
 // ═══ generateTestExtension — static shape ═══
 describe("generateTestExtension — static shape", () => {
   it("carries the GENERATED marker and no imports (self-contained)", () => {
@@ -200,9 +241,7 @@ describe("generateTestExtension — runtime behavior", () => {
     ]);
     assert.equal(definition.name, "test");
 
-    const result = await withTimeoutEnv(undefined, () =>
-      definition.execute("id1", {}, undefined, undefined, { cwd: "/proj" }),
-    );
+    const result = await runTool(definition);
 
     assert.equal(result.isError, undefined, "all-pass must not be an error");
     assert.equal(calls.length, 2, "both suites run");
@@ -225,9 +264,7 @@ describe("generateTestExtension — runtime behavior", () => {
     const src = generateTestExtension([DETECTED.suites[0]!]);
     const { definition, calls } = await loadGenerated(src, []);
 
-    await withTimeoutEnv("1500", () =>
-      definition.execute("id2", {}, undefined, undefined, { cwd: "/proj" }),
-    );
+    await runTool(definition, {}, { timeoutMs: "1500" });
 
     assert.equal(calls[0]!.opts.timeout, 1500, "the env override wins");
   });
@@ -239,9 +276,7 @@ describe("generateTestExtension — runtime behavior", () => {
       () => ({ stdout: huge, stderr: "", code: 0, killed: false }),
     ]);
 
-    const result = await withTimeoutEnv(undefined, () =>
-      definition.execute("id3", {}, undefined, undefined, { cwd: "/proj" }),
-    );
+    const result = await runTool(definition);
 
     const text = result.content[0]!.text;
     assert.ok(!text.includes("HEAD"), "the head of the output must be cut");
@@ -256,9 +291,7 @@ describe("generateTestExtension — runtime behavior", () => {
       () => ({ stdout: "", stderr: "FAIL", code: 1, killed: false }),
     ]);
 
-    const result = await withTimeoutEnv(undefined, () =>
-      definition.execute("id4", {}, undefined, undefined, { cwd: "/proj" }),
-    );
+    const result = await runTool(definition);
 
     assert.equal(result.isError, true, "a failing suite must surface isError");
     assert.match(result.content[0]!.text, /1\/2 suite\(s\) failed/);
@@ -274,12 +307,136 @@ describe("generateTestExtension — runtime behavior", () => {
       },
     ]);
 
-    const result = await withTimeoutEnv(undefined, () =>
-      definition.execute("id5", {}, undefined, undefined, { cwd: "/proj" }),
-    );
+    const result = await runTool(definition);
 
     assert.equal(result.isError, true);
     assert.match(result.content[0]!.text, /spawn failed: spawn ENOENT/);
+  });
+});
+
+// ═══ T7 — structured scope/run filters on the generated tool ═══
+describe("generated tool structured filters (T7)", () => {
+  it("testToolDefaultsToPayloadScope: no args runs payload packages on filterable suites plus all non-filterable suites", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+    ]);
+    const unitFile = writeUnitPayload(["extensions", "__tests__"]);
+
+    const result = await runTool(definition, {}, { unitFile });
+
+    assert.equal(result.isError, undefined, "the default-scope run passes");
+    assert.equal(calls.length, 2, "no suite is skipped without an explicit filter");
+    assert.deepEqual(
+      calls[0]!.args,
+      ["run", "test"],
+      "the non-filterable suite keeps its argv",
+    );
+    assert.deepEqual(
+      calls[1]!.args,
+      ["test", "./extensions/...", "./__tests__/..."],
+      "the filterable (Go) suite runs the payload's derived packages",
+    );
+    const text = result.content[0]!.text;
+    assert.match(text, /all 2 suite\(s\) passed/);
+    assert.ok(!text.includes("filtered run"), "a default-scope run carries no filtered header");
+    assert.ok(!text.includes("skipped"), "nothing is skipped on a no-args run");
+  });
+
+  it("testToolDefaultsToPayloadScope: a missing payload falls back to the suites' own package pattern", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+    ]);
+
+    const result = await runTool(definition, {}, { unitFile: undefined });
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(calls[1]!.args, ["test", "./..."], "no payload means the full unfiltered run");
+    assert.equal(calls.length, 2);
+  });
+
+  it("testToolRejectsMalformedScope: leading '-', '..' and out-of-set chars are rejected before anything runs", async () => {
+    for (const bad of ["-run=Foo", "pkg/../other", "sp ace", "pkg;rm", "pkg*", ""] as const) {
+      const src = generateTestExtension(DETECTED.suites);
+      const { definition, calls } = await loadGenerated(src, []);
+
+      const result = await runTool(definition, { scope: [bad] });
+
+      assert.equal(result.isError, true, `${JSON.stringify(bad)} must be rejected`);
+      const text = result.content[0]!.text;
+      assert.match(text, /invalid scope entry/);
+      assert.ok(text.includes(JSON.stringify(bad)), "the offending entry is named");
+      assert.equal(calls.length, 0, "nothing runs when the scope is malformed");
+    }
+  });
+
+  it("testToolRejectsMalformedScope: a structured run-only filter stays -run and never free-form argv", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+    ]);
+
+    const result = await runTool(definition, { run: "TestScope" });
+
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(
+      calls[0]!.args,
+      ["test", "-run", "TestScope", "./..."],
+      "run maps to -run <regex> on the filterable suite",
+    );
+    assert.equal(calls.length, 1, "the non-filterable suite is skipped");
+  });
+
+  it("testToolReportsSkippedSuites: a filter pass skips non-filterable suites with the explicit line and header", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+    ]);
+
+    const result = await runTool(definition, { scope: ["extensions"] });
+
+    assert.equal(calls.length, 1, "only the filterable suite runs");
+    assert.deepEqual(calls[0]!.args, ["test", "./extensions/..."]);
+    const text = result.content[0]!.text;
+    assert.equal(
+      text.split("\n")[0],
+      "filtered run — 1/2 suites — does not satisfy the done criteria",
+      "every filtered result carries the header first (n = suites run, m = total)",
+    );
+    assert.ok(
+      text.includes(
+        "suite 'javascript (npm run test)' skipped (not filterable) — filtered iteration run, not verification",
+      ),
+      "the skip line is explicit",
+    );
+    assert.equal(result.isError, undefined, "no run suite failed");
+  });
+
+  it("testToolReportsSkippedSuites: a failing filtered run still reports the header and isError", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    // Only the filterable suite execs on this filtered run (npm is skipped),
+    // so the queue's first item is what the go suite consumes.
+    const { definition } = await loadGenerated(src, [
+      () => ({ stdout: "FAIL", stderr: "", code: 1, killed: false }),
+    ]);
+
+    const result = await runTool(definition, { run: "TestX" });
+
+    assert.equal(result.isError, true);
+    const text = result.content[0]!.text;
+    assert.equal(
+      text.split("\n")[0],
+      "filtered run — 1/2 suites — does not satisfy the done criteria",
+    );
+    assert.match(text, /1\/1 suite\(s\) failed/);
+    assert.ok(
+      text.includes(
+        "suite 'javascript (npm run test)' skipped (not filterable) — filtered iteration run, not verification",
+      ),
+    );
   });
 });
 
@@ -300,9 +457,30 @@ describe("resolveTestExtensionPath", () => {
 
 // ═══ ensureTestTool ═══
 describe("ensureTestTool", () => {
-  it("writes a fresh extension and returns A when the path is untracked/absent", async () => {
+  it("ensureTestToolNoInjection: no files entry, no git query, no injection", async () => {
     const dir = tmpCwd();
-    const pi = mockPi({ lsFilesCode: 1 });
+    const pi = mockPi();
+
+    const result = await ensureTestTool(pi, dir, DETECTED);
+
+    assert.ok(!("fileEntry" in result), "no fileEntry (files) entry is returned (T7)");
+    assert.ok(!("files" in result), "nothing the caller could inject into a contract allowlist");
+    assert.deepEqual(
+      Object.keys(result).sort(),
+      ["message", "path", "source", "suites"],
+      "the result shape is exactly { source, suites, path?, message }",
+    );
+    assert.equal(
+      pi.execCalls.some((c) => c.cmd === "git"),
+      false,
+      "no git command runs — tracked-ness is never consulted",
+    );
+    assert.ok(!result.message.includes("declared"), "no allowlist-declaration wording");
+  });
+
+  it("writes a fresh extension with the marker, suites and evidence message", async () => {
+    const dir = tmpCwd();
+    const pi = mockPi();
 
     const result = await ensureTestTool(pi, dir, DETECTED);
 
@@ -311,27 +489,14 @@ describe("ensureTestTool", () => {
     const content = readFileSync(full, "utf8");
     assert.ok(content.includes(GENERATED_MARKER), "the written file carries the marker");
     assert.ok(content.includes(JSON.stringify(["npm", "run", "test"])), "suites embedded");
-    assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "A" });
     assert.equal(result.source, "detected");
     assert.equal(result.path, full);
     assert.deepEqual(result.suites, DETECTED.suites);
     assert.match(result.message, /generated/);
-    assert.match(result.message, /\.pi\/extensions\/test\.ts/);
     assert.ok(
-      pi.execCalls.some(
-        (c) => c.cmd === "git" && c.args.join(" ") === "ls-files --error-unmatch -- .pi/extensions/test.ts",
-      ),
-      "tracked-ness is decided via git ls-files --error-unmatch",
+      result.message.includes(TEST_EXTENSION_RELATIVE),
+      "the message names the repo-relative path",
     );
-  });
-
-  it("returns M when the path is tracked by git", async () => {
-    const dir = tmpCwd();
-    const pi = mockPi({ lsFilesCode: 0 });
-
-    const result = await ensureTestTool(pi, dir, DETECTED);
-
-    assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "M" });
   });
 
   it("regenerates a marked file in place with the current suites", async () => {
@@ -339,13 +504,14 @@ describe("ensureTestTool", () => {
     const full = join(dir, ".pi", "extensions", "test.ts");
     mkdirSync(join(dir, ".pi", "extensions"), { recursive: true });
     writeFileSync(full, `${GENERATED_MARKER}\n// STALE content\n`);
-    const pi = mockPi({ lsFilesCode: 0 });
+    const pi = mockPi();
 
     const result = await ensureTestTool(pi, dir, CONFIG);
 
     assert.equal(readFileSync(full, "utf8"), generateTestExtension(CONFIG.suites), "content is exactly the generator output");
     assert.equal(result.source, "config");
-    assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "M" });
+    assert.equal(result.path, full);
+    assert.ok(!("fileEntry" in result), "regeneration returns no files entry");
     assert.match(result.message, /regenerated/);
   });
 
@@ -354,12 +520,12 @@ describe("ensureTestTool", () => {
     const full = join(dir, ".pi", "extensions", "test.ts");
     mkdirSync(join(dir, ".pi", "extensions"), { recursive: true });
     writeFileSync(full, "// hand written by a human\n");
-    const pi = mockPi({ lsFilesCode: 0 });
+    const pi = mockPi();
 
     const result = await ensureTestTool(pi, dir, DETECTED);
 
     assert.equal(readFileSync(full, "utf8"), "// hand written by a human\n", "hand-written content is untouched");
-    assert.equal(result.fileEntry, undefined, "no files entry when nothing was written");
+    assert.ok(!("fileEntry" in result), "no files entry when nothing was written");
     assert.equal(result.path, undefined);
     assert.equal(result.source, "existing", "the hand-written file owns the test-tool slot");
     assert.match(result.message, /hand-written/i);
@@ -368,13 +534,13 @@ describe("ensureTestTool", () => {
 
   it("stops when a test tool from another path owns the name", async () => {
     const dir = tmpCwd();
-    const pi = mockPi({ testToolPath: "/elsewhere/extensions/test.ts", lsFilesCode: 1 });
+    const pi = mockPi({ testToolPath: "/elsewhere/extensions/test.ts" });
 
     const result = await ensureTestTool(pi, dir, DETECTED);
 
     assert.equal(existsSync(join(dir, ".pi", "extensions", "test.ts")), false, "no file is written");
     assert.equal(result.source, "existing");
-    assert.equal(result.fileEntry, undefined);
+    assert.ok(!("fileEntry" in result));
     assert.equal(result.path, undefined);
     assert.match(result.message, /elsewhere/);
   });
@@ -384,24 +550,25 @@ describe("ensureTestTool", () => {
     const full = join(dir, ".pi", "extensions", "test.ts");
     mkdirSync(join(dir, ".pi", "extensions"), { recursive: true });
     writeFileSync(full, `${GENERATED_MARKER}\n// STALE\n`);
-    const pi = mockPi({ testToolPath: full, lsFilesCode: 0 });
+    const pi = mockPi({ testToolPath: full });
 
     const result = await ensureTestTool(pi, dir, DETECTED);
 
     assert.equal(readFileSync(full, "utf8"), generateTestExtension(DETECTED.suites), "regenerated in place");
-    assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "M" });
+    assert.equal(result.path, full);
+    assert.ok(!("fileEntry" in result));
   });
 
   it("returns none and writes nothing when detection found nothing", async () => {
     const dir = tmpCwd();
-    const pi = mockPi({ lsFilesCode: 1 });
+    const pi = mockPi();
 
     const result = await ensureTestTool(pi, dir, NONE);
 
     assert.equal(existsSync(join(dir, ".pi", "extensions", "test.ts")), false);
     assert.equal(result.source, "none");
     assert.deepEqual(result.suites, []);
-    assert.equal(result.fileEntry, undefined);
+    assert.ok(!("fileEntry" in result));
     assert.match(result.message, /no test/i);
   });
 
@@ -417,7 +584,7 @@ describe("ensureTestTool", () => {
 
   it("generates the tool from config suites as-is (no manifest detection)", async () => {
     const dir = tmpCwd();
-    const pi = mockPi({ lsFilesCode: 1 });
+    const pi = mockPi();
 
     const result = await ensureTestTool(pi, dir, CONFIG);
 
@@ -425,7 +592,8 @@ describe("ensureTestTool", () => {
     assert.equal(content, generateTestExtension(CONFIG.suites));
     assert.ok(content.includes(JSON.stringify(["npm", "run", "test:ci"])), "configured argv used as-is");
     assert.equal(result.source, "config");
-    assert.deepEqual(result.fileEntry, { path: TEST_EXTENSION_RELATIVE, status: "A" });
+    assert.equal(result.path, join(dir, ".pi", "extensions", "test.ts"));
+    assert.ok(!("fileEntry" in result));
   });
 });
 

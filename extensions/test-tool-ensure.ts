@@ -1,17 +1,15 @@
-// ─── Test-tool ensure step (T2) ───────────────────────────────────────────────
+// ─── Test-tool ensure step (T2/T7) ──────────────────────────────────────────
 // Registry-aware generation of the local test extension. Decision rule:
 // a `test` tool from ANOTHER path owns the name -> stop (existing); the file
 // carries the GENERATED marker -> regenerate in place; the file exists without
 // the marker -> hand-written, never overwritten, reported; else generate.
-// The result carries the contract files entry to auto-declare (A when the
-// path is untracked/absent via `git ls-files --error-unmatch`, M when tracked,
-// none when nothing was written or an external tool owns the name), so
-// save_task can append it to the authoritative allowlist.
+// The generated extension is ORCHESTRATOR-OWNED (T7): it is never declared in
+// the contract, never auto-injected into any allowlist, and units may not
+// write it — the orchestrator regenerates and commits it itself.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { FileEntry } from "./state.ts";
 import type {
   TestSuite,
   TestSuiteDetection,
@@ -35,7 +33,7 @@ export const OUTPUT_TAIL_CHARS = 4000;
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-/** Result of the ensure step for one save_task run. */
+/** Result of the ensure step for one save_task run (T7: no files entry). */
 export interface EnsureTestToolResult {
   /** Where the effective test tool came from (persisted as state.testTool.source). */
   source: TestSuiteSource;
@@ -43,8 +41,6 @@ export interface EnsureTestToolResult {
   suites: TestSuite[];
   /** Absolute path of the generated file — present only when a file was written. */
   path?: string;
-  /** Contract files entry to auto-declare: A untracked/absent, M tracked. */
-  fileEntry?: FileEntry;
   /** One-line detection evidence for the save_task output. */
   message: string;
 }
@@ -65,13 +61,34 @@ export function resolveTestExtensionPath(cwd: string): string | undefined {
 // ── Generation ────────────────────────────────────────────────────────────────
 
 /**
+ * Whether a suite accepts the structured scope/run filters (T7).
+ *
+ * Only Go test suites are filterable: `scope` maps to package patterns
+ * (`./<path>/...`) and `run` maps to `-run <regex>`. Every other suite either
+ * runs unfiltered (no filter passed) or is skipped on a filter pass with an
+ * explicit report line. Computed at generation time and embedded per suite, so
+ * the generated file stays self-contained.
+ *
+ * @param suite - The detected suite (label + argv).
+ * @returns True for `go test ...` suites.
+ */
+function isFilterableSuite(suite: TestSuite): boolean {
+  return suite.argv[0] === "go" && suite.argv[1] === "test";
+}
+
+/**
  * Generate the self-contained test extension source for the given suites.
  *
- * The output carries the GENERATED marker, imports nothing, and default-exports
- * a factory registering the `test` tool: every suite runs sequentially via
- * `pi.exec` (argv arrays, never shell strings) with a per-suite
- * `PI_TEST_TIMEOUT_MS` budget (default 300000), labeled output capped at a
- * 4000-char tail, and an isError result when any suite fails.
+ * The output carries the GENERATED marker, imports nothing (node:fs is loaded
+ * lazily inside execute), and default-exports a factory registering the `test`
+ * tool with structured filters: `scope?: string[]` (repo-relative paths, each
+ * mapped to `./<path>/...` for Go suites) and `run?: string` (mapped to
+ * `-run <regex>` for Go suites). A no-args run defaults to the unit payload's
+ * derived packages (PI_UNIT_FILE); a filter pass skips non-filterable suites
+ * with an explicit line and carries the filtered-run header. Every suite runs
+ * sequentially via `pi.exec` (argv arrays, never shell strings) with a
+ * per-suite `PI_TEST_TIMEOUT_MS` budget (default 300000), labeled output
+ * capped at a 4000-char tail, and an isError result when any run suite fails.
  *
  * @param suites - The suites the generated tool runs.
  * @returns The extension source text (plain JS-compatible TypeScript).
@@ -80,17 +97,24 @@ export function generateTestExtension(suites: readonly TestSuite[]): string {
   const suiteLines = suites
     .map(
       (suite) =>
-        `  { "label": ${JSON.stringify(suite.label)}, "argv": ${JSON.stringify(suite.argv)} }`,
+        `  { "label": ${JSON.stringify(suite.label)}, "argv": ${JSON.stringify(suite.argv)}, "filterable": ${isFilterableSuite(suite)} }`,
     )
     .join(",\n");
   return `${GENERATED_MARKER}
 //
 // Registers the \`test\` tool: runs every detected test suite sequentially via
 // pi.exec (argv arrays, never shell strings) and reports a labeled output tail
-// per suite. Regenerated on each /finalize — change the suites via
+// per suite. Regenerated by pi-workflow — change the suites via
 // \`implement.testCommands\` in workflow.json instead of editing this file.
+//
+// Structured filters (iteration only, never verification):
+//   test()           — default scope: the unit payload's derived packages
+//                      (PI_UNIT_FILE) on filterable suites, everything else too
+//   test(scope, run) — scope: repo-relative paths, each mapped to ./<path>/...;
+//                      run: a -run <regex> for filterable (Go) suites.
+// A filter pass skips non-filterable suites and never satisfies the done criteria.
 
-/** Detected test suites (label + argv), frozen at generation time. */
+/** Detected test suites (label + argv + filterability), frozen at generation time. */
 const SUITES = [
 ${suiteLines}
 ];
@@ -107,6 +131,50 @@ function tail(text) {
 }
 
 /**
+ * Read the orchestrator-written unit payload (PI_UNIT_FILE, with the legacy
+ * PI_CONTRACT_GUARD_FILE fallback) for the default package scope.
+ *
+ * @returns The payload's unit slice, or null when absent or invalid.
+ */
+async function readUnitPayload() {
+  try {
+    const file = process.env.PI_UNIT_FILE || process.env.PI_CONTRACT_GUARD_FILE;
+    if (!file) return null;
+    const { readFileSync } = await import("node:fs");
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    const unit = parsed && parsed.unit;
+    if (!unit || !Array.isArray(unit.packages)) return null;
+    return unit;
+  } catch (err) {
+    return null;
+  }
+}
+
+/** True when a scope entry is a safe repo-relative path (T7). */
+function validScopeEntry(entry) {
+  return (
+    typeof entry === "string" &&
+    /^[a-zA-Z0-9._/-]+$/.test(entry) &&
+    !entry.startsWith("-") &&
+    entry.indexOf("..") === -1
+  );
+}
+
+/** The argv one suite runs with under the resolved filter (T7). */
+function suiteArgv(suite, packages, run) {
+  if (!suite.filterable) return suite.argv;
+  const extra = suite.argv.slice(2).filter((arg) => arg !== "./...");
+  const patterns =
+    packages && packages.length > 0
+      ? packages.map((p) => (p === "." ? "./..." : "./" + p + "/..."))
+      : ["./..."];
+  return ["go", "test"]
+    .concat(run ? ["-run", run] : [])
+    .concat(patterns)
+    .concat(extra);
+}
+
+/**
  * Register the \`test\` tool on the host extension API.
  *
  * @param pi - ExtensionAPI of the host process.
@@ -117,17 +185,73 @@ export default function testToolExtension(pi) {
     label: "Run tests",
     description:
       "Run the project's test suites sequentially and report pass/fail with a " +
-      "labeled output tail. Errors when any suite fails.",
-    parameters: { type: "object", properties: {}, additionalProperties: false },
+      "labeled output tail. The optional scope/run filters are iteration only — " +
+      "a filtered run never satisfies the done criteria. Errors when any suite fails.",
+    parameters: {
+      type: "object",
+      properties: {
+        scope: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Repo-relative path filter: filterable (Go) suites run only these " +
+            "packages (each mapped to ./<path>/...); non-filterable suites are skipped.",
+        },
+        run: {
+          type: "string",
+          description:
+            "Test-name regex for filterable (Go) suites, passed as -run <regex>; " +
+            "non-filterable suites are skipped.",
+        },
+      },
+      additionalProperties: false,
+    },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const scope = params && Array.isArray(params.scope) ? params.scope : undefined;
+      const run = params && typeof params.run === "string" && params.run ? params.run : undefined;
+      // Structured params only (T7): a malformed scope entry rejects the whole
+      // call before anything runs — no free-form argv smuggling.
+      if (scope) {
+        for (const entry of scope) {
+          if (!validScopeEntry(entry)) {
+            return {
+              content: [{
+                type: "text",
+                text:
+                  "invalid scope entry: " + JSON.stringify(entry) +
+                  " — scope entries must be repo-relative paths matching " +
+                  "[a-zA-Z0-9._/-], with no leading '-' and no '..'. Nothing was run.",
+              }],
+              isError: true,
+            };
+          }
+        }
+      }
+      const filtered = Boolean((scope && scope.length > 0) || run);
+      // Default scope for a no-args run: the unit payload's derived packages.
+      const packages =
+        scope && scope.length > 0
+          ? scope
+          : filtered
+            ? undefined
+            : ((await readUnitPayload()) || {}).packages;
       const timeout = suiteTimeoutMs();
       const sections = [];
       const failures = [];
+      let ran = 0;
       for (const suite of SUITES) {
-        const [cmd, ...rest] = suite.argv;
+        if (!suite.filterable && filtered) {
+          sections.push(
+            "## " + suite.label + "\\nsuite '" + suite.label +
+              "' skipped (not filterable) — filtered iteration run, not verification",
+          );
+          continue;
+        }
+        const argv = suiteArgv(suite, packages, run);
+        ran++;
         let result;
         try {
-          result = await pi.exec(cmd, rest, { cwd: ctx.cwd, timeout });
+          result = await pi.exec(argv[0], argv.slice(1), { cwd: ctx.cwd, timeout });
         } catch (err) {
           failures.push(suite.label);
           sections.push(
@@ -146,11 +270,17 @@ export default function testToolExtension(pi) {
             "\\n" + out,
         );
       }
-      const header =
+      const summary =
         failures.length === 0
-          ? "all " + SUITES.length + " suite(s) passed"
-          : failures.length + "/" + SUITES.length + " suite(s) failed: " + failures.join("; ");
-      const text = header + "\\n\\n" + sections.join("\\n\\n");
+          ? "all " + ran + " suite(s) passed"
+          : failures.length + "/" + ran + " suite(s) failed: " + failures.join("; ");
+      // Every filtered result carries the header first (T7): n = suites run,
+      // m = total suites known at generation time.
+      const header = filtered
+        ? "filtered run — " + ran + "/" + SUITES.length +
+          " suites — does not satisfy the done criteria"
+        : "";
+      const text = (header ? header + "\\n" : "") + summary + "\\n\\n" + sections.join("\\n\\n");
       return failures.length === 0
         ? { content: [{ type: "text", text: text }] }
         : { content: [{ type: "text", text: text }], isError: true };
@@ -163,48 +293,24 @@ export default function testToolExtension(pi) {
 // ── Ensure step ───────────────────────────────────────────────────────────────
 
 /**
- * Check whether git tracks the extension path (`git ls-files --error-unmatch`).
- *
- * A non-zero exit (untracked) and any git failure (e.g. not a repo) both mean
- * "not tracked" — the conservative A status, never a throw.
- *
- * @param pi  - ExtensionAPI used for the git query.
- * @param cwd - Repository working directory.
- * @returns True when the path is tracked by git.
- */
-async function isTracked(pi: ExtensionAPI, cwd: string): Promise<boolean> {
-  try {
-    const res = await pi.exec("git", [
-      "ls-files",
-      "--error-unmatch",
-      "--",
-      TEST_EXTENSION_RELATIVE,
-    ], { cwd });
-    return res.code === 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
  * Registry-aware ensure step: generate or regenerate `.pi/extensions/test.ts`.
  *
  * Decision rule (precedence order):
  * 1. `pi.getAllTools()` shows a `test` tool from ANOTHER path -> stop; the
- *    external tool owns the name (source `existing`, no files entry).
- * 2. No suites (source `none`) -> nothing to run, warn (no files entry).
+ *    external tool owns the name (source `existing`).
+ * 2. No suites (source `none`) -> nothing to run, warn.
  * 3. The file exists WITHOUT the GENERATED marker -> hand-written: never
- *    overwritten, reported (source `existing`, no files entry).
+ *    overwritten, reported (source `existing`).
  * 4. The file carries the marker -> regenerate in place; else generate fresh.
  *
- * The files entry is `M` when git tracks the path, `A` when it is
- * untracked/absent, and absent whenever no file was written.
+ * The generated extension is orchestrator-owned (T7): nothing is returned that
+ * a caller could declare in a contract allowlist, and no git query runs.
  *
- * @param pi        - ExtensionAPI (tool registry + git query).
+ * @param pi        - ExtensionAPI (tool registry).
  * @param cwd       - Repository working directory.
  * @param detection - Suite detection result (config override or manifest scan).
- * @returns The ensure outcome: effective source, suites, written path, the
- *          files entry to auto-declare, and a one-line evidence message.
+ * @returns The ensure outcome: effective source, suites, written path (when a
+ *          file was written) and a one-line evidence message.
  */
 export async function ensureTestTool(
   pi: ExtensionAPI,
@@ -258,16 +364,14 @@ export async function ensureTestTool(
   const content = generateTestExtension(detection.suites);
   mkdirSync(dirname(targetPath), { recursive: true });
   writeFileSync(targetPath, content);
-  const status = (await isTracked(pi, cwd)) ? "M" : "A";
   const verb = existingContent === null ? "generated" : "regenerated";
   const suiteList = detection.suites.map((suite) => suite.label).join(", ");
   return {
     source: detection.source,
     suites: detection.suites,
     path: targetPath,
-    fileEntry: { path: TEST_EXTENSION_RELATIVE, status },
     message:
-      `test tool ${verb}: ${TEST_EXTENSION_RELATIVE} (declared ${status}) — ` +
-      `runs ${detection.suites.length} suite(s): ${suiteList}`,
+      `test tool ${verb}: ${TEST_EXTENSION_RELATIVE} — runs ` +
+      `${detection.suites.length} suite(s): ${suiteList}`,
   };
 }

@@ -191,26 +191,18 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
         };
       }
       const warnings = result.warnings;
-      // T3: ensure the test tool AFTER validation and BEFORE the contract
-      // scan, so the auto-declared files entry is part of the scanned
-      // allowlist. Precedence: config testCommands -> external `test` tool ->
-      // manifest detection + generation -> none (warned, no tool).
+      // T3/T7: ensure the test tool AFTER validation: it populates
+      // state.testTool and echoes the detection evidence line. The generated
+      // extension is orchestrator-owned — it is never injected into the
+      // contract's allowlist. Precedence: config testCommands -> external
+      // `test` tool -> manifest detection + generation -> none (warned).
       const workflow = await loadWorkflowConfig(ctx.cwd);
       const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
       const ensured = await ensureTestTool(pi, ctx.cwd, detection);
-      const declaredFiles = ensured.fileEntry
-        ? [
-            ...result.task.files.filter((f) => f.path !== ensured.fileEntry!.path),
-            ensured.fileEntry,
-          ]
-        : [...result.task.files];
-      const scan = await runContractScan(pi, ctx.cwd, declaredFiles);
+      const scan = await runContractScan(pi, ctx.cwd, result.task.files);
       const allWarnings = [...warnings, ...(scan?.warnings ?? [])];
       const entering = state.phase === "discussing";
-      const { task, preserved } = preserveDoneStatuses(state.task, {
-        ...result.task,
-        files: declaredFiles,
-      });
+      const { task, preserved } = preserveDoneStatuses(state.task, result.task);
       state.task = task;
       state.testTool = { source: ensured.source, suites: ensured.suites };
       transitionTo(pi, state, "finalizing");
