@@ -1,6 +1,5 @@
 import { RETRY_BUDGET } from "./commit-gate.ts";
 import { formatFiles, formatTask } from "./task-contract.ts";
-import type { PrecommitCheckResult } from "./precommit-check.ts";
 import type { Behavior, TaskContract, TestToolInfo } from "./state.ts";
 import { buildContextPreload } from "./unit-context-preload.ts";
 import type { UnitAttempt } from "./implement-loop.ts";
@@ -114,56 +113,6 @@ export function buildUnitTask(
   ]
     .filter(Boolean)
     .join("\n");
-}
-
-/**
- * Build the steer message for one red-phase pre-commit check result.
- *
- * @param check - The runPrecommitCheck result for the red report.
- * @returns The message steered back to the unit (or into a fresh continuation).
- */
-export function buildRedSteerMessage(check: PrecommitCheckResult): string {
-  if (!check.hookPresent) {
-    return (
-      "Red-phase report received. red unobservable: the project has no executable " +
-      "pre-commit hook, so the failing test cannot be observed. Proceed with the " +
-      "implementation now, and emit the final report when done."
-    );
-  }
-  if (check.exitCode !== 0) {
-    return (
-      "Red-phase report received. red observed, implement now: the pre-commit check " +
-      "failed on your tests, exactly as the red phase requires.\n\n" +
-      "## Pre-commit check output\n" +
-      (check.output || "(no output)") +
-      "\n\nImplement the behavior so the tests pass, then emit the final report."
-    );
-  }
-  return (
-    "Red-phase report received. red not observed: the pre-commit check exited 0, so " +
-    "the tests do not fail yet. Make the tests assert the new behavior (they must fail " +
-    "before implementation), then emit another red-phase report — or report " +
-    "alreadySatisfied if the behavior is already implemented at HEAD."
-  );
-}
-
-/**
- * Build a fresh continuation task carrying a red-phase check result.
- *
- * Used when no live child can absorb the result as a steer: the continuation
- * is not charged to RETRY_BUDGET.
- *
- * @param redMessage - The buildRedSteerMessage output.
- * @param baseCore   - The original task core (taskPrefix + buildUnitTask + note + resume context).
- * @returns Rendered continuation task text.
- */
-export function buildRedContinuationTask(redMessage: string, baseCore: string): string {
-  return (
-    "## Red-phase check result (continuation, not a retry)\n" +
-    redMessage +
-    "\n\n## Original task\n" +
-    baseCore
-  );
 }
 
 /**

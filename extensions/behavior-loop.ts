@@ -8,9 +8,7 @@ import { relayImplementerEvent } from "./implementer-activity.ts";
 import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
-import { runPrecommitCheck } from "./precommit-check.ts";
-import { loadWorkflowConfig } from "./paths.ts";
-import { buildRedContinuationTask, buildRedSteerMessage, buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
+import { buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
@@ -39,7 +37,7 @@ export interface BehaviorLoopDeps {
 /**
  * Run the unit/retry/commit loop for one active behavior: base attempt, partials,
  * budget-charged retries, the mustRunNow pause, already-satisfied, the commit gate
- * with fix rounds (T5 warm steers, T6 red phase) and the fresh-spawn fallback.
+ * with fix rounds (T5 warm steers) and the fresh-spawn fallback.
  * Driver state and behavior.status are mutated in place.
  *
  * @param behavior   - The active behavior to run.
@@ -57,7 +55,6 @@ export async function runBehaviorLoop(
   const { pi, ctx, state, task, runUnit, result, landedCommits, attemptHistory, findingsSection, recordFindings } = deps;
   const { noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt } = deps;
   const cwd = ctx.cwd;
-  const enforceTdd = (await loadWorkflowConfig(cwd)).implement?.enforceTdd !== false;
   // T8: attempt history is per behavior — a landed behavior's history is irrelevant to a later behavior's halt report.
   attemptHistory.length = 0;
   // Progress visibility: announce start and landing so a minutes-long captured-stdio run never looks frozen.
@@ -124,22 +121,6 @@ export async function runBehaviorLoop(
       result.cancelled = true;
       ctx.ui.setStatus("implement", undefined);
       return result;
-    }
-    // T6: red phase — the pre-commit result rides a warm steer (5-steer cap, never RETRY_BUDGET) or a fresh continuation.
-    if (enforceTdd && behavior.kind === "test" && attempt.phase === "red" && !attempt.error && !attempt.missingReport) {
-      const redMessage = buildRedSteerMessage(await runPrecommitCheck(pi, cwd));
-      if (canSteerWarmChild(liveChild, warmSteersUsed)) {
-        warmSteersUsed++;
-        attempt = await recorder.runSteer(liveChild!, redMessage);
-        adoptRound();
-        continue;
-      }
-      if (decideContinuation({ progressed: true, continuations }) === "continue") {
-        continuations++;
-        await runFollowUp(buildRedContinuationTask(redMessage, baseCore) + noteSection + findingsSection());
-        continue;
-      }
-      return haltWithChild(behavior.id, `Unit ${behavior.id} ran out of red-phase continuations: ${redMessage}`);
     }
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {

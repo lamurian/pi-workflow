@@ -44,8 +44,6 @@ export interface ImplementerReport {
   nextSteps?: string;
   /** True when the behavior is already implemented at HEAD and needs no commit. */
   alreadySatisfied?: boolean;
-  /** Report phase: "red" for the test-first report before implementation (T6). */
-  phase?: string;
 }
 
 /**
@@ -240,7 +238,6 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
           ...(typeof parsed.alreadySatisfied === "boolean"
             ? { alreadySatisfied: parsed.alreadySatisfied }
             : {}),
-          ...(typeof parsed.phase === "string" && parsed.phase ? { phase: parsed.phase } : {}),
         };
       }
     } catch {
