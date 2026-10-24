@@ -59,6 +59,53 @@ export interface TaskContract {
   behaviors: Behavior[];
 }
 
+// ─── Contract v2 (T1): normalized tasks/sources/tests ───────────────────────
+
+/** One declared path in a v2 contract list (sources or tests). */
+export interface PathEntry {
+  /** Repo-relative path. */
+  path: string;
+  /**
+   * Per-path FACT (optional): absent = write-authorized (A/M is a derived
+   * display qualifier, never enforced); D = delete authority, granted only
+   * to the tasks in its `tasks` refs.
+   */
+  status?: FileStatus;
+  /** Task ids that own this path (shared files name several). */
+  tasks: string[];
+}
+
+/** Lifecycle status of a v2 task unit. */
+export type TaskStatus = "active" | "done" | "removed";
+
+/** One task unit in the v2 contract. */
+export interface TaskUnit {
+  /** Stable task id, e.g. "T1". */
+  id: string;
+  /** What the task implements. */
+  description: string;
+  /** One entry per assertion the task's tests must prove. */
+  expectedOutput: string[];
+  /** Lifecycle status. */
+  status: TaskStatus;
+}
+
+/** The normalized v2 contract: the path lists are the single source of truth. */
+export interface ContractV2 {
+  /** Short task title. */
+  title: string;
+  /** Shared context only — never file lists. */
+  instruction: string;
+  /** Aggregate definition of done. */
+  done: string;
+  /** Implementation files. */
+  sources: PathEntry[];
+  /** Test/fixture files. */
+  tests: PathEntry[];
+  /** Task units. */
+  tasks: TaskUnit[];
+}
+
 /** A sandbox-blocked command the user must run before a unit can proceed. */
 export interface PendingCommand {
   /** The exact command to run outside the sandbox. */

@@ -2,13 +2,20 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   validateTask,
+  validateContract,
   parseTestOutput,
   evaluateCompletionGate,
   formatTask,
   formatFiles,
 } from "../extensions/task-contract.ts";
 import { handlePreCompact } from "../extensions/compaction.ts";
-import type { WorkflowState } from "../extensions/state.ts";
+import type {
+  WorkflowState,
+  TaskContract,
+  ContractV2,
+  PathEntry,
+  TaskUnit,
+} from "../extensions/state.ts";
 import type { ExtensionContext, SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 
 function implementingState(overrides: Partial<WorkflowState> = {}): WorkflowState {
@@ -405,5 +412,257 @@ describe("compaction preserves the task contract", () => {
     const event = { preparation: { firstKeptEntryId: "e0", tokensBefore: 100 } } as unknown as SessionBeforeCompactEvent;
     const result = await handlePreCompact(event, ctxFor(s));
     assert.equal(result, undefined);
+  });
+});
+
+// ═══ Contract v2: validateContract (T1) ═══
+
+/** Minimal well-formed v2 payload with two tasks; overrides replace keys wholesale. */
+function v2Payload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    title: "T",
+    instruction: "i",
+    done: "d",
+    sources: [
+      { path: "src/a.ts", tasks: ["T1"] },
+      { path: "src/b.ts", tasks: ["T2"] },
+    ],
+    tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+    tasks: [
+      { id: "T1", description: "x", expectedOutput: ["line 1"], status: "active" },
+      { id: "T2", description: "y", expectedOutput: ["line 2"], status: "active" },
+    ],
+    ...overrides,
+  };
+}
+
+describe("validateContractV2RejectsEachInvariant", () => {
+  it("accepts a well-formed v2 contract and keeps PathEntry.status optional", () => {
+    const r = validateContract(v2Payload());
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.contract.sources[0]!.status, undefined, "absent status stays absent");
+    assert.deepEqual(r.contract.sources[0]!.tasks, ["T1"]);
+    assert.equal(r.contract.tasks.length, 2);
+    assert.equal(r.contract.tasks[0]!.expectedOutput[0], "line 1");
+  });
+
+  it("rejects a dangling taskRef", () => {
+    const r = validateContract(
+      v2Payload({ sources: [{ path: "src/a.ts", tasks: ["T9"] }] }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /dangling taskRef/);
+    assert.match(r.reason, /T9/);
+  });
+
+  it("rejects a duplicate path within sources", () => {
+    const r = validateContract(
+      v2Payload({
+        sources: [
+          { path: "src/a.ts", tasks: ["T1"] },
+          { path: "src/a.ts", status: "M", tasks: ["T2"] },
+        ],
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /duplicate path/);
+    assert.match(r.reason, /src\/a\.ts/);
+  });
+
+  it("rejects a duplicate path within tests", () => {
+    const r = validateContract(
+      v2Payload({
+        tests: [
+          { path: "tests/a.test.ts", tasks: ["T1"] },
+          { path: "tests/a.test.ts", tasks: ["T2"] },
+        ],
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /duplicate path/);
+  });
+
+  it("rejects a path declared in both sources and tests", () => {
+    const r = validateContract(
+      v2Payload({ sources: [{ path: "tests/a.test.ts", tasks: ["T1"] }] }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /both sources and tests/);
+    assert.match(r.reason, /tests\/a\.test\.ts/);
+  });
+
+  it("rejects a D entry with empty tasks", () => {
+    const r = validateContract(
+      v2Payload({ sources: [{ path: "src/legacy.ts", status: "D", tasks: [] }] }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /D entry with empty tasks/);
+    assert.match(r.reason, /src\/legacy\.ts/);
+  });
+
+  it("rejects a task with empty expectedOutput", () => {
+    const r = validateContract(
+      v2Payload({
+        tasks: [
+          { id: "T1", description: "x", expectedOutput: [], status: "active" },
+          { id: "T2", description: "y", expectedOutput: ["line 2"], status: "active" },
+        ],
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /empty expectedOutput/);
+    assert.match(r.reason, /T1/);
+  });
+
+  it("rejects a duplicate task id", () => {
+    const r = validateContract(
+      v2Payload({
+        tasks: [
+          { id: "T1", description: "x", expectedOutput: ["a"], status: "active" },
+          { id: "T1", description: "y", expectedOutput: ["b"], status: "active" },
+        ],
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /duplicate task id/);
+    assert.match(r.reason, /T1/);
+  });
+
+  it("rejects a missing title", () => {
+    const r = validateContract(v2Payload({ title: "  " }));
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /title/);
+  });
+
+  it("rejects a non-array expectedOutput with a shape reason", () => {
+    const r = validateContract(
+      v2Payload({
+        tasks: [
+          { id: "T1", description: "x", expectedOutput: "one line", status: "active" },
+          { id: "T2", description: "y", expectedOutput: ["b"], status: "active" },
+        ],
+      }),
+    );
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /expectedOutput must be an array/);
+  });
+});
+
+describe("validateContractV2AcceptsSharedAndManual", () => {
+  it("accepts a shared file referenced by multiple tasks", () => {
+    const r = validateContract(
+      v2Payload({
+        sources: [{ path: "src/shared.ts", tasks: ["T1", "T2"] }],
+        tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+      }),
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.deepEqual(r.contract.sources[0]!.tasks, ["T1", "T2"]);
+  });
+
+  it("accepts a manual task with zero path refs", () => {
+    const r = validateContract(
+      v2Payload({
+        sources: [{ path: "src/a.ts", tasks: ["T1"] }],
+        tests: [],
+        tasks: [
+          { id: "T1", description: "x", expectedOutput: ["line 1"], status: "active" },
+          {
+            id: "T2",
+            description: "manual verify",
+            expectedOutput: ["checked by hand"],
+            status: "active",
+          },
+        ],
+      }),
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.contract.tasks[1]!.id, "T2");
+  });
+
+  it("accepts a D entry owned by one task and preserves its status", () => {
+    const r = validateContract(
+      v2Payload({
+        sources: [
+          { path: "src/legacy.ts", status: "D", tasks: ["T2"] },
+          { path: "src/a.ts", tasks: ["T1"] },
+        ],
+      }),
+    );
+    assert.equal(r.ok, true);
+    if (!r.ok) return;
+    assert.equal(r.contract.sources[0]!.status, "D");
+  });
+});
+
+describe("TaskContractV2CoexistsWithV1", () => {
+  it("validateTask still validates v1 contracts from the same module", () => {
+    const v1 = validateTask({
+      title: "T",
+      instruction: "i",
+      files: [{ path: "src/a.ts", status: "M" }],
+      done: "d",
+      behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "test" }],
+    });
+    assert.equal(v1.ok, true);
+    if (v1.ok) {
+      assert.equal(v1.task.files[0]!.status, "M");
+      assert.equal(v1.task.behaviors[0]!.status, "active");
+    }
+  });
+
+  it("validateContract rejects a v1 payload (no v2 path lists)", () => {
+    const r = validateContract({
+      title: "T",
+      instruction: "i",
+      done: "d",
+      files: [{ path: "src/a.ts", status: "M" }],
+      behaviors: [
+        { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+      ],
+    });
+    assert.equal(r.ok, false);
+    if (r.ok) return;
+    assert.match(r.reason, /sources/);
+  });
+
+  it("both contract shapes stay exported from state.ts", () => {
+    const v1Task: TaskContract = {
+      title: "T",
+      instruction: "i",
+      files: [{ path: "src/a.ts", status: "M" }],
+      done: "d",
+      behaviors: [],
+    };
+    const v2: ContractV2 = {
+      title: "T",
+      instruction: "i",
+      done: "d",
+      sources: [],
+      tests: [],
+      tasks: [],
+    };
+    assert.equal(v1Task.title, v2.title);
+    const entry: PathEntry = { path: "a.ts", tasks: ["T1"] };
+    assert.equal(entry.status, undefined, "PathEntry.status is optional");
+    const unit: TaskUnit = {
+      id: "T1",
+      description: "x",
+      expectedOutput: ["a"],
+      status: "active",
+    };
+    assert.equal(unit.expectedOutput.length, 1);
   });
 });
