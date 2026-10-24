@@ -64,7 +64,7 @@ export async function runBehaviorLoop(
   ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
   const position = `${unitIndex + 1}/${totalUnits}`;
   ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`); // B3: the "workflow" key from state.ts updateUi is never written by these frames.
-  const baseCore = taskPrefix + buildUnitTask(behavior, task, { enforceTdd, preloadCwd: cwd }) + noteSection + resumeTreeContext;
+  const baseCore = taskPrefix + buildUnitTask(behavior, task, { preloadCwd: cwd, testTool: state.testTool }) + noteSection + resumeTreeContext;
   const baseTask: UnitTask = {
     behaviorId: behavior.id,
     taskText: haltPrefix + baseCore + findingsSection(),

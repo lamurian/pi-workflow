@@ -4,7 +4,8 @@
  *
  * It enforces the contract's file allowlist in-turn:
  *
- * - lets `read`, `grep`, `find` and `ls` through untouched;
+ * - lets `read`, `grep`, `find`, `ls` and the generated `test` tool through
+ *   untouched;
  * - checks `write`, `edit` and `delete_file` against the pure allowlist
  *   core (`extensions/contract-guard-core.ts`) using the payload written
  *   by the orchestrator to the file named by `PI_CONTRACT_GUARD_FILE`;
@@ -37,8 +38,9 @@ interface ToolCallLike {
   input?: unknown;
 }
 
-/** Tools that never touch files and always pass the guard. */
-const PASSTHROUGH_TOOLS = new Set(["read", "grep", "find", "ls"]);
+/** Tools that never touch files and always pass the guard (`test` is the
+ * generated local test extension — allowed so bash-free units can verify). */
+const PASSTHROUGH_TOOLS = new Set(["read", "grep", "find", "ls", "test"]);
 /** Tools checked against the contract's file allowlist. */
 const MUTATING_TOOLS = new Set(["write", "edit", "delete_file"]);
 /** Fail-closed reason: must mention "missing or invalid" per contract. */
@@ -116,7 +118,8 @@ export async function guardToolCall(
       block: true,
       reason:
         "Blocked: bash is not available to this unit — implementer units are " +
-        "file coders with read, grep, find, ls, write, edit and delete_file only.",
+        "file coders with read, grep, find, ls, the test tool, write, edit and " +
+        "delete_file only.",
     };
   }
   if (toolName && MUTATING_TOOLS.has(toolName)) {
@@ -146,8 +149,8 @@ export async function guardToolCall(
     block: true,
     reason:
       `Blocked: tool "${toolName || "(unknown)"}" is not available to this ` +
-      "unit — only read, grep, find, ls and the declared-file mutations " +
-      "write, edit and delete_file are granted.",
+      "unit — only read, grep, find, ls, the test tool, and the declared-file " +
+      "mutations write, edit and delete_file are granted.",
   };
 }
 

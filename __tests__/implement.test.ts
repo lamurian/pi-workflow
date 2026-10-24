@@ -2595,6 +2595,69 @@ describe("buildUnitTask file rendering (T1)", () => {
   });
 });
 
+// ═══ buildUnitTask verification line (T3) ═══
+describe("buildUnitTask verification line (T3)", () => {
+  const task: TaskContract = {
+    title: "Verify Task",
+    instruction: "do the thing",
+    files: [{ path: "src/a.ts", status: "M" }],
+    done: "tests pass",
+    behaviors: [
+      { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+    ],
+  };
+
+  it("suites present: tells the unit to call the test tool with the joined argv", () => {
+    const text = buildUnitTask(task.behaviors[0]!, task, {
+      testTool: {
+        source: "detected",
+        suites: [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
+      },
+    });
+
+    assert.match(text, /call the `test` tool \(runs: npm run test\)/);
+    assert.match(text, /## Verification/, "the line lives under its own heading");
+  });
+
+  it("multiple suites are joined with '; '", () => {
+    const text = buildUnitTask(task.behaviors[0]!, task, {
+      testTool: {
+        source: "config",
+        suites: [
+          { label: "config (npm run test:unit)", argv: ["npm", "run", "test:unit"] },
+          { label: "make (make test)", argv: ["make", "test"] },
+        ],
+      },
+    });
+
+    assert.match(text, /call the `test` tool \(runs: npm run test:unit; make test\)/);
+  });
+
+  it("no suites + test kind: verification falls back to the pre-commit hook", () => {
+    const text = buildUnitTask(task.behaviors[0]!, task, {
+      testTool: { source: "none", suites: [] },
+    });
+
+    assert.match(text, /no test tool; verification is the pre-commit hook/);
+  });
+
+  it("testTool absent entirely: same pre-commit-hook fallback for test kind", () => {
+    const text = buildUnitTask(task.behaviors[0]!, task);
+
+    assert.match(text, /no test tool; verification is the pre-commit hook/);
+  });
+
+  it("no suites + manual kind: verification is by inspection", () => {
+    const manual: Behavior = { ...task.behaviors[0]!, kind: "manual" };
+    const text = buildUnitTask(manual, task, {
+      testTool: { source: "none", suites: [] },
+    });
+
+    assert.match(text, /no test tool; verify by inspection/);
+    assert.doesNotMatch(text, /pre-commit hook/, "manual behaviors never point at the hook");
+  });
+});
+
 describe("buildRetryTask: timeout and missingReport branches", () => {
   function fixture(): {
     behavior: Parameters<typeof buildRetryTask>[0];

@@ -2,6 +2,7 @@ import { getImplementerTimeoutMs } from "./process-utils.ts";
 import { lastAssistantText, parseImplementerReport, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
+import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -110,7 +111,14 @@ export async function runImplementerUnit(
   keepAlive = false,
   env?: Record<string, string>,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
-  const client = spawnRpcUnitClient({ systemPrompt, cwd, env });
+  // Per-spawn resolution: the generated test extension is loaded via a second
+  // -e flag (and the `test` tool granted) only when the project has one.
+  const client = spawnRpcUnitClient({
+    systemPrompt,
+    cwd,
+    env,
+    testExtPath: resolveTestExtensionPath(cwd),
+  });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });
 }

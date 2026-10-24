@@ -81,19 +81,38 @@ export function getImplementerTools(
  * Does NOT pass --model so the subprocess uses the user's default model.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
+ * @param testExtPath  - Optional absolute path of the generated test extension
+ *                       (resolveTestExtensionPath(cwd)). When set, a second
+ *                       `-e <path>` flag loads it and `test` is appended to the
+ *                       default tools (a `PI_IMPLEMENTER_TOOLS` override that
+ *                       already lists `test` is not duplicated). Without it,
+ *                       neither the flag nor the tool appears.
  * @returns Array of CLI arguments for the implementer subprocess.
  */
-export function buildImplementerArgs(systemPrompt: string): string[] {
+export function buildImplementerArgs(
+  systemPrompt: string,
+  testExtPath?: string,
+): string[] {
+  const tools = getImplementerTools();
+  const granted =
+    testExtPath && !tools.split(",").some((name) => name.trim() === "test")
+      ? `${tools},test`
+      : tools;
   const args: string[] = [
     "--mode", "rpc",
     "--no-session",
     "--no-extensions",
     "-e", contractGuardExtensionPath(),
+  ];
+  if (testExtPath) {
+    args.push("-e", testExtPath);
+  }
+  args.push(
     "--no-skills",
     "--offline",
     "--thinking", "minimal",
-    "--tools", getImplementerTools(),
-  ];
+    "--tools", granted,
+  );
   if (systemPrompt.trim()) {
     args.push("--append-system-prompt", systemPrompt);
   }

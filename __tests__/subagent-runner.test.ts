@@ -425,6 +425,59 @@ describe("buildImplementerArgs (rpc transport)", () => {
   });
 });
 
+describe("buildImplementerArgs test extension wiring (T3)", () => {
+  const SYSTEM = "You are an implementation unit.";
+
+  it("without testExtPath neither the extra -e flag nor the test tool appears", async () => {
+    delete process.env.PI_IMPLEMENTER_TOOLS;
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+    const args = buildImplementerArgs(SYSTEM);
+    assert.equal(args.filter((a) => a === "-e").length, 1, "only the contract-guard -e");
+    const idx = args.indexOf("--tools");
+    assert.equal(args[idx + 1], "read,write,edit,grep,find,ls,delete_file");
+  });
+
+  it("with testExtPath adds -e <abs> and appends test to the default tools", async () => {
+    delete process.env.PI_IMPLEMENTER_TOOLS;
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+    const args = buildImplementerArgs(SYSTEM, "/abs/.pi/extensions/test.ts");
+    const eIdx = args.lastIndexOf("-e");
+    assert.notEqual(eIdx, -1);
+    assert.equal(args[eIdx + 1], "/abs/.pi/extensions/test.ts", "the -e path is absolute");
+    const idx = args.indexOf("--tools");
+    assert.equal(args[idx + 1], "read,write,edit,grep,find,ls,delete_file,test");
+  });
+
+  it("appends test to a PI_IMPLEMENTER_TOOLS override that lacks it", async () => {
+    process.env.PI_IMPLEMENTER_TOOLS = "read,write";
+    try {
+      const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+      const args = buildImplementerArgs(SYSTEM, "/abs/.pi/extensions/test.ts");
+      const idx = args.indexOf("--tools");
+      assert.equal(args[idx + 1], "read,write,test");
+    } finally {
+      delete process.env.PI_IMPLEMENTER_TOOLS;
+    }
+  });
+
+  it("does not duplicate test when the override already lists it", async () => {
+    process.env.PI_IMPLEMENTER_TOOLS = "read,write,test";
+    try {
+      const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+      const args = buildImplementerArgs(SYSTEM, "/abs/.pi/extensions/test.ts");
+      const idx = args.indexOf("--tools");
+      assert.equal(args[idx + 1], "read,write,test", "no second test entry");
+    } finally {
+      delete process.env.PI_IMPLEMENTER_TOOLS;
+    }
+  });
+
+  it("resolveTestExtensionPath returns undefined when the file is absent (T3)", async () => {
+    const { resolveTestExtensionPath } = await import("../extensions/test-tool-ensure.ts");
+    assert.equal(resolveTestExtensionPath(join(tmpdir(), "pi-t3-absent-proj")), undefined);
+  });
+});
+
 describe("parseImplementerReport (T5)", () => {
   function assistantEvent(text: string): string {
     return JSON.stringify({

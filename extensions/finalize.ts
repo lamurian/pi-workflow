@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
 import type { FileEntry } from "./state.ts";
 import { validateTask, preserveDoneStatuses } from "./task-contract.ts";
+import { loadWorkflowConfig } from "./paths.ts";
+import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
+import { ensureTestTool } from "./test-tool-ensure.ts";
 import { isTestPath } from "./test-scan-profiles.ts";
 import { deriveMatches, type DeriveResult } from "./test-scan-derive.ts";
 import { crossCheck } from "./test-scan-check.ts";
@@ -188,11 +191,28 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
         };
       }
       const warnings = result.warnings;
-      const scan = await runContractScan(pi, ctx.cwd, result.task.files);
+      // T3: ensure the test tool AFTER validation and BEFORE the contract
+      // scan, so the auto-declared files entry is part of the scanned
+      // allowlist. Precedence: config testCommands -> external `test` tool ->
+      // manifest detection + generation -> none (warned, no tool).
+      const workflow = await loadWorkflowConfig(ctx.cwd);
+      const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
+      const ensured = await ensureTestTool(pi, ctx.cwd, detection);
+      const declaredFiles = ensured.fileEntry
+        ? [
+            ...result.task.files.filter((f) => f.path !== ensured.fileEntry!.path),
+            ensured.fileEntry,
+          ]
+        : [...result.task.files];
+      const scan = await runContractScan(pi, ctx.cwd, declaredFiles);
       const allWarnings = [...warnings, ...(scan?.warnings ?? [])];
       const entering = state.phase === "discussing";
-      const { task, preserved } = preserveDoneStatuses(state.task, result.task);
+      const { task, preserved } = preserveDoneStatuses(state.task, {
+        ...result.task,
+        files: declaredFiles,
+      });
       state.task = task;
+      state.testTool = { source: ensured.source, suites: ensured.suites };
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
       if (entering) {
@@ -215,6 +235,8 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
             .map((l) => `- ${l}`)
             .join("\n");
       }
+      // T3: echo the test-tool detection evidence line.
+      text += `\n\n${ensured.message}`;
       if (preserved.length > 0) {
         text += `\n\nPreserved done behaviors: ${preserved.join(", ")}`;
       }

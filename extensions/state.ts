@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { shortSlug } from "./utils.ts";
 import type { Finding } from "./findings-ledger.ts";
+import type { TestSuite, TestSuiteSource } from "./test-tool-detect.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import { isWidgetVisible } from "./widget-visibility.ts";
 
@@ -147,6 +148,22 @@ export interface WorkflowState {
    * persisted before this field existed.
    */
   findings?: Finding[];
+  /**
+   * Test-tool wiring recorded by save_task's ensure step: the effective
+   * source (config | existing | detected | none) and the suites the generated
+   * `test` tool runs. Rendered into every unit task text as the Verification
+   * line. Optional: absent when no test tool was configured/detected, and on
+   * sessions persisted before this field existed.
+   */
+  testTool?: TestToolInfo;
+}
+
+/** Test-tool wiring recorded by save_task's ensure step (T3). */
+export interface TestToolInfo {
+  /** Where the suites came from: config | existing | detected | none. */
+  source: TestSuiteSource;
+  /** Suites the test tool runs (empty for none / external-tool sources). */
+  suites: TestSuite[];
 }
 
 /** Test run results. */

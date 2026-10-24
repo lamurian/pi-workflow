@@ -36,6 +36,9 @@ export interface RpcUnitClientOptions {
   /** Extra environment variables merged over process.env for the child
    * (e.g. PI_CONTRACT_GUARD_FILE pointing at the allowlist payload). */
   env?: Record<string, string>;
+  /** Absolute path of the generated test extension, when present in the
+   * project (resolved per spawn via resolveTestExtensionPath(cwd)). */
+  testExtPath?: string;
 }
 
 /**
@@ -86,7 +89,7 @@ let commandSeq = 0;
  * @returns A live client handle for the child process.
  */
 export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient {
-  const args = buildImplementerArgs(options.systemPrompt);
+  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath);
   const invocation = getPiInvocation(args);
   const proc: ChildProcess = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,

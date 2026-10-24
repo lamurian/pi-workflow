@@ -529,7 +529,7 @@ describe("red step tied to implement.enforceTdd", () => {
     const result = await runLoop(pi, ctx, state, runner);
 
     assert.equal(result.complete, true, "the continuation lands the commit");
-    assert.match(calls[0]!.taskText, /"phase": "red"/, "the test-kind task asks for a red report");
+    assert.doesNotMatch(calls[0]!.taskText, /"phase": "red"/, "the unit observes red itself via the test tool — no red-phase instruction");
     const execLog = (pi as GatePi).execLog;
     assert.ok(execLog.some((args) => args[0] === "hook"), "a red report triggers the pre-commit run");
     assert.match(calls[1]!.taskText, /red unobservable/, "hook missing -> red cannot be observed, proceed");
@@ -687,11 +687,11 @@ describe("red step tied to implement.enforceTdd", () => {
     }
   });
 
-  it("manual-kind behaviors get no red section even with enforceTdd true", () => {
+  it("manual-kind behaviors carry no red section (the red instruction is gone, T3)", () => {
     const state = warmTask();
     const manual = { ...state.task!.behaviors[0]!, kind: "manual" as const };
-    const text = buildUnitTask(manual, state.task!, { enforceTdd: true });
-    assert.doesNotMatch(text, /"phase": "red"/, "the red phase is test-kind only");
+    const text = buildUnitTask(manual, state.task!);
+    assert.doesNotMatch(text, /"phase": "red"/, "no red-phase instruction in the task text");
   });
 });
 

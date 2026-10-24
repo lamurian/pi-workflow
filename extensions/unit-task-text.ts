@@ -1,7 +1,7 @@
 import { RETRY_BUDGET } from "./commit-gate.ts";
 import { formatFiles, formatTask } from "./task-contract.ts";
 import type { PrecommitCheckResult } from "./precommit-check.ts";
-import type { Behavior, TaskContract } from "./state.ts";
+import type { Behavior, TaskContract, TestToolInfo } from "./state.ts";
 import { buildContextPreload } from "./unit-context-preload.ts";
 import type { UnitAttempt } from "./implement-loop.ts";
 
@@ -50,10 +50,33 @@ export function buildEngineerNoteSection(note: string): string {
 
 /** Options for {@link buildUnitTask}. */
 export interface UnitTaskOptions {
-  /** When explicitly true, test-kind tasks gain a red-phase section (T6). */
-  enforceTdd?: boolean;
   /** When set, declared M/D file contents are preloaded into the task text (T7). */
   preloadCwd?: string;
+  /** Test-tool wiring from state.testTool; drives the Verification line (T3). */
+  testTool?: TestToolInfo;
+}
+
+/**
+ * Build the Verification line for one behavior.
+ *
+ * @param behavior - The behavior being implemented.
+ * @param testTool - The persisted test-tool wiring, if any.
+ * @returns "call the `test` tool (runs: <argv joins>)" when suites are known
+ *          (config/existing-with-suites/detected), otherwise the fallback:
+ *          the pre-commit hook for test-kind behaviors, inspection for manual.
+ */
+function verificationLine(
+  behavior: Behavior,
+  testTool: TestToolInfo | undefined,
+): string {
+  const suites = testTool?.suites ?? [];
+  if (suites.length > 0) {
+    const runs = suites.map((suite) => suite.argv.join(" ")).join("; ");
+    return `call the \`test\` tool (runs: ${runs})`;
+  }
+  return behavior.kind === "test"
+    ? "no test tool; verification is the pre-commit hook"
+    : "no test tool; verify by inspection";
 }
 
 /**
@@ -61,7 +84,7 @@ export interface UnitTaskOptions {
  *
  * @param behavior - The behavior to implement.
  * @param task     - The full task contract (for context).
- * @param options  - Optional flags; `enforceTdd: true` adds the red phase to test-kind tasks.
+ * @param options  - Optional flags; `testTool` renders the Verification line.
  * @returns Rendered task text for the subprocess.
  */
 export function buildUnitTask(
@@ -69,18 +92,6 @@ export function buildUnitTask(
   task: TaskContract,
   options: UnitTaskOptions = {},
 ): string {
-  const redSection =
-    behavior.kind === "test" && options.enforceTdd === true
-      ? [
-          "",
-          "## Red phase (tests first)",
-          "",
-          "Write or edit the tests for this behavior FIRST so they FAIL against the current",
-          "code, then emit a report with `\"phase\": \"red\"` in the JSON block and STOP —",
-          "do not implement yet. The orchestrator runs the pre-commit check on your failing",
-          "test and steers the result back to you before implementation starts.",
-        ].join("\n")
-      : "";
   return [
     `Implement ONE behavior: ${behavior.id}.`,
     `Description: ${behavior.description}`,
@@ -97,7 +108,8 @@ export function buildUnitTask(
     "## Contract (for reference)",
     formatTask(task),
     options.preloadCwd ? buildContextPreload(task.files, options.preloadCwd) : "",
-    redSection,
+    "## Verification",
+    verificationLine(behavior, options.testTool),
     "End with the JSON report block (summary, suggestedCommit) as instructed.",
   ]
     .filter(Boolean)

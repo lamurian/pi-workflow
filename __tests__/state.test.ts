@@ -378,3 +378,25 @@ describe("resetWidgetVisibility restores the hidden default (T3)", () => {
     );
   });
 });
+
+describe("state.testTool persistence (T3)", () => {
+  it("round-trips state.testTool through loadState", () => {
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      testTool: {
+        source: "detected",
+        suites: [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
+      },
+    };
+    const { ctx } = ctxWithState(state);
+    const loaded = loadState(ctx);
+    assert.ok(loaded);
+    assert.deepEqual(loaded!.testTool, state.testTool, "suites survive serialization");
+  });
+
+  it("testTool is optional: absent on sessions persisted before the field existed", () => {
+    const { ctx } = ctxWithState({ phase: "finalizing", specText: "t" });
+    assert.equal(loadState(ctx)!.testTool, undefined);
+  });
+});

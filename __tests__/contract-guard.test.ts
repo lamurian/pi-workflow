@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
 import {
@@ -812,6 +812,69 @@ describe("orchestrator spawn wiring (T3)", () => {
         `GUARD:${guardPath}`,
         "the unit child receives PI_CONTRACT_GUARD_FILE",
       );
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+});
+
+// ─── T3 wiring: the guard allows `test`, spawn loads the test extension ─────
+
+describe("contract-guard allows the test tool (T3 wiring)", () => {
+  it("passes the generated test tool through while bash stays blocked", async () => {
+    const { hook } = await loadGuardExtension(writeGuardFile(GUARD_PAYLOAD));
+    assert.equal(
+      await hook(toolCall("test")),
+      undefined,
+      "the generated test tool must pass the guard",
+    );
+    const bash = await hook(toolCall("bash", "src/new.ts"));
+    assert.equal(bash?.block, true, "bash is still blocked");
+  });
+
+  it("spawns the unit with a second -e and the test tool when the project has a generated extension", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-guard-testext-"));
+    mkdirSync(join(dir, ".pi", "extensions"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "extensions", "test.ts"), "// generated\n");
+    const capture = join(dir, "argv.txt");
+    const fake = join(dir, "fake-pi.sh");
+    writeFileSync(
+      fake,
+      "#!/bin/sh\n" +
+        `printf '%s\\n' "$*" > "${capture}"\n` +
+        "while IFS= read -r line; do :; done\nexit 0\n",
+    );
+    chmodSync(fake, 0o755);
+    delete process.env.PI_IMPLEMENTER_TOOLS;
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = fake;
+    try {
+      const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
+      const client = spawnRpcUnitClient({ systemPrompt: "sys", cwd: dir });
+      try {
+        const deadline = Date.now() + 3_000;
+        while (Date.now() < deadline && !existsSync(capture)) {
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        const argv = readFileSync(capture, "utf8");
+        assert.ok(
+          argv.includes(join(dir, ".pi", "extensions", "test.ts")),
+          `argv must carry the test extension path: ${argv}`,
+        );
+        assert.equal(
+          argv.split(" -e ").length - 1,
+          2,
+          `two -e flags (guard + test extension): ${argv}`,
+        );
+        assert.match(
+          argv,
+          /read,write,edit,grep,find,ls,delete_file,test/,
+          "test is appended to the default tools",
+        );
+      } finally {
+        await client.shutdown(200);
+      }
     } finally {
       if (prev === undefined) delete process.env.PI_BIN;
       else process.env.PI_BIN = prev;
