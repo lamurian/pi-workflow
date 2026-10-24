@@ -8,7 +8,7 @@ import { relayImplementerEvent } from "./implementer-activity.ts";
 import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
-import { buildRetryTask, buildUnitTask } from "./unit-task-text.ts";
+import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
@@ -61,7 +61,9 @@ export async function runBehaviorLoop(
   ctx.ui.notify(`Running unit ${behavior.id} (${unitIndex + 1}/${totalUnits})`, "info");
   const position = `${unitIndex + 1}/${totalUnits}`;
   ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`); // B3: the "workflow" key from state.ts updateUi is never written by these frames.
-  const baseCore = taskPrefix + buildUnitTask(behavior, task, { preloadCwd: cwd, testTool: state.testTool }) + noteSection + resumeTreeContext;
+  // T5: with a v2 contract (state.contractV2) the unit text is the unit's slice only.
+  const unitOptions: UnitTaskOptions = { contract: state.contractV2, preloadCwd: cwd, testTool: state.testTool };
+  const baseCore = taskPrefix + buildUnitTask(behavior, task, unitOptions) + noteSection + resumeTreeContext;
   const baseTask: UnitTask = {
     behaviorId: behavior.id,
     taskText: haltPrefix + baseCore + findingsSection(),
@@ -144,7 +146,7 @@ export async function runBehaviorLoop(
             `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without advancing the tree ` +
               `or adding findings: ${attempt.summary ?? "no summary"}`);
         }
-        await runRetry(buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection());
+        await runRetry(buildRetryTask(behavior, task, attempt, retry, unitOptions) + noteSection + findingsSection());
         continue;
       }
       // Timed out without progress (or beyond the continuation budget): fall through to the unchanged timeout-retry path below.
@@ -156,7 +158,7 @@ export async function runBehaviorLoop(
       if (retry > RETRY_BUDGET) {
         return haltWithChild(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
       }
-      await runRetry(buildRetryTask(behavior, task, attempt, retry) + noteSection + findingsSection());
+      await runRetry(buildRetryTask(behavior, task, attempt, retry, unitOptions) + noteSection + findingsSection());
       continue;
     }
 

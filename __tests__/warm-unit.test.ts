@@ -1,6 +1,8 @@
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import {
   WARM_STEER_CAP,
   canSteerWarmChild,
@@ -18,12 +20,14 @@ import { getActiveUnitClient, setActiveUnitClient } from "../extensions/unit-cli
 import type { RpcUnitClient } from "../extensions/rpc-unit-client.ts";
 import { parseImplementerReport } from "../extensions/implementer-report.ts";
 import { buildUnitTask } from "../extensions/unit-task-text.ts";
+import { writeContractGuardFile } from "../extensions/contract-guard-file.ts";
+import { deriveAllowlist } from "../extensions/contract-derive.ts";
 import {
   beginOrchestration,
   cancelOrchestration,
   endOrchestration,
 } from "../extensions/orchestration-cancel.ts";
-import type { TaskContract, WorkflowState } from "../extensions/state.ts";
+import type { ContractV2, TaskContract, WorkflowState } from "../extensions/state.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const HOOK_STDERR = "husky - pre-commit hook failed\nlint errors";
@@ -502,6 +506,174 @@ describe("parent-side red-step machinery removed (T4)", () => {
     const manual = { ...state.task!.behaviors[0]!, kind: "manual" as const };
     const text = buildUnitTask(manual, state.task!);
     assert.doesNotMatch(text, /"phase": "red"/, "no red-phase instruction in the task text");
+  });
+});
+
+// ═══ T5: unit payload + slice-only task text ═══
+describe("unit payload and slice task text (T5)", () => {
+  const CONTRACT: ContractV2 = {
+    title: "Payload Task",
+    instruction: "shared context only",
+    done: "tests pass",
+    sources: [
+      { path: "src/a.ts", status: "M", tasks: ["T1"] },
+      { path: "src/b.ts", status: "M", tasks: ["T2"] },
+    ],
+    tests: [
+      { path: "__tests__/a.test.ts", status: "A", tasks: ["T1"] },
+      { path: "__tests__/b.test.ts", status: "A", tasks: ["T2"] },
+    ],
+    tasks: [
+      { id: "T1", description: "slice A", expectedOutput: ["assertion one", "assertion two"], status: "active" },
+      { id: "T2", description: "slice B", expectedOutput: ["other assertion"], status: "active" },
+    ],
+  };
+
+  const v1Task: TaskContract = {
+    title: CONTRACT.title,
+    instruction: CONTRACT.instruction,
+    files: [
+      { path: "src/a.ts", status: "M" },
+      { path: "src/b.ts", status: "M" },
+      { path: "__tests__/a.test.ts", status: "A" },
+      { path: "__tests__/b.test.ts", status: "A" },
+    ],
+    done: CONTRACT.done,
+    behaviors: [
+      {
+        id: "T1",
+        description: "slice A",
+        expectedOutput: "assertion one; assertion two",
+        kind: "test",
+        status: "active",
+      },
+      { id: "T2", description: "slice B", expectedOutput: "other assertion", kind: "test", status: "active" },
+    ],
+  };
+
+  /** Load the child guard's tool_call hook against an env map. */
+  async function loadGuardHook(
+    env: Record<string, string | undefined>,
+  ): Promise<
+    (event: Record<string, unknown>) => Promise<{ block?: boolean; reason?: string } | undefined>
+  > {
+    const mod = await import("../extensions/contract-guard/index.ts");
+    const handlers = new Map<string, (event: Record<string, unknown>) => Promise<unknown>>();
+    const pi = {
+      on: (name: string, handler: (event: Record<string, unknown>) => Promise<unknown>) => {
+        handlers.set(name, handler);
+        return () => {};
+      },
+      registerTool: () => {},
+    };
+    mod.createContractGuardExtension(env)(pi as never);
+    return handlers.get("tool_call") as never;
+  }
+
+  it("payloadCarriesDerivedUnitSlice", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-unit-payload-"));
+    const suites = [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }];
+    const guardPath = await writeContractGuardFile(mockPi(), tmp, deriveAllowlist(CONTRACT), "base123", {
+      contract: CONTRACT,
+      taskId: "T1",
+      testSuites: suites,
+    });
+    assert.equal(
+      guardPath.split(sep).join("/"),
+      `${tmp.split(sep).join("/")}/.git/pi-workflow/contract-guard.json`,
+      "the payload lands at .git/pi-workflow/contract-guard.json",
+    );
+    const payload = JSON.parse(readFileSync(guardPath, "utf8")) as {
+      repoRoot: string;
+      baselineHead: string;
+      allowlist: unknown;
+      files?: unknown;
+      unit: {
+        id: string;
+        sources: Array<{ path: string }>;
+        tests: Array<{ path: string }>;
+        packages: string[];
+        testSuites: unknown;
+      };
+    };
+    assert.equal(payload.repoRoot, tmp);
+    assert.equal(payload.baselineHead, "base123");
+    assert.deepEqual(payload.allowlist, deriveAllowlist(CONTRACT), "the allowlist is the contract-derive union");
+    assert.equal(payload.files, undefined, "no v1 files field in a v2 payload");
+    const unit = payload.unit;
+    assert.equal(unit.id, "T1");
+    assert.deepEqual(
+      unit.sources.map((e) => e.path),
+      ["src/a.ts"],
+      "only T1-owned sources",
+    );
+    assert.deepEqual(
+      unit.tests.map((e) => e.path),
+      ["__tests__/a.test.ts"],
+      "only T1-owned tests",
+    );
+    assert.deepEqual(unit.packages, ["__tests__"], "packages = repo-relative dirs of owned test paths");
+    assert.deepEqual(unit.testSuites, suites, "the recorded test suites ride the payload");
+
+    // The child guard reads PI_UNIT_FILE and falls back to PI_CONTRACT_GUARD_FILE.
+    const viaUnitFile = await loadGuardHook({ PI_UNIT_FILE: guardPath });
+    const viaLegacy = await loadGuardHook({ PI_CONTRACT_GUARD_FILE: guardPath });
+    const editMine = { toolName: "edit", input: { path: "src/a.ts" } };
+    assert.equal(await viaUnitFile(editMine), undefined, "the guard reads PI_UNIT_FILE");
+    assert.equal(await viaLegacy(editMine), undefined, "the guard falls back to PI_CONTRACT_GUARD_FILE");
+    const editTheirs = await viaUnitFile({ toolName: "edit", input: { path: "src/b.ts" } });
+    assert.equal(editTheirs?.block, true, "another task's owned path stays blocked in-turn");
+    assert.match(editTheirs?.reason ?? "", /T2/, "the reason names the owning task");
+  });
+
+  it("unitTaskTextIsSliceOnly", async () => {
+    const behavior = v1Task.behaviors[0]!;
+    const text = buildUnitTask(behavior, v1Task, {
+      contract: CONTRACT,
+      testTool: {
+        source: "detected",
+        suites: [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
+      },
+    });
+
+    assert.match(text, /Implement ONE behavior: T1\./, "task id");
+    assert.match(text, /Description: slice A/, "the slice description");
+    assert.match(text, /- assertion one\n- assertion two/, "one expectedOutput line per assertion");
+    assert.match(text, /Sources: src\/a\.ts \(M\)/, "owned sources only");
+    assert.match(text, /Tests: __tests__\/a\.test\.ts \(A\)/, "owned tests only");
+    assert.match(text, /## Verification/);
+    assert.match(text, /derived scope/, "the Verification line states the test tool defaults to the task scope");
+    assert.match(text, /not verification/, "iteration runs are called out as not verification");
+    assert.doesNotMatch(text, /src\/b\.ts/, "T2's owned paths are never embedded");
+    assert.doesNotMatch(text, /__tests__\/b\.test\.ts/, "T2's test paths are never embedded");
+    assert.doesNotMatch(text, /slice B/, "the other task's description is never embedded");
+    assert.doesNotMatch(text, /## Contract \(for reference\)/, "the full contract is not embedded");
+    assert.doesNotMatch(text, /^Files: /m, "no full-allowlist line");
+
+    // The orchestrator loop threads state.contractV2 into the unit task text.
+    const pi = piWithGate({ landOnCommit: 1 });
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: v1Task,
+      contractV2: CONTRACT,
+      baselineHead: "base123",
+    };
+    const ctx = ctxWithState(state);
+    const texts: Record<string, string> = {};
+    beginOrchestration(Promise.resolve());
+    try {
+      const result = await runOrchestratedImplement(pi, ctx, state, v1Task, async (unit) => {
+        texts[unit.behaviorId] = unit.taskText;
+        return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: `feat(core): ${unit.behaviorId}` };
+      });
+      assert.equal(result.complete, true, result.error ?? "");
+    } finally {
+      endOrchestration();
+    }
+    assert.match(texts["T1"]!, /Implement ONE behavior: T1\./, "the loop unit text is the slice");
+    assert.match(texts["T1"]!, /- assertion one/, "the loop unit text carries the slice assertions");
+    assert.doesNotMatch(texts["T1"]!, /## Contract \(for reference\)/, "no full contract in the loop unit text");
   });
 });
 

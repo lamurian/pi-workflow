@@ -8,7 +8,8 @@
  *   untouched;
  * - checks `write`, `edit` and `delete_file` against the pure allowlist
  *   core (`extensions/contract-guard-core.ts`) using the payload written
- *   by the orchestrator to the file named by `PI_CONTRACT_GUARD_FILE`;
+ *   by the orchestrator to the file named by `PI_UNIT_FILE` (T5;
+ *   `PI_CONTRACT_GUARD_FILE` is the read-fallback for one release);
  * - blocks every other tool, including `bash`, even when the unit was
  *   granted it via `PI_IMPLEMENTER_TOOLS`;
  * - fails closed (all mutating tools blocked) when the guard file is
@@ -28,9 +29,9 @@ import { checkToolAction, type DeclaredFile } from "../contract-guard-core.ts";
 interface GuardPayload {
   /** Absolute repository root the allowlist paths resolve against. */
   repoRoot: string;
-  /** The contract's declared allowlist entries (with optional ownership refs). */
+  /** The derived allowlist entries (v2 `allowlist` / legacy `files`). */
   files: DeclaredFile[];
-  /** The unit's task id (T4): enables strict per-task ownership checks. */
+  /** The unit's task id: enables strict per-task ownership checks. */
   taskId?: string;
 }
 
@@ -47,17 +48,21 @@ const PASSTHROUGH_TOOLS = new Set(["read", "grep", "find", "ls", "test"]);
 const MUTATING_TOOLS = new Set(["write", "edit", "delete_file"]);
 /** Fail-closed reason: must mention "missing or invalid" per contract. */
 const FAIL_CLOSED_REASON =
-  "Blocked: contract guard file missing or invalid (PI_CONTRACT_GUARD_FILE) — " +
+  "Blocked: contract guard file missing or invalid (PI_UNIT_FILE / PI_CONTRACT_GUARD_FILE) — " +
   "the file allowlist cannot be verified, so all file-mutating tools are " +
   "disabled for this unit. The orchestrator must re-run /implement.";
 
 /**
- * Read and validate the guard payload file named by the env var.
+ * Read and validate the payload file named by the env var (T5: PI_UNIT_FILE,
+ * falling back to the legacy PI_CONTRACT_GUARD_FILE for one release).
  *
  * Anything that is not a well-formed payload — missing file, broken JSON,
  * missing/empty `repoRoot`, entries with a non-string path or a status
- * outside A|M|D, wrong optional field types — is rejected as a whole so
- * the hook fails closed instead of enforcing a partial allowlist.
+ * outside A|M|D, malformed ownership refs, a malformed unit slice, wrong
+ * optional field types — is rejected as a whole so the hook fails closed
+ * instead of enforcing a partial allowlist. v2 payloads carry the derived
+ * `allowlist` (refs, optional status) and `unit.id`; legacy payloads carry
+ * `files` (tasks) and `taskId`.
  *
  * @param env - Environment map (normally `process.env`).
  * @returns The validated payload, or undefined when missing or invalid.
@@ -65,7 +70,7 @@ const FAIL_CLOSED_REASON =
 function readGuardPayload(
   env: Record<string, string | undefined>,
 ): GuardPayload | undefined {
-  const file = env.PI_CONTRACT_GUARD_FILE;
+  const file = env.PI_UNIT_FILE ?? env.PI_CONTRACT_GUARD_FILE;
   if (!file) return undefined;
   let parsed: unknown;
   try {
@@ -80,27 +85,39 @@ function readGuardPayload(
   if (typeof candidate.repoRoot !== "string" || !candidate.repoRoot) {
     return undefined;
   }
-  if (!Array.isArray(candidate.files)) return undefined;
+  // v2 payloads carry the derived `allowlist`; legacy payloads carry `files`.
+  const rawEntries = candidate.allowlist ?? candidate.files;
+  if (!Array.isArray(rawEntries)) return undefined;
   const files: DeclaredFile[] = [];
-  for (const entry of candidate.files) {
+  for (const entry of rawEntries) {
     if (typeof entry !== "object" || entry === null) return undefined;
     const fileEntry = entry as Record<string, unknown>;
     if (typeof fileEntry.path !== "string" || !fileEntry.path) return undefined;
     const status = fileEntry.status;
-    if (status !== "A" && status !== "M" && status !== "D") return undefined;
-    // Optional ownership refs (T4): per-task ownership enforcement. A
-    // malformed refs array invalidates the whole payload (fail closed).
+    // Absent status is legal in v2 (write-authorized); A/M/D are the only
+    // valid values when present.
+    if (status !== undefined && status !== "A" && status !== "M" && status !== "D") {
+      return undefined;
+    }
+    // Ownership refs (T4/T5): PathEntry-style `tasks` or derived-allowlist-
+    // style `refs`. A malformed refs array invalidates the whole payload
+    // (fail closed).
+    const rawRefs = fileEntry.tasks ?? fileEntry.refs;
     let tasks: string[] | undefined;
-    if (fileEntry.tasks !== undefined) {
+    if (rawRefs !== undefined) {
       if (
-        !Array.isArray(fileEntry.tasks) ||
-        !fileEntry.tasks.every((t) => typeof t === "string" && t.trim() !== "")
+        !Array.isArray(rawRefs) ||
+        !rawRefs.every((t) => typeof t === "string" && t.trim() !== "")
       ) {
         return undefined;
       }
-      tasks = [...(fileEntry.tasks as string[])];
+      tasks = [...(rawRefs as string[])];
     }
-    files.push({ path: fileEntry.path, status, ...(tasks ? { tasks } : {}) });
+    files.push({
+      path: fileEntry.path,
+      ...(status !== undefined ? { status: status as "A" | "M" | "D" } : {}),
+      ...(tasks ? { tasks } : {}),
+    });
   }
   if (candidate.baselineHead !== undefined && typeof candidate.baselineHead !== "string") {
     return undefined;
@@ -111,16 +128,23 @@ function readGuardPayload(
       return undefined;
     }
   }
-  if (
-    candidate.taskId !== undefined &&
-    (typeof candidate.taskId !== "string" || candidate.taskId === "")
-  ) {
-    return undefined;
+  // T5: the unit slice — `unit.id` is the task id for per-task ownership.
+  let taskId: string | undefined;
+  if (candidate.unit !== undefined) {
+    const unit = candidate.unit;
+    if (typeof unit !== "object" || unit === null || Array.isArray(unit)) return undefined;
+    const id = (unit as Record<string, unknown>).id;
+    if (typeof id !== "string" || id === "") return undefined;
+    taskId = id;
+  }
+  if (candidate.taskId !== undefined) {
+    if (typeof candidate.taskId !== "string" || candidate.taskId === "") return undefined;
+    taskId ??= candidate.taskId;
   }
   return {
     repoRoot: candidate.repoRoot,
     files,
-    ...(typeof candidate.taskId === "string" ? { taskId: candidate.taskId } : {}),
+    ...(taskId !== undefined ? { taskId } : {}),
   };
 }
 

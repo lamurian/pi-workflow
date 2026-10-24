@@ -1,14 +1,23 @@
 /**
- * Unit context preload (T7): embed the current on-disk contents of the
- * contract's declared M/D files into the unit task text so a bash-free unit
+ * Unit context preload (T7/T5): embed the current on-disk contents of the
+ * unit's OWNED M/D files into the unit task text so a bash-free unit
  * never has to read the whole file itself. Caps: 64 KB per file, 256 KB in
- * total; truncated files are marked. Declared A paths are listed as
- * "(new file)" without content.
+ * total; truncated files are marked. A paths are listed as
+ * "(new file)" without content. v2 entries may omit the status (absent =
+ * write-authorized): those preload like M when the file exists on disk.
  */
 
 import { openSync, readSync, closeSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { FileEntry } from "./state.ts";
+import type { FileStatus } from "./state.ts";
+
+/** One path eligible for preload: repo-relative path plus optional A/M/D status. */
+export interface PreloadPath {
+  /** Repo-relative path. */
+  path: string;
+  /** Optional per-path status FACT (T5: v2 entries may omit it). */
+  status?: FileStatus;
+}
 
 /** Per-file preload cap: 64 KB. */
 export const PRELOAD_PER_FILE_CAP = 64 * 1024;
@@ -38,15 +47,16 @@ function readHead(path: string, limit: number): string {
  *
  * Declared M and D files that exist on disk contribute a fenced block with
  * their current contents (64 KB per file, 256 KB total; over-long content is
- * truncated and marked). Declared A paths are listed as "(new file)". The
- * section is empty when there is nothing to preload.
+ * truncated and marked). A paths are listed as "(new file)"; entries with an
+ * absent status (T5: v2 write-authorized paths) preload like M when the file
+ * exists. The section is empty when there is nothing to preload.
  *
- * @param files - The contract's declared allowlist entries.
+ * @param files - The paths to preload (v1 FileEntry or v2 PathEntry slices).
  * @param cwd   - Repository working directory.
  * @returns The markdown section ("" when nothing preloads).
  */
 export function buildContextPreload(
-  files: readonly FileEntry[],
+  files: readonly PreloadPath[],
   cwd: string,
 ): string {
   const lines: string[] = [];
@@ -66,7 +76,7 @@ export function buildContextPreload(
     const text = readHead(join(cwd, f.path), cap);
     budget -= Buffer.byteLength(text);
     const truncated = size > Buffer.byteLength(text);
-    lines.push(`### ${f.path} (${f.status})`, "", "```", text, "```", "");
+    lines.push(`### ${f.path}${f.status ? ` (${f.status})` : ""}`, "", "```", text, "```", "");
     if (truncated) {
       lines.push(`(truncated: showing first ${Buffer.byteLength(text)} of ${size} bytes)`, "");
     }

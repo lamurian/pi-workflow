@@ -9,7 +9,7 @@ import {
   buildContextPreload,
 } from "../extensions/unit-context-preload.ts";
 import { buildUnitTask } from "../extensions/unit-task-text.ts";
-import type { TaskContract } from "../extensions/state.ts";
+import type { Behavior, ContractV2, TaskContract } from "../extensions/state.ts";
 
 function repo(files: TaskContract["files"]): TaskContract {
   return {
@@ -108,5 +108,70 @@ describe("buildUnitTask context preload (T7)", () => {
     const task = repo([{ path: "src/a.ts", status: "M" }]);
     const text = buildUnitTask(task.behaviors[0]!, task);
     assert.doesNotMatch(text, /## Preloaded declared file contents/);
+  });
+});
+
+// ═══ T5: preload only the unit's owned M/D paths ═══
+describe("unit slice preload (T5)", () => {
+  const CONTRACT: ContractV2 = {
+    title: "Slice Task",
+    instruction: "shared context only",
+    done: "tests pass",
+    sources: [
+      { path: "src/a.ts", status: "M", tasks: ["T1"] },
+      { path: "src/b.ts", status: "M", tasks: ["T2"] },
+    ],
+    tests: [
+      { path: "tests/a.test.ts", status: "M", tasks: ["T1"] },
+      { path: "tests/b.test.ts", status: "M", tasks: ["T2"] },
+    ],
+    tasks: [
+      { id: "T1", description: "slice A", expectedOutput: ["assertion one"], status: "active" },
+      { id: "T2", description: "slice B", expectedOutput: ["other assertion"], status: "active" },
+    ],
+  };
+
+  const v1Task: TaskContract = {
+    title: CONTRACT.title,
+    instruction: CONTRACT.instruction,
+    files: [
+      { path: "src/a.ts", status: "M" },
+      { path: "src/b.ts", status: "M" },
+      { path: "tests/a.test.ts", status: "M" },
+      { path: "tests/b.test.ts", status: "M" },
+    ],
+    done: CONTRACT.done,
+    behaviors: [
+      {
+        id: "T1",
+        description: "slice A",
+        expectedOutput: "assertion one",
+        kind: "test",
+        status: "active",
+      },
+    ],
+  };
+
+  it("preloadOnlyOwnedPaths", () => {
+    const dir = makeRepoDir();
+    mkdirSync(join(dir, "src"));
+    mkdirSync(join(dir, "tests"));
+    writeFileSync(join(dir, "src", "a.ts"), "export const a = 1;\n");
+    writeFileSync(join(dir, "src", "b.ts"), "export const b = 2;\n");
+    writeFileSync(join(dir, "tests", "a.test.ts"), "// a tests\n");
+    writeFileSync(join(dir, "tests", "b.test.ts"), "// b tests\n");
+    const behavior: Behavior = v1Task.behaviors[0]!;
+
+    const text = buildUnitTask(behavior, v1Task, { contract: CONTRACT, preloadCwd: dir });
+
+    assert.match(text, /## Preloaded declared file contents/);
+    assert.match(text, /### src\/a\.ts \(M\)/, "the unit's owned source is preloaded");
+    assert.match(text, /export const a = 1;/);
+    assert.match(text, /### tests\/a\.test\.ts \(M\)/, "the unit's owned test is preloaded");
+    assert.match(text, /a tests/);
+    assert.doesNotMatch(text, /src\/b\.ts/, "the other task's source path is never preloaded");
+    assert.doesNotMatch(text, /export const b = 2;/, "the other task's source content stays out");
+    assert.doesNotMatch(text, /tests\/b\.test\.ts/, "the other task's test path is never preloaded");
+    assert.doesNotMatch(text, /b tests/, "the other task's test content stays out");
   });
 });
