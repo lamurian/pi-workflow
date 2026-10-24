@@ -28,8 +28,10 @@ import { checkToolAction, type DeclaredFile } from "../contract-guard-core.ts";
 interface GuardPayload {
   /** Absolute repository root the allowlist paths resolve against. */
   repoRoot: string;
-  /** The contract's declared allowlist entries. */
+  /** The contract's declared allowlist entries (with optional ownership refs). */
   files: DeclaredFile[];
+  /** The unit's task id (T4): enables strict per-task ownership checks. */
+  taskId?: string;
 }
 
 /** Shape of the `tool_call` event fields this guard reads. */
@@ -86,7 +88,19 @@ function readGuardPayload(
     if (typeof fileEntry.path !== "string" || !fileEntry.path) return undefined;
     const status = fileEntry.status;
     if (status !== "A" && status !== "M" && status !== "D") return undefined;
-    files.push({ path: fileEntry.path, status });
+    // Optional ownership refs (T4): per-task ownership enforcement. A
+    // malformed refs array invalidates the whole payload (fail closed).
+    let tasks: string[] | undefined;
+    if (fileEntry.tasks !== undefined) {
+      if (
+        !Array.isArray(fileEntry.tasks) ||
+        !fileEntry.tasks.every((t) => typeof t === "string" && t.trim() !== "")
+      ) {
+        return undefined;
+      }
+      tasks = [...(fileEntry.tasks as string[])];
+    }
+    files.push({ path: fileEntry.path, status, ...(tasks ? { tasks } : {}) });
   }
   if (candidate.baselineHead !== undefined && typeof candidate.baselineHead !== "string") {
     return undefined;
@@ -97,7 +111,17 @@ function readGuardPayload(
       return undefined;
     }
   }
-  return { repoRoot: candidate.repoRoot, files };
+  if (
+    candidate.taskId !== undefined &&
+    (typeof candidate.taskId !== "string" || candidate.taskId === "")
+  ) {
+    return undefined;
+  }
+  return {
+    repoRoot: candidate.repoRoot,
+    files,
+    ...(typeof candidate.taskId === "string" ? { taskId: candidate.taskId } : {}),
+  };
 }
 
 /**
@@ -141,6 +165,7 @@ export async function guardToolCall(
       path,
       cwd: payload.repoRoot,
       files: payload.files,
+      ...(payload.taskId !== undefined ? { taskId: payload.taskId } : {}),
     });
     if (check.allowed) return undefined;
     return { block: true, reason: check.reason };

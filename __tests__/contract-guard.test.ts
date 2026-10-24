@@ -8,6 +8,7 @@ import {
   classifyBaselineDiff,
   formatDeclaredList,
   normalizeRepoPath,
+  planUnstage,
 } from "../extensions/contract-guard-core.ts";
 import { commitAndGate } from "../extensions/git-ops.ts";
 import {
@@ -127,6 +128,75 @@ describe("checkToolAction (T2)", () => {
   });
 });
 
+// ─── Pure core: strict per-task ownership + orchestrator-owned test ext (T4) ─
+
+describe("checkToolAction per-task ownership (T4)", () => {
+  const files = [
+    { path: "src/mine.ts", status: "M" as const, tasks: ["T1"] },
+    { path: "src/theirs.ts", status: "M" as const, tasks: ["T2"] },
+    { path: "src/shared.ts", status: "M" as const, tasks: ["T1", "T2"] },
+    { path: "src/gone.ts", status: "D" as const, tasks: ["T1"] },
+    { path: "src/gone-theirs.ts", status: "D" as const, tasks: ["T2"] },
+  ];
+  const check = (action: string, path: string, list = files) =>
+    checkToolAction({ action, path, cwd: CWD, files: list, taskId: "T1" });
+
+  it("checkToolActionEnforcesTaskOwnership", () => {
+    assert.deepEqual(check("edit", "src/mine.ts"), { allowed: true });
+    assert.deepEqual(
+      check("edit", "src/shared.ts"),
+      { allowed: true },
+      "a shared file whose refs include the unit's task is editable",
+    );
+    const theirs = check("write", "src/theirs.ts");
+    assert.equal(theirs.allowed, false, "write on a path owned by another task is blocked");
+    if (!theirs.allowed) {
+      assert.match(theirs.reason, /T2/, "the reason names the owning task");
+      assert.match(theirs.reason, /T1/, "the reason names the unit's task");
+      assert.match(theirs.reason, /\/discuss -> \/finalize/);
+    }
+    const sharedDel = check("delete_file", "src/shared.ts");
+    assert.equal(sharedDel.allowed, false, "delete_file still requires a declared D");
+    assert.deepEqual(
+      check("delete_file", "src/gone.ts"),
+      { allowed: true },
+      "delete_file on a D path owned by the unit's task is allowed",
+    );
+    const delTheirs = check("delete_file", "src/gone-theirs.ts");
+    assert.equal(
+      delTheirs.allowed,
+      false,
+      "delete_file on a D path owned by another task is blocked",
+    );
+  });
+
+  it("blocks write/edit to .pi/extensions/test.ts unconditionally (orchestrator-owned)", () => {
+    for (const action of ["write", "edit"]) {
+      const undeclared = check(action, ".pi/extensions/test.ts");
+      assert.equal(undeclared.allowed, false);
+      if (!undeclared.allowed) assert.match(undeclared.reason, /orchestrator/i);
+    }
+    const declared = [
+      ...files,
+      { path: ".pi/extensions/test.ts", status: "M" as const, tasks: ["T1"] },
+    ];
+    const result = check("write", ".pi/extensions/test.ts", declared);
+    assert.equal(
+      result.allowed,
+      false,
+      "even a contract declaration never grants the orchestrator-owned file",
+    );
+    if (!result.allowed) assert.match(result.reason, /orchestrator/i);
+  });
+
+  it("skips the ownership check when no task id is supplied (v1 payloads)", () => {
+    assert.deepEqual(
+      checkToolAction({ action: "write", path: "src/theirs.ts", cwd: CWD, files }),
+      { allowed: true },
+    );
+  });
+});
+
 describe("normalizeRepoPath (T2)", () => {
   it("returns a repo-relative POSIX path", () => {
     const result = normalizeRepoPath("src/./a.ts", CWD);
@@ -171,18 +241,45 @@ describe("classifyBaselineDiff (T2)", () => {
     assert.match(result.violations[0]!, /undeclared/i);
   });
 
-  it("flags a status mismatch: declared A but staged M", () => {
-    const result = classify("M\tsrc/new.ts\n");
-    assert.equal(result.violations.length, 1);
-    assert.match(result.violations[0]!, /src\/new\.ts/);
-    assert.match(result.violations[0]!, /staged as M/i);
-    assert.match(result.violations[0]!, /declared A/);
+  it("guardAcceptsAMStatusDrift: staged A on declared M and staged M on declared A never violate", () => {
+    const files = [
+      { path: "src/existing.ts", status: "M" as const, tasks: ["T1"] },
+      { path: "src/new.ts", status: "A" as const, tasks: ["T1"] },
+    ];
+    const result = classifyBaselineDiff({
+      nameStatus: "A\tsrc/existing.ts\nM\tsrc/new.ts\n",
+      files,
+      baselineRef: "base123",
+      taskId: "T1",
+    });
+    assert.deepEqual(result.violations, [], "A/M drift must never halt the commit");
+    assert.equal(result.advisories.length, 2, "drift is at most advisory");
+    assert.match(result.investigation, /Advisories/i);
+    assert.match(result.investigation, /src\/existing\.ts/);
   });
 
-  it("flags a status mismatch: declared M but staged D", () => {
-    const result = classify("D\tsrc/existing.ts\n");
-    assert.equal(result.violations.length, 1);
-    assert.match(result.violations[0]!, /src\/existing\.ts/);
+  it("guardStillHaltsUndeclaredAndUnauthorizedDelete", () => {
+    const files = [
+      { path: "src/mine.ts", status: "M" as const, tasks: ["T1"] },
+      { path: "src/theirs.ts", status: "D" as const, tasks: ["T2"] },
+    ];
+    const result = classifyBaselineDiff({
+      nameStatus: "M\tsecrets.env\nD\tsrc/theirs.ts\nM\t.git/config\n",
+      files,
+      baselineRef: "base123",
+      taskId: "T1",
+    });
+    assert.equal(result.violations.length, 3);
+    const undeclared = result.violations.find((v) => /secrets\.env/.test(v));
+    assert.ok(undeclared, "undeclared path still violates");
+    assert.match(undeclared, /undeclared/i);
+    const unauthorized = result.violations.find((v) => /src\/theirs\.ts/.test(v));
+    assert.ok(unauthorized, "staged D on a path owned by another task violates");
+    assert.match(unauthorized, /delete/i);
+    assert.ok(
+      result.violations.some((v) => /\.git\//.test(v)),
+      ".git/ paths still violate",
+    );
   });
 
   it("flags any staged path under .git/ even when declared", () => {
@@ -198,6 +295,42 @@ describe("classifyBaselineDiff (T2)", () => {
     assert.match(result.investigation, /M\tsecrets\.env/);
     assert.match(result.investigation, /src\/new\.ts \(A\)/);
     assert.match(result.investigation, /\/discuss -> \/finalize/);
+  });
+});
+
+// ─── Pure core: planUnstage (T4) ────────────────────────────────────────────
+
+describe("planUnstage (T4)", () => {
+  const entries = [
+    { path: "src/mine.ts", status: "M" as const, tasks: ["T1"] },
+    { path: "src/theirs.ts", status: "M" as const, tasks: ["T2"] },
+    { path: "src/shared.ts", tasks: ["T1", "T2"] },
+    { path: "src/nowhere.ts", status: "M" as const },
+  ];
+
+  it("planUnstageSeparatesContamination: other-task paths get the exact restore command", () => {
+    const plan = planUnstage(
+      entries,
+      "M\tsrc/mine.ts\nM\tsrc/theirs.ts\nM\tsrc/shared.ts\nM\tsrc/nowhere.ts\n",
+      "T1",
+    );
+    assert.deepEqual(plan.owned, ["src/mine.ts", "src/shared.ts"]);
+    assert.equal(plan.contamination.length, 1);
+    assert.equal(plan.contamination[0]!.path, "src/theirs.ts");
+    assert.deepEqual(plan.contamination[0]!.ownerTasks, ["T2"]);
+    assert.equal(plan.contamination[0]!.command, "git restore --staged -- src/theirs.ts");
+    assert.deepEqual(plan.commands, ["git restore --staged -- src/theirs.ts"]);
+    assert.deepEqual(
+      plan.undeclared,
+      ["src/nowhere.ts"],
+      "undeclared paths halt the commit and are never unstaged",
+    );
+  });
+
+  it("classifies .git/ paths as undeclared, never as owned", () => {
+    const plan = planUnstage(entries, "A\t.git/hooks/pre-commit\n", "T1");
+    assert.deepEqual(plan.owned, []);
+    assert.deepEqual(plan.undeclared, [".git/hooks/pre-commit"]);
   });
 });
 
@@ -641,6 +774,26 @@ describe("contract-guard extension hook (T3)", () => {
     assert.equal(await hook(toolCall("delete_file", "src/gone.ts")), undefined);
   });
 
+  it("enforces per-task ownership and the orchestrator-owned test extension from the payload (T4)", async () => {
+    const payload = {
+      repoRoot: CWD,
+      taskId: "T1",
+      files: [
+        { path: "src/mine.ts", status: "M", tasks: ["T1"] },
+        { path: "src/theirs.ts", status: "M", tasks: ["T2"] },
+        { path: ".pi/extensions/test.ts", status: "M", tasks: ["T1"] },
+      ],
+    };
+    const { hook } = await loadGuardExtension(writeGuardFile(payload));
+    assert.equal(await hook(toolCall("edit", "src/mine.ts")), undefined);
+    const theirs = await hook(toolCall("write", "src/theirs.ts"));
+    assert.equal(theirs?.block, true, "another task's path is blocked in-turn");
+    assert.match(theirs?.reason ?? "", /T2/, "the reason names the owning task");
+    const te = await hook(toolCall("write", ".pi/extensions/test.ts"));
+    assert.equal(te?.block, true, "the orchestrator-owned test extension is blocked");
+    assert.match(te?.reason ?? "", /orchestrator/i);
+  });
+
   it("blocks write/edit/delete_file on disallowed paths with the declared list", async () => {
     const { hook } = await loadGuardExtension(writeGuardFile(GUARD_PAYLOAD));
     const undeclared = await hook(toolCall("write", "secrets.env"));
@@ -698,6 +851,17 @@ describe("contract-guard extension hook (T3)", () => {
     const badStatus = { ...GUARD_PAYLOAD, files: [{ path: "src/new.ts", status: "NEW" }] };
     const { hook: badShapeHook } = await loadGuardExtension(writeGuardFile(badStatus));
     assert.equal((await badShapeHook(toolCall("write", "src/new.ts")))?.block, true);
+
+    const badTaskId = { ...GUARD_PAYLOAD, taskId: 42 };
+    const { hook: badTaskIdHook } = await loadGuardExtension(writeGuardFile(badTaskId));
+    assert.equal((await badTaskIdHook(toolCall("write", "src/new.ts")))?.block, true);
+
+    const badRefs = {
+      ...GUARD_PAYLOAD,
+      files: [{ path: "src/new.ts", status: "A", tasks: "T1" }],
+    };
+    const { hook: badRefsHook } = await loadGuardExtension(writeGuardFile(badRefs));
+    assert.equal((await badRefsHook(toolCall("write", "src/new.ts")))?.block, true);
 
     const noRoot = { files: GUARD_PAYLOAD.files };
     const { hook: noRootHook } = await loadGuardExtension(writeGuardFile(noRoot));
@@ -851,7 +1015,12 @@ describe("contract-guard allows the test tool (T3 wiring)", () => {
     process.env.PI_BIN = fake;
     try {
       const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
-      const client = spawnRpcUnitClient({ systemPrompt: "sys", cwd: dir });
+      const { resolveTestExtensionPath } = await import("../extensions/test-tool-ensure.ts");
+      const client = spawnRpcUnitClient({
+        systemPrompt: "sys",
+        cwd: dir,
+        testExtPath: resolveTestExtensionPath(dir),
+      });
       try {
         const deadline = Date.now() + 3_000;
         while (Date.now() < deadline && !existsSync(capture)) {
