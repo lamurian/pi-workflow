@@ -4,6 +4,7 @@ import type { Finding } from "./findings-ledger.ts";
 import type { TestSuite, TestSuiteSource } from "./test-tool-detect.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import { isWidgetVisible } from "./widget-visibility.ts";
+import { migrateV1 } from "./task-migrate.ts";
 
 /** Valid phases of the workflow state machine. */
 export type WorkflowPhase =
@@ -203,6 +204,14 @@ export interface WorkflowState {
    * sessions persisted before this field existed.
    */
   testTool?: TestToolInfo;
+  /**
+   * Normalized v2 contract migrated from `task` by the resume path (T2):
+   * `loadState` attaches it whenever a persisted v1 contract normalizes
+   * cleanly to a valid ContractV2. Optional: absent when the session has no
+   * contract and when migration fails v2 validation (the session then keeps
+   * resuming on the still-supported v1 path).
+   */
+  contractV2?: ContractV2;
 }
 
 /** Test-tool wiring recorded by save_task's ensure step (T3). */
@@ -246,7 +255,8 @@ export function saveState(pi: ExtensionAPI, state: WorkflowState): void {
  * Walks session entries in reverse to find the most recent
  * "workflow-state" custom entry. Migrates the legacy "finalized"
  * phase name to "finalizing" so sessions persisted before the
- * rename keep working.
+ * rename keep working, and attaches the v2 contract migrated from a
+ * persisted v1 contract (T2).
  *
  * @param ctx - Extension context with session manager access.
  * @returns The restored state, or null if none exists.
@@ -262,14 +272,41 @@ export function loadState(ctx: ExtensionContext): WorkflowState | null {
       const data = (entry as { data?: WorkflowState }).data;
       if (data && data.phase) {
         // Backward compat: sessions persisted before the phase rename.
-        if ((data.phase as string) === "finalized") {
-          return { ...data, phase: "finalizing" };
-        }
-        return data;
+        const restored: WorkflowState =
+          (data.phase as string) === "finalized"
+            ? { ...data, phase: "finalizing" }
+            : data;
+        return attachMigratedContract(restored);
       }
     }
   }
   return null;
+}
+
+/**
+ * Resume path (T2): attach the v2 contract migrated from a persisted v1 contract.
+ *
+ * When the restored state carries a v1 `task` but no `contractV2`, the
+ * normalizer converts it once per load and the result is attached IN PLACE:
+ * loadState must keep returning the very object the session branch holds
+ * (callers mutate it after loading — phase transitions, behavior statuses,
+ * lastHalt — and expect those writes to hit the persisted in-memory entry).
+ * A migration that fails v2 validation is swallowed here so the session
+ * keeps resuming on the still-supported v1 path — `migrateV1` itself throws
+ * loudly for direct callers.
+ *
+ * @param state - The restored workflow state (mutated in place on success).
+ * @returns The same state object, with `contractV2` set when the v1
+ *          contract migrates cleanly.
+ */
+function attachMigratedContract(state: WorkflowState): WorkflowState {
+  if (!state.task || state.contractV2) return state;
+  try {
+    state.contractV2 = migrateV1(state.task).contract;
+  } catch {
+    // Invalid migration: keep resuming on the v1 path without a contractV2.
+  }
+  return state;
 }
 
 /**
