@@ -1,8 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { readFileSync } from "node:fs";
 import { getActiveUnitClient, shutdownActiveClient } from "./unit-client-registry.ts";
 import type { RpcImage } from "./rpc-unit-client.ts";
 import type { Behavior } from "./state.ts";
+import { armHitlTimer, armSteerWatchdog, disarmHitlClock, disarmSteerWatchdog, getHitlTimeoutMs, resetHitlClock, setHitlRearm } from "./hitl-clock.ts";
+import { readImageAttachments } from "./hitl-images.ts";
 
 // ─── Manual verification pause (T3) ───────────────────────────────────────────
 
@@ -42,12 +43,6 @@ export async function cleanupOrchestration(graceMs: number = 1_000): Promise<voi
   await shutdownActiveClient(graceMs);
 }
 
-/** Rearm callback for the HITL clock (set while a timed pause is open). */
-let hitlRearm: (() => void) | undefined;
-
-/** Pending HITL timer, if armed. */
-let hitlTimer: ReturnType<typeof setTimeout> | undefined;
-
 /** Outcome of a verification pause: approval (false), clock expiry (true),
  * or cancellation (cancelled: true, B2 /discuss path). */
 export interface PauseOutcome {
@@ -55,119 +50,6 @@ export interface PauseOutcome {
   timedOut: boolean;
   /** True when the pause was settled by cancelOrchestration (B2). */
   cancelled?: boolean;
-}
-
-/** Default HITL clock: 15 minutes of human time per pause. */
-const DEFAULT_HITL_TIMEOUT_MS = 900_000;
-
-/**
- * Resolve the HITL (human-verification) timeout budget.
- *
- * Independent of PI_IMPLEMENT_TIMEOUT_MS: that one bounds model activity,
- * this one bounds waiting for a human. Invalid or non-positive values fall
- * back to the default.
- *
- * @param env - Environment map (defaults to `process.env`); injectable for tests.
- * @returns The timeout in milliseconds (&gt; 0).
- */
-export function getHitlTimeoutMs(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = env.PI_HITL_TIMEOUT_MS;
-  if (raw) {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return DEFAULT_HITL_TIMEOUT_MS;
-}
-
-/** Default steer-response watchdog: 60 seconds of implementer silence. */
-const DEFAULT_STEER_RESPONSE_TIMEOUT_MS = 60_000;
-
-/**
- * Resolve the steer-response watchdog timeout.
- *
- * Bounds how long a forwarded steer may go without an implementer-activity
- * event before the watchdog notifies with recovery options. Invalid or
- * non-positive values fall back to the default.
- *
- * @param env - Environment map (defaults to `process.env`); injectable for tests.
- * @returns The timeout in milliseconds (&gt; 0).
- */
-export function getSteerResponseTimeoutMs(
-  env: Record<string, string | undefined> = process.env,
-): number {
-  const raw = env.PI_STEER_RESPONSE_TIMEOUT_MS;
-  if (raw) {
-    const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-  return DEFAULT_STEER_RESPONSE_TIMEOUT_MS;
-}
-
-/** Pending steer-response watchdog (one verification pause at a time). */
-let steerWatchdog: { behaviorId: string; timer: ReturnType<typeof setTimeout> } | undefined;
-
-/**
- * Arm (or rearm) the steer-response watchdog after a successful forward.
- *
- * If no implementer-activity event for `behaviorId` arrives within
- * PI_STEER_RESPONSE_TIMEOUT_MS (default 60_000), a warning notify states
- * that the implementer has not responded and lists recovery options:
- * /approve to continue, or keep waiting for its response.
- *
- * @param ctx        - Extension context (UI access).
- * @param behaviorId - Behavior whose feedback was forwarded.
- */
-export function armSteerWatchdog(ctx: ExtensionContext, behaviorId: string): void {
-  disarmSteerWatchdog();
-  const timer = setTimeout(() => {
-    steerWatchdog = undefined;
-    ctx.ui.notify(
-      `${behaviorId}: the implementer has not responded to your feedback — ` +
-        "recovery options: /approve to continue, or keep waiting for its response",
-      "warning",
-    );
-  }, getSteerResponseTimeoutMs());
-  steerWatchdog = { behaviorId, timer };
-}
-
-/**
- * Disarm a pending steer-response watchdog before it fires.
- *
- * Called on relayed implementer activity (behavior-matched) and on every
- * pause-closure path (approve, timeout, cancel, cleanup).
- *
- * @param behaviorId - When given, only disarm if the watchdog is armed for
- *                     this behavior; otherwise disarm whatever is pending.
- */
-export function disarmSteerWatchdog(behaviorId?: string): void {
-  if (!steerWatchdog) return;
-  if (behaviorId !== undefined && steerWatchdog.behaviorId !== behaviorId) return;
-  clearTimeout(steerWatchdog.timer);
-  steerWatchdog = undefined;
-}
-
-/**
- * Clear the HITL timer and its rearm hook.
- *
- * Internal clock bookkeeping; exported for tests and cleanup paths.
- */
-export function disarmHitlClock(): void {
-  if (hitlTimer) clearTimeout(hitlTimer);
-  hitlTimer = undefined;
-  hitlRearm = undefined;
-}
-
-/**
- * Reset the HITL clock after user activity (a successful steer).
- *
- * No-op when no timed pause is open. Restarting on activity keeps an
- * engaged user from ever hitting the deferral while still bounding an
- * abandoned pause.
- */
-export function resetHitlClock(): void {
-  hitlRearm?.();
 }
 
 /**
@@ -262,16 +144,15 @@ export function openVerificationPause(
       resolve(outcome);
     };
     const arm = () => {
-      if (hitlTimer) clearTimeout(hitlTimer);
-      hitlTimer = setTimeout(() => {
+      armHitlTimer(getHitlTimeoutMs(), () => {
         ctx.ui.notify(
           `${behavior.id} verification timed out — committing anyway; listed for manual check`,
           "warning",
         );
         settle({ timedOut: true });
-      }, getHitlTimeoutMs());
+      });
     };
-    hitlRearm = arm;
+    setHitlRearm(arm);
     arm();
     hitlWindow = {
       behaviorId: behavior.id,
@@ -315,54 +196,6 @@ export function runSteer(message: string, pi: ExtensionAPI, ctx: ExtensionContex
   ctx.ui.notify(`${window.behaviorId}: feedback forwarded to the implementer`, "info");
   armSteerWatchdog(ctx, window.behaviorId);
   ctx.ui.setStatus("implement", `✦ ${window.behaviorId}: feedback forwarded`);
-}
-
-/**
- * Guess an image mimeType from a file extension.
- *
- * @param path - The file path (or token) whose extension to inspect.
- * @returns The mimeType, or undefined for non-image extensions.
- */
-export function imageMimeType(path: string): string | undefined {
-  const ext = path.toLowerCase().split(".").pop();
-  switch (ext) {
-    case "png":
-      return "image/png";
-    case "jpg":
-    case "jpeg":
-      return "image/jpeg";
-    case "gif":
-      return "image/gif";
-    case "webp":
-      return "image/webp";
-    default:
-      return undefined;
-  }
-}
-
-/**
- * Best-effort read of image file paths mentioned in a steer message.
- *
- * Whitespace-separated tokens with an image extension are read as base64
- * and attached; unreadable files are silently skipped (the text still
- * reaches the child either way).
- *
- * @param message - The steer message text.
- * @returns Attached images, possibly empty.
- */
-export function readImageAttachments(message: string): RpcImage[] {
-  const images: RpcImage[] = [];
-  for (const token of message.split(/\s+/)) {
-    const mimeType = imageMimeType(token);
-    if (!mimeType) continue;
-    try {
-      const data = readFileSync(token).toString("base64");
-      images.push({ type: "image", data, mimeType });
-    } catch {
-      // Unreadable path: skip; the message text still forwards.
-    }
-  }
-  return images;
 }
 
 /**

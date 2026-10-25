@@ -21,11 +21,13 @@ import {
   cleanupOrchestration,
   getHitlWindow,
   setHitlWindow,
+  cancelVerificationPause,
+} from "../extensions/hitl-pause.ts";
+import {
   getHitlTimeoutMs,
   getSteerResponseTimeoutMs,
   disarmSteerWatchdog,
-  cancelVerificationPause,
-} from "../extensions/hitl-pause.ts";
+} from "../extensions/hitl-clock.ts";
 import { runImplement } from "../extensions/implement.ts";
 import { registerImplementerActivityRenderer } from "../extensions/implement-tools.ts";
 import { composeCompletionReport } from "../extensions/implement-report.ts";
@@ -1094,6 +1096,17 @@ describe("B3: steer visibility", () => {
       vi.useRealTimers();
       if (prev === undefined) delete process.env.PI_STEER_RESPONSE_TIMEOUT_MS;
       else process.env.PI_STEER_RESPONSE_TIMEOUT_MS = prev;
+    }
+  });
+});
+
+// "T12": hitl-pause splits into pause + clock + images.
+describe("hitl module split (T12)", () => {
+  it("hitlModulesWithinLineBudget: hitl-pause and its two extracted modules are at most 250 lines", async () => {
+    for (const file of ["hitl-pause.ts", "hitl-clock.ts", "hitl-images.ts"]) {
+      const text = await readFile(new URL(`../extensions/${file}`, import.meta.url), "utf8");
+      const lines = text.split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
     }
   });
 });

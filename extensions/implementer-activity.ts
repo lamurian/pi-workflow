@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { disarmSteerWatchdog } from "./hitl-pause.ts";
+import { disarmSteerWatchdog } from "./hitl-clock.ts";
 
 // ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
 
