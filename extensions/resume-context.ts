@@ -8,7 +8,8 @@
  */
 
 import type { LastHalt } from "./state.ts";
-import { deriveDiagnosis, renderAttemptTable } from "./halt-report.ts";
+import { renderAttemptTable } from "./halt-report.ts";
+import { deriveDiagnosis } from "./halt-diagnosis.ts";
 
 /**
  * Render the previous-run halt context for the resumed behavior's first unit.

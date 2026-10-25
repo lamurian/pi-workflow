@@ -3580,13 +3580,17 @@ describe("T9: implement-start test extension chore commit", () => {
   interface GitExecEntry { cmd: string; args: string[] }
 
   /**
-   * Exec mock for the start-chore flow: git commits advance HEAD; the chore
-   * change query (`diff --cached --name-only HEAD -- <path>`) answers from the
+   * Exec mock for the start-chore flow: git commits advance HEAD (unless
+   * opts.failCommit simulates a rejected chore commit); the chore change
+   * query (`diff --cached --name-only HEAD -- <path>`) answers from the
    * sole-path staging flag; a full staged-set query reports the injected
    * foreign staged paths too; every baseline/gate diff stays empty so the
    * behavior commit lands clean.
    */
-  function piWithChoreExec(foreignStaged: string[] = []): {
+  function piWithChoreExec(
+    foreignStaged: string[] = [],
+    opts: { failCommit?: boolean } = {},
+  ): {
     pi: ExtensionAPI & { calls: Record<string, unknown[]> };
     execLog: GitExecEntry[];
   } {
@@ -3618,6 +3622,7 @@ describe("T9: implement-start test extension chore commit", () => {
         return ok(); // commitAndGate baseline query: clean tree
       }
       if (cmd === "git" && args[0] === "commit") {
+        if (opts.failCommit) return { stdout: "", stderr: "pre-commit hook failed", code: 1, killed: false };
         headCounter++;
         return ok(`[main c${headCounter}] committed`);
       }
@@ -3713,6 +3718,29 @@ describe("T9: implement-start test extension chore commit", () => {
     assert.ok(spawnIdx > choreCommit, "the first unit spawns after the chore commit");
     assert.equal(result.complete, true, result.error ?? "");
     assert.equal(result.haltedOn, undefined, "the run does not halt");
+  });
+
+  it("failedChoreAtStartIsDiagnosedAsPreUnitHalt: a start-time chore commit failure halts with the pre-spawn diagnosis (T9)", async () => {
+    const cwd = tempProject();
+    const { pi } = piWithChoreExec([], { failCommit: true });
+    const state = choreState();
+    const ctx = ctxAt(state, cwd);
+    let spawns = 0;
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async () => {
+      spawns++;
+      return { summary: "should never run", suggestedCommit: "feat: nope" };
+    });
+
+    assert.equal(spawns, 0, "the chore failure halts before any unit spawns");
+    assert.equal(result.complete, false);
+    assert.match(result.error ?? "", /Test-extension chore commit failed/, "the halt names the chore failure");
+    assert.equal(
+      result.diagnosis,
+      "the run halted before any unit started",
+      "an empty attempt history gets the pre-unit diagnosis",
+    );
+    assert.equal(state.lastHalt?.diagnosis, "the run halted before any unit started", "persisted to lastHalt");
   });
 
   it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by git-commit-gate.ts (commitAndGate) and test-extension-chore.ts (the T9 chore commit), one call site each", async () => {

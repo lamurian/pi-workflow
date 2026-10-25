@@ -5,7 +5,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type PendingCommand } from "./state.ts";
-import { deriveDiagnosis, type AttemptRecord } from "./halt-report.ts";
+import type { AttemptRecord } from "./halt-report.ts";
+import { deriveDiagnosis } from "./halt-diagnosis.ts";
 import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import type { OrchestratorResult } from "./implement-loop.ts";

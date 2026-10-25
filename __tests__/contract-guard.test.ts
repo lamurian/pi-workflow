@@ -12,10 +12,10 @@ import {
 import { classifyBaselineDiff, planUnstage } from "../extensions/contract-guard-diff.ts";
 import { commitAndGate } from "../extensions/git-commit-gate.ts";
 import {
-  deriveDiagnosis,
   renderHaltReport,
   type AttemptRecord,
 } from "../extensions/halt-report.ts";
+import { deriveDiagnosis } from "../extensions/halt-diagnosis.ts";
 import { runOrchestratedImplement } from "../extensions/implement-loop.ts";
 import type { Behavior, TaskContract, WorkflowState } from "../extensions/state.ts";
 import type {

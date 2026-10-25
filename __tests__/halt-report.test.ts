@@ -1,14 +1,15 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   ATTEMPT_TEXT_LIMIT,
   HALT_REPORT_CLOSING_LINE,
-  classifyAttemptOutcome,
-  deriveDiagnosis,
   renderHaltReport,
   truncateAttemptText,
   type AttemptRecord,
 } from "../extensions/halt-report.ts";
+import { classifyAttemptOutcome, deriveDiagnosis } from "../extensions/halt-diagnosis.ts";
 import {
   composeCompletionReport,
   composeHaltReport,
@@ -411,5 +412,27 @@ describe("halt-report: loop wiring", () => {
     const report = composeHaltReport(result);
     assert.match(report, /hook-rejected/, "the attempt table shows the hook-rejected outcome");
     assert.match(report, /Diagnosis: pre-commit hooks rejected/, "diagnosis names the hook verdict");
+  });
+});
+
+// "T9": diagnosis moves to halt-diagnosis.ts and empty histories get the pre-unit rule.
+describe("halt-diagnosis split and pre-spawn rule (T9)", () => {
+  it("deriveDiagnosis with an empty attempt history diagnoses a pre-unit halt", () => {
+    const diagnosis = deriveDiagnosis(
+      [],
+      "Test-extension chore commit failed at /implement start — the run halts before any unit spawns.",
+    );
+    assert.equal(diagnosis.diagnosis, "the run halted before any unit started");
+    assert.equal(diagnosis.recommendation, "Fix the error above, then run /implement again.");
+  });
+
+  it("haltDiagnosisModulesWithinLineBudget: halt-report and halt-diagnosis are each at most 250 lines", () => {
+    const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
+    for (const file of ["halt-report.ts", "halt-diagnosis.ts"]) {
+      const full = fileURLToPath(new URL(`../extensions/${file}`, import.meta.url));
+      assert.ok(existsSync(full), `${file} exists under ${extDir}`);
+      const lines = readFileSync(full, "utf8").split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
   });
 });

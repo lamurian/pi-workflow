@@ -22,7 +22,8 @@ import {
   type ToolCallCollector,
 } from "./findings-ledger.ts";
 import { classifyProgress } from "./unit-progress.ts";
-import { classifyAttemptOutcome, truncateAttemptText } from "./halt-report.ts";
+import { truncateAttemptText } from "./halt-report.ts";
+import { classifyAttemptOutcome } from "./halt-diagnosis.ts";
 import { readGitHead } from "./git-ops.ts";
 import { saveState, updateUi } from "./state.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";

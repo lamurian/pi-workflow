@@ -1,14 +1,15 @@
 /**
  * Enriched halt report rendering (T8, pure logic).
  *
- * Holds the attempt-history types, the outcome classification, the
- * diagnosis derivation and the markdown renderer used by composeHaltReport
- * in implement.ts (a thin wrapper). No I/O: the loop gathers commits,
- * tree state and findings; this module only renders.
+ * Holds the attempt-history types and the markdown renderer used by
+ * composeHaltReport in implement.ts (a thin wrapper); the attempt outcome
+ * classification and the diagnosis derivation live in halt-diagnosis.ts.
+ * No I/O: the loop gathers commits, tree state and findings; this module
+ * only renders.
  */
 
 import type { Finding } from "./findings-ledger.ts";
-import { EARLY_HALT_DIAGNOSIS } from "./unit-progress.ts";
+import { deriveDiagnosis } from "./halt-diagnosis.ts";
 
 /** Maximum characters kept from an attempt's last text in the table. */
 export const ATTEMPT_TEXT_LIMIT = 200;
@@ -103,116 +104,6 @@ export function truncateAttemptText(text: string): string {
   return trimmed.length > ATTEMPT_TEXT_LIMIT
     ? trimmed.slice(0, ATTEMPT_TEXT_LIMIT) + "…"
     : trimmed;
-}
-
-/**
- * Classify a fresh attempt before the commit gate sees it.
- *
- * Precedence matches the loop's partial path: timeout first, then
- * missing-report, unit error, and a "partial" report status; a usable
- * report that reaches the commit gate is "ok" until its verdict seals it.
- *
- * @param attempt - The attempt outcome (report plus failure flags).
- * @returns The pre-commit outcome kind.
- */
-export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
-  if (attempt.timedOut) return "timeout";
-  if (attempt.missingReport) return "missing-report";
-  if (attempt.error) return "unit-error";
-  if (attempt.status === "partial") return "partial";
-  return "ok";
-}
-
-/**
- * Derive the halt diagnosis and recommended next action.
- *
- * Priority: repeated no-progress timeouts/partials ("exploration not
- * converging", also detected via the early-halt error text), then
- * test-guard, hook-rejected, no-changes, blocked, commit-timeout, and
- * finally a generic per-last-outcome fallback.
- *
- * @param attempts - The halted behavior's attempt history.
- * @param error    - The halt error text.
- * @returns The diagnosis and recommended next action.
- */
-export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltDiagnosis {
-  const outcomes = attempts.map((a) => a.outcome);
-  const lastTwo = attempts.slice(-2);
-  const nonConverging =
-    error.includes(EARLY_HALT_DIAGNOSIS) ||
-    (lastTwo.length === 2 &&
-      lastTwo.every((a) => a.outcome === "timeout" || a.outcome === "partial") &&
-      lastTwo.every((a) => !a.progress));
-  if (nonConverging) {
-    return {
-      diagnosis: EARLY_HALT_DIAGNOSIS,
-      recommendation:
-        "Split this behavior into smaller behaviors via /discuss -> /finalize, " +
-        "or raise PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.",
-    };
-  }
-  if (outcomes.includes("contract-guard")) {
-    return {
-      diagnosis: "staged diff violates the declared file allowlist",
-      recommendation:
-        "Re-declare the affected paths via /discuss -> /finalize (list them in files " +
-        "with A/M/D status), then run /implement again.",
-    };
-  }
-  if (outcomes.includes("test-guard")) {
-    return {
-      diagnosis: "staged-diff guard blocked edits to undeclared test files",
-      recommendation:
-        "Re-declare the affected test paths via /discuss -> /finalize (list them in files), " +
-        "then run /implement again.",
-    };
-  }
-  if (outcomes.includes("hook-rejected")) {
-    return {
-      diagnosis: "pre-commit hooks rejected the unit's commits",
-      recommendation:
-        "Run the failing hook locally against the current tree, fix the reported issue, " +
-        "then run /implement again to resume.",
-    };
-  }
-  if (outcomes.includes("no-changes")) {
-    return {
-      diagnosis: "units finished without producing committed changes",
-      recommendation:
-        "Inspect the working tree for the missing changes; refine the behavior via " +
-        "/discuss -> /finalize if it is ambiguous, then run /implement again.",
-    };
-  }
-  if (outcomes.includes("blocked")) {
-    return {
-      diagnosis: "a sandbox-blocked command must run outside the sandbox",
-      recommendation:
-        "Run the command listed under Action required in your shell, " +
-        "then run /implement again to resume.",
-    };
-  }
-  if (outcomes.includes("commit-timeout")) {
-    return {
-      diagnosis: "the commit process exceeded its infrastructure budget",
-      recommendation:
-        "Raise PI_COMMIT_TIMEOUT_MS or narrow the project's pre-commit hooks, " +
-        "then run /implement again.",
-    };
-  }
-  const last = outcomes[outcomes.length - 1];
-  if (last === "missing-report") {
-    return {
-      diagnosis: "the unit ended without its required JSON report",
-      recommendation:
-        "Re-run /implement; if it repeats, check content/unit-prompt.md and PI_IMPLEMENT_TIMEOUT_MS.",
-    };
-  }
-  return {
-    diagnosis: "unit attempts failed without converging",
-    recommendation:
-      "Review the error and attempt history above, fix the blocker (or split the behavior " +
-      "via /discuss -> /finalize), then run /implement again.",
-  };
 }
 
 /** Escape a table cell: pipes escaped, newlines collapsed to spaces. */
