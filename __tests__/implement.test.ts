@@ -3462,7 +3462,7 @@ describe("T8: orchestrator test gates", () => {
       "a red scope gate steers a fix-forward attempt instead of marking the task done",
     );
     assert.match(taskTexts[1] ?? "", /Orchestrator scope gate/, "the fix task names the scope gate");
-    assert.match(taskTexts[1] ?? "", /go \(go test \.\.\.\) \(FAIL\)/, "the failing suite is named");
+    assert.match(taskTexts[1] ?? "", /go \(go test \.\/\.\.\.\) \(FAIL\)/, "the failing suite is named");
     assert.match(taskTexts[1] ?? "", /--- FAIL: TestFoo/, "the failing suite output tail is carried");
 
     // The RED result was persisted while the behavior was still active.
@@ -3505,7 +3505,7 @@ describe("T8: orchestrator test gates", () => {
     );
 
     assert.equal(res.isError, true, "a red full gate blocks completion");
-    assert.match(res.content[0].text, /go \(go test \.\.\.\)/, "the failing suite is named");
+    assert.match(res.content[0].text, /go \(go test \.\/\.\.\.\)/, "the failing suite is named");
     assert.match(res.content[0].text, /--- FAIL: TestGate/, "the failing suite output tail is carried");
     assert.equal(s.phase, "implementing", "a red full gate never transitions to idle");
     // ALL suites ran unfiltered: the Go suite keeps its plain ./... argv.
