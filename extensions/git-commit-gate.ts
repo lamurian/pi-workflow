@@ -1,11 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
-import {
-  classifyBaselineDiff,
-  planUnstage,
-  type DeclaredFile,
-} from "./contract-guard-core.ts";
+import type { DeclaredFile } from "./contract-guard-core.ts";
+import { classifyBaselineDiff, planUnstage } from "./contract-guard-diff.ts";
 import { deriveAllowlist } from "./contract-derive.ts";
 import {
   ownerlessHalt,

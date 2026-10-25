@@ -7,9 +7,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   formatDeclaredList,
   TEST_EXTENSION_PATH,
-  type ContaminatedPath,
   type DeclaredFile,
 } from "./contract-guard-core.ts";
+import type { ContaminatedPath } from "./contract-guard-diff.ts";
 
 /** A contract-guard halt produced while preparing the staged set. */
 export interface GuardHalt {

@@ -1,15 +1,15 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   checkToolAction,
-  classifyBaselineDiff,
   formatDeclaredList,
   normalizeRepoPath,
-  planUnstage,
 } from "../extensions/contract-guard-core.ts";
+import { classifyBaselineDiff, planUnstage } from "../extensions/contract-guard-diff.ts";
 import { commitAndGate } from "../extensions/git-commit-gate.ts";
 import {
   deriveDiagnosis,
@@ -1048,5 +1048,41 @@ describe("contract-guard allows the test tool (T3 wiring)", () => {
       if (prev === undefined) delete process.env.PI_BIN;
       else process.env.PI_BIN = prev;
     }
+  });
+});
+
+// "T7": contract-guard-core split into core + staged-diff module.
+describe("contract-guard module split (T7)", () => {
+  /** Read one extensions module source. */
+  function moduleSource(file: string): string {
+    const full = fileURLToPath(new URL(`../extensions/${file}`, import.meta.url));
+    assert.ok(existsSync(full), `${file} exists`);
+    return readFileSync(full, "utf8");
+  }
+
+  it("contractGuardCoreAndDiffWithinLineBudget: both modules are at most 250 lines", () => {
+    for (const file of ["contract-guard-core.ts", "contract-guard-diff.ts"]) {
+      const lines = moduleSource(file).split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
+  });
+
+  it("noStaleCommitGateComment: no extensions module claims commitAndGate lives in git-ops.ts", () => {
+    const root = fileURLToPath(new URL("../extensions", import.meta.url));
+    const offenders: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) walk(full);
+        else if (
+          entry.name.endsWith(".ts") &&
+          /commitAndGate`?\s+in\s+git-ops\.ts/.test(readFileSync(full, "utf8"))
+        ) {
+          offenders.push(entry.name);
+        }
+      }
+    };
+    walk(root);
+    assert.deepEqual(offenders, [], "the stale comment must be fixed (commitAndGate lives in git-commit-gate.ts)");
   });
 });
