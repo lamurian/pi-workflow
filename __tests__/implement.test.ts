@@ -3581,9 +3581,10 @@ describe("T9: implement-start test extension chore commit", () => {
 
   /**
    * Exec mock for the start-chore flow: git commits advance HEAD; the chore
-   * staged-set query (exactly `diff --cached --name-status`) answers from the
-   * sole-path staging flag plus the injected foreign staged paths; every
-   * baseline/gate diff stays empty so the behavior commit lands clean.
+   * change query (`diff --cached --name-only HEAD -- <path>`) answers from the
+   * sole-path staging flag; a full staged-set query reports the injected
+   * foreign staged paths too; every baseline/gate diff stays empty so the
+   * behavior commit lands clean.
    */
   function piWithChoreExec(foreignStaged: string[] = []): {
     pi: ExtensionAPI & { calls: Record<string, unknown[]> };
@@ -3601,9 +3602,13 @@ describe("T9: implement-start test extension chore commit", () => {
         choreStaged = true; // sole-path staging of the changed generated file
         return ok();
       }
+      if (cmd === "git" && args[0] === "diff" && args[1] === "--cached" && args[2] === "--name-only") {
+        // The chore commit's change query: HEAD-relative, limited to the chore path.
+        return ok(choreStaged ? `${args[args.length - 1]}\n` : "");
+      }
       if (cmd === "git" && args[0] === "diff" && args[1] === "--cached" && args[2] === "--name-status") {
         if (args.length === 3) {
-          // The chore commit's staged-set query (index vs HEAD).
+          // A full staged-set query (index vs HEAD).
           const lines = [
             ...(choreStaged ? ["M\t.pi/extensions/test.ts"] : []),
             ...foreignStaged.map((p) => `M\t${p}`),
@@ -3667,10 +3672,12 @@ describe("T9: implement-start test extension chore commit", () => {
     assert.ok(choreAdd >= 0, "the chore file is staged sole-path (git add -- <path>), never add --all");
     assert.deepEqual(execLog[choreAdd]!.args, ["add", "--", ".pi/extensions/test.ts"]);
     const choreCommit = execLog.findIndex(
-      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args[2] === TEST_EXTENSION_CHORE_SUBJECT,
+      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args.includes(TEST_EXTENSION_CHORE_SUBJECT),
     );
     assert.ok(choreCommit >= 0, `the chore commit lands with subject "${TEST_EXTENSION_CHORE_SUBJECT}"`);
-    assert.deepEqual(execLog[choreCommit]!.args, ["commit", "-m", "chore: regenerate test extension"]);
+    assert.deepEqual(execLog[choreCommit]!.args, [
+      "commit", "--only", "-m", "chore: regenerate test extension", "--", ".pi/extensions/test.ts",
+    ]);
     assert.ok(spawnIdx > choreCommit, "the chore commit lands before the first unit spawns");
 
     // The run itself is unaffected: the behavior lands its own separate commit.
@@ -3681,36 +3688,31 @@ describe("T9: implement-start test extension chore commit", () => {
       "the behavior commit is separate from the chore commit",
     );
     const behaviorCommits = execLog.filter(
-      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args[2] !== TEST_EXTENSION_CHORE_SUBJECT,
+      (e) => e.cmd === "git" && e.args[0] === "commit" && !e.args.includes(TEST_EXTENSION_CHORE_SUBJECT),
     );
     assert.equal(behaviorCommits.length, 1, "exactly one behavior commit after the chore commit");
     assert.equal(state.task!.behaviors[0]!.status, "done");
   });
 
-  it("choreCommitRejectsOtherPaths: any other staged path aborts the chore commit and halts before any unit spawns", async () => {
+  it("choreCommitToleratesOtherStagedPaths: a foreign staged path no longer halts \u2014 the path-limited chore commit lands, then the first unit spawns", async () => {
     const cwd = tempProject();
     const { pi, execLog } = piWithChoreExec(["src/other.ts"]);
     const state = choreState();
     const ctx = ctxAt(state, cwd);
-    let spawns = 0;
+    let spawnIdx = -1;
 
-    const result = await runOrchestratedViaSeam(pi, ctx, async () => {
-      spawns++;
-      return { summary: "should never run", suggestedCommit: "feat: nope" };
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      if (spawnIdx < 0) spawnIdx = execLog.length;
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat: implement x" };
     });
 
-    assert.equal(spawns, 0, "the halt precedes any unit spawn");
-    assert.equal(
-      execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit").length,
-      0,
-      "no commit is invoked — the chore commit is aborted, never partially landed",
+    const choreCommit = execLog.findIndex(
+      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args.includes("--only"),
     );
-    assert.equal(result.complete, false);
-    assert.equal(result.haltedOn, "T1", "the run halts on the first active behavior");
-    assert.match(result.error ?? "", /src\/other\.ts/, "the halt names the foreign staged path");
-    assert.match(result.error ?? "", /only \.pi\/extensions\/test\.ts/, "the halt states the sole-path rule");
-    assert.match(result.error ?? "", /git restore --staged/, "the halt carries the unstage remediation");
-    assert.equal(state.lastHalt?.behaviorId, "T1", "the halt is persisted for resume");
+    assert.ok(choreCommit >= 0, "the path-limited chore commit ran despite the foreign staged path");
+    assert.ok(spawnIdx > choreCommit, "the first unit spawns after the chore commit");
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.equal(result.haltedOn, undefined, "the run does not halt");
   });
 
   it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by git-commit-gate.ts (commitAndGate) and test-extension-chore.ts (the T9 chore commit), one call site each", async () => {

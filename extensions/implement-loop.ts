@@ -241,11 +241,11 @@ export async function runOrchestratedImplement(
   // T9: at /implement start, before the first unit spawns, the orchestrator
   // runs the ensure step for the generated test extension (orchestrator-owned,
   // never writable by a unit) and lands any regeneration as the SOLE
-  // chore-commit exception: the commit may contain only
-  // .pi/extensions/test.ts. Any other staged path aborts the chore commit
-  // and halts the run before any unit work begins.
+  // chore-commit exception: a path-limited commit of .pi/extensions/test.ts
+  // only. Other staged work stays staged and never blocks it; only a failed
+  // chore commit halts the run before any unit work begins.
   const startEnsure = await ensureTestExtensionAtStart(pi, cwd, state);
-  if (startEnsure.kind === "aborted" || startEnsure.kind === "failed") {
+  if (startEnsure.kind === "failed") {
     return halt(
       units[0]!.id,
       `Test-extension chore commit ${startEnsure.kind} at /implement start — the run halts before any unit spawns.\n\n${startEnsure.investigation}`,

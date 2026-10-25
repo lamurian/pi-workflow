@@ -137,15 +137,13 @@ export async function ensureTestTool(
 export interface StartEnsureResult {
   /**
    * "landed" = the regenerated file was committed alone; "skipped" = nothing
-   * to commit (no file written, or the file is unchanged); "aborted"/"failed"
-   * = the caller must halt before any unit spawns.
+   * to commit (no file written, or the file is unchanged); "failed" = the
+   * caller must halt before any unit spawns.
    */
   kind: ChoreCommitResult["kind"];
   /** One-line evidence message from the ensure step. */
   message: string;
-  /** Staged foreign paths that aborted the chore commit (aborted only). */
-  otherPaths: string[];
-  /** Halt text when the chore commit aborted or failed (empty otherwise). */
+  /** Halt text when the chore commit failed (empty otherwise). */
   investigation: string;
 }
 
@@ -157,15 +155,15 @@ export interface StartEnsureResult {
  * skip the step entirely — no re-detection) — the file is orchestrator-owned
  * and never writable by a unit. When the generated file changed it is
  * committed alone as `chore: regenerate test extension` via
- * commitTestExtensionChore: the commit may contain only the generated path;
- * any other staged path aborts it so the orchestrator halts instead of
- * sweeping foreign work into the chore commit.
+ * commitTestExtensionChore: a path-limited commit that contains only the
+ * generated path and leaves any other staged work staged (never swept in,
+ * never a reason to halt).
  *
  * @param pi    - ExtensionAPI (tool registry + exec).
  * @param cwd   - Repository working directory.
  * @param state - Workflow state (supplies the recorded test suites).
- * @returns The ensure/chore outcome: kind, evidence message, abort paths,
- *          and the halt investigation when the chore commit aborted/failed.
+ * @returns The ensure/chore outcome: kind, evidence message and the halt
+ *          investigation when the chore commit failed.
  */
 export async function ensureTestExtensionAtStart(
   pi: ExtensionAPI,
@@ -177,7 +175,6 @@ export async function ensureTestExtensionAtStart(
     return {
       kind: "skipped",
       message: "no test tool recorded in state.testTool — no start-time regeneration",
-      otherPaths: [],
       investigation: "",
     };
   }
@@ -187,13 +184,12 @@ export async function ensureTestExtensionAtStart(
   };
   const ensured = await ensureTestTool(pi, cwd, detection);
   if (!ensured.path) {
-    return { kind: "skipped", message: ensured.message, otherPaths: [], investigation: "" };
+    return { kind: "skipped", message: ensured.message, investigation: "" };
   }
   const chore = await commitTestExtensionChore(pi, cwd, TEST_EXTENSION_RELATIVE);
   return {
     kind: chore.kind,
     message: `${ensured.message} — chore commit: ${chore.kind}`,
-    otherPaths: chore.otherPaths,
     investigation: chore.investigation,
   };
 }
