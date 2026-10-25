@@ -12,14 +12,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { ensureTestTool, resolveTestExtensionPath } from "../extensions/test-tool-ensure.ts";
 import {
   DEFAULT_SUITE_TIMEOUT_MS,
   GENERATED_MARKER,
   TEST_EXTENSION_RELATIVE,
-  ensureTestTool,
-  generateTestExtension,
-  resolveTestExtensionPath,
-} from "../extensions/test-tool-ensure.ts";
+} from "../extensions/test-extension-constants.ts";
+import { generateTestExtension } from "../extensions/test-extension-template.ts";
 import {
   detectTestSuites,
   projectFacts,
@@ -228,6 +227,30 @@ describe("generateTestExtension — static shape", () => {
     assert.match(src, /PI_TEST_TIMEOUT_MS/);
     assert.ok(src.includes(String(DEFAULT_SUITE_TIMEOUT_MS)), "the 300000 default must appear");
     assert.ok(src.includes("4000"), "the 4000-char tail cap must appear");
+  });
+
+  it("goldenOutput: the npm + go DETECTED output is byte-identical to the pre-split golden fixture", () => {
+    const golden = readFileSync(
+      fileURLToPath(new URL("./fixtures/test-extension.golden.txt", import.meta.url)),
+      "utf8",
+    );
+    assert.equal(generateTestExtension(DETECTED.suites), golden);
+  });
+
+  it("testToolModulesWithinLineBudget: the split test-tool modules are each at most 250 lines", () => {
+    for (const file of [
+      "test-tool-ensure.ts",
+      "test-extension-constants.ts",
+      "test-extension-template.ts",
+      "test-extension-template-helpers.ts",
+      "test-gate-run.ts",
+      "test-gate-report.ts",
+    ]) {
+      const full = fileURLToPath(new URL(`../extensions/${file}`, import.meta.url));
+      assert.ok(existsSync(full), `${file} exists`);
+      const lines = readFileSync(full, "utf8").split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
   });
 });
 

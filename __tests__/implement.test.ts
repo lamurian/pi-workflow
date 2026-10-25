@@ -3640,7 +3640,7 @@ describe("T9: implement-start test extension chore commit", () => {
 
   it("implementStartCommitsTestExtensionChore: at /implement start, before the first unit spawns, the orchestrator runs ensureTestTool and commits the changed generated file alone as 'chore: regenerate test extension'", async () => {
     const { TEST_EXTENSION_CHORE_SUBJECT } = await import("../extensions/test-extension-chore.ts");
-    const { GENERATED_MARKER } = await import("../extensions/test-tool-ensure.ts");
+    const { GENERATED_MARKER } = await import("../extensions/test-extension-constants.ts");
     const cwd = tempProject();
     const { pi, execLog } = piWithChoreExec();
     const state = choreState();

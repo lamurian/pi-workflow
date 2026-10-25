@@ -3,7 +3,8 @@ import { Type } from "typebox";
 import { loadState, transitionTo, updateUi, saveState } from "./state.ts";
 import { evaluateCompletionGate } from "./task-contract.ts";
 import { readGitHead } from "./git-ops.ts";
-import { formatGateEvidenceLine, runTestGate } from "./test-tool-ensure.ts";
+import { runTestGate } from "./test-gate-run.ts";
+import { formatGateEvidenceLine } from "./test-gate-report.ts";
 import {
   formatImplementerActivity,
   type ImplementerActivityData,

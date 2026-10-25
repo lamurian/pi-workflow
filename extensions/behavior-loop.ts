@@ -10,12 +10,11 @@ import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { getCommitTimeoutMs, isOutOfRepoBehavior, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
-import { buildScopeGateFixTask, commitScopeGate, redGateHaltText, redGateNotifyText } from "./test-tool-ensure.ts";
+import { commitScopeGate } from "./test-gate-run.ts";
+import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
-
-// ─── Per-behavior loop ─────────────────────────────────────────────────────────
 
 /** Shared driver state and callbacks handed to runBehaviorLoop for one behavior. */
 export interface BehaviorLoopDeps {
