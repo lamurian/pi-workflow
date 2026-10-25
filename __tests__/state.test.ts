@@ -400,3 +400,39 @@ describe("state.testTool persistence (T3)", () => {
     assert.equal(loadState(ctx)!.testTool, undefined);
   });
 });
+
+// "T11": state.ts splits into state + contract-types + state-types.
+describe("state module split (T11)", () => {
+  const MOVED = [
+    "BehaviorStatus", "BehaviorKind", "Behavior", "FileStatus", "FileEntry",
+    "TaskContract", "PathEntry", "TaskStatus", "TaskUnit", "ContractV2",
+    "PendingCommand", "LastHalt", "PendingManualCheck", "WorkflowState",
+    "GateSuiteResult", "GateResult", "TestToolInfo", "TestResults",
+  ];
+
+  it("stateModulesWithinLineBudget: state.ts and both type modules are at most 250 lines", async () => {
+    for (const file of ["state.ts", "contract-types.ts", "state-types.ts"]) {
+      const text = await readFile(resolve("extensions", file), "utf8");
+      const lines = text.split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
+  });
+
+  it("stateReexportsMovedTypesTypeOnly: state.ts defines none of the moved types and re-exports them via export type", async () => {
+    const src = await readFile(resolve("extensions", "state.ts"), "utf8");
+    const exported = new Set<string>();
+    for (const m of src.matchAll(/export type \{([\s\S]*?)\} from "[^"]+";/g)) {
+      for (const raw of m[1]!.split(",")) {
+        const name = raw.trim().replace(/^type\s+/, "");
+        if (name) exported.add(name);
+      }
+    }
+    for (const name of MOVED) {
+      assert.ok(exported.has(name), `${name} must be re-exported from state.ts`);
+      assert.ok(
+        !new RegExp(`(?:interface|type) ${name}\\b`).test(src),
+        `${name} must not be defined in state.ts`,
+      );
+    }
+  });
+});
