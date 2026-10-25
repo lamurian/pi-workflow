@@ -6,7 +6,7 @@ import {
   type TaskContract,
   type WorkflowState,
 } from "../extensions/state.ts";
-import { validateContract } from "../extensions/task-contract.ts";
+import { validateContract } from "../extensions/contract-v2-validate.ts";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /**

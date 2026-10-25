@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { registerSaveTaskTool, runFinalize } from "../extensions/finalize.ts";
-import { preserveDoneStatuses } from "../extensions/task-contract.ts";
+import { preserveDoneStatuses } from "../extensions/contract-v1-view.ts";
 import type { TaskContract, Behavior } from "../extensions/state.ts";
 import { loadContent } from "../extensions/utils.ts";
 import type { WorkflowState } from "../extensions/state.ts";
@@ -66,10 +66,11 @@ function getSaveTask(pi: ExtensionAPI & { calls: Record<string, unknown[]> }) {
 const VALID = {
   title: "My Task",
   instruction: "do the thing",
-  files: [{ path: "src/a.ts", status: "M" }],
   done: "tests pass",
-  behaviors: [
-    { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+  sources: [{ path: "src/a.ts", tasks: ["T1"] }],
+  tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+  tasks: [
+    { id: "T1", description: "x", expectedOutput: ["returns x"], status: "active" },
   ],
 };
 
@@ -108,7 +109,7 @@ describe("save_task", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, behaviors: [{ id: "T1", description: "x", expectedOutput: "y", kind: "bad" }] },
+      { ...VALID, tasks: [{ id: "T1", description: "x", expectedOutput: [], status: "active" }] },
       undefined,
       undefined,
       ctx,
@@ -147,12 +148,11 @@ describe("save_task", () => {
       "c1",
       {
         ...VALID,
-        behaviors: [
+        tasks: [
           {
             id: "T1",
             description: "Add test scenarios for validation",
-            expectedOutput: "test file contains 3 cases covering edge cases",
-            kind: "test",
+            expectedOutput: ["test file contains 3 cases covering edge cases"],
             status: "active",
           },
         ],
@@ -193,12 +193,11 @@ describe("save_task", () => {
       "c1",
       {
         ...VALID,
-        behaviors: [
+        tasks: [
           {
             id: "T1",
             description: "Add test scenarios for validation",
-            expectedOutput: "test file contains 3 cases covering edge cases",
-            kind: "test",
+            expectedOutput: ["test file contains 3 cases covering edge cases"],
             status: "active",
           },
         ],
@@ -363,7 +362,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: [{ path: "src/a.ts", status: "M" }] },
+      { ...VALID, tests: [] },
       undefined,
       undefined,
       ctx,
@@ -436,7 +435,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: [{ path: "src/a.ts", status: "M" }, { path: "tests/a.test.ts", status: "M" }] },
+      VALID,
       undefined,
       undefined,
       ctx,
@@ -462,7 +461,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: [{ path: "src/newfeature.ts", status: "A" }] },
+      { ...VALID, sources: [{ path: "src/newfeature.ts", tasks: ["T1"] }], tests: [] },
       undefined,
       undefined,
       ctx,
@@ -484,14 +483,19 @@ describe("save_task scan wiring (T3)", () => {
       "tests/flows.test.ts": 'import { handler } from "../a"\n',
     });
     const listing = ["./src/a.ts", "./tests/flows.test.ts"].join("\n") + "\n";
-    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(listing));
+    // git reports nothing tracked: every declared path derives A, and an A
+    // entry that exists on disk is the declared-add-exists case.
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async (cmd: string) => {
+      if (cmd === "git") return { stdout: "", stderr: "", code: 0, killed: false };
+      return { stdout: listing, stderr: "", code: 0, killed: false };
+    });
     registerSaveTaskTool(pi);
     const s = discussingState();
     const ctx = ctxWithState(s, dir);
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: [{ path: "src/a.ts", status: "A" }] },
+      { ...VALID, sources: [{ path: "src/a.ts", tasks: ["T1"] }], tests: [] },
       undefined,
       undefined,
       ctx,
@@ -521,7 +525,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: [{ path: "src/messages/en/research.json", status: "M" }] },
+      { ...VALID, sources: [{ path: "src/messages/en/research.json", tasks: ["T1"] }], tests: [] },
       undefined,
       undefined,
       ctx,
@@ -566,7 +570,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, files: Object.keys(files).filter((f) => f.startsWith("src/")).map((f) => ({ path: f, status: "M" as const })) },
+      { ...VALID, sources: Object.keys(files).filter((f) => f.startsWith("src/")).map((f) => ({ path: f, tasks: ["T1"] as string[] })), tests: [] },
       undefined,
       undefined,
       ctx,
@@ -637,8 +641,8 @@ describe("save_task test-tool ensure wiring (T3)", () => {
       `task.files must NOT carry the generated entry (T7: orchestrator-owned, no injection), got ${JSON.stringify(s.task!.files)}`,
     );
     assert.ok(
-      s.task!.files.some((f) => f.path === "src/a.ts" && f.status === "M"),
-      "the drafted entries survive the append",
+      s.task!.files.some((f) => f.path === "src/a.ts" && f.status === "A"),
+      "the drafted entries survive the append (untracked here -> A)",
     );
     const generated = path.join(dir, ".pi", "extensions", "test.ts");
     assert.ok(fs.existsSync(generated), "the ensure step wrote the file to disk");
@@ -820,15 +824,18 @@ describe("preserveDoneStatuses (T10)", () => {
 });
 
 describe("save_task done-preservation (T10)", () => {
-  const PRIOR_DONE = contract([{ id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "done" }]);
+  const PRIOR_DONE = {
+    ...VALID,
+    tasks: [{ id: "T1", description: "x", expectedOutput: ["y"], status: "done" as const }],
+  };
 
   it("keeps T1 done across re-finalize and reports it in the tool result", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
-    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const s: WorkflowState = { phase: "discussing", specText: "topic", contractV2: PRIOR_DONE };
     const ctx = ctxWithState(s);
-    const draft = { ...VALID, behaviors: [
-      { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+    const draft = { ...VALID, tasks: [
+      { id: "T1", description: "x", expectedOutput: ["y"], status: "active" },
     ] };
 
     const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
@@ -840,10 +847,10 @@ describe("save_task done-preservation (T10)", () => {
   it("leaves the draft status when the description changed and reports no preservation", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
-    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const s: WorkflowState = { phase: "discussing", specText: "topic", contractV2: PRIOR_DONE };
     const ctx = ctxWithState(s);
-    const draft = { ...VALID, behaviors: [
-      { id: "T1", description: "x changed", expectedOutput: "y", kind: "test", status: "active" },
+    const draft = { ...VALID, tasks: [
+      { id: "T1", description: "x changed", expectedOutput: ["y"], status: "active" },
     ] };
 
     const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
@@ -855,15 +862,210 @@ describe("save_task done-preservation (T10)", () => {
   it("leaves the draft status when the expectedOutput changed", async () => {
     const pi = mockPi();
     registerSaveTaskTool(pi);
-    const s: WorkflowState = { phase: "discussing", specText: "topic", task: PRIOR_DONE };
+    const s: WorkflowState = { phase: "discussing", specText: "topic", contractV2: PRIOR_DONE };
     const ctx = ctxWithState(s);
-    const draft = { ...VALID, behaviors: [
-      { id: "T1", description: "x", expectedOutput: "y changed", kind: "test", status: "active" },
+    const draft = { ...VALID, tasks: [
+      { id: "T1", description: "x", expectedOutput: ["y changed"], status: "active" },
     ] };
 
     const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
 
     assert.equal(s.task!.behaviors[0].status, "active");
     assert.doesNotMatch(res.content[0].text, /Preserved done behaviors/);
+  });
+});
+
+// "T10": save_task accepts contract v2 payloads and persists them directly.
+const VALID_V2 = {
+  title: "My Task",
+  instruction: "do the thing",
+  done: "tests pass",
+  sources: [{ path: "src/a.ts", tasks: ["T1"] }],
+  tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+  tasks: [
+    { id: "T1", description: "x", expectedOutput: ["returns x"], status: "active" },
+  ],
+};
+
+describe("save_task contract v2 (T10)", () => {
+  it("persists a valid v2 payload as state.contractV2 equal to the validated contract", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID_V2, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true, res.content?.[0]?.text ?? "");
+    assert.equal(s.phase, "finalizing");
+    assert.deepEqual(s.contractV2, VALID_V2, "state.contractV2 carries the validated contract");
+  });
+
+  it("rejects a v2 payload with a dangling taskRef, names the invariant and persists nothing", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const bad = {
+      ...VALID_V2,
+      sources: [{ path: "src/a.ts", tasks: ["T99"] }],
+    };
+
+    const res = await getSaveTask(pi).execute("c1", bad, undefined, undefined, ctx);
+
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /dangling taskRef/);
+    assert.equal(s.phase, "discussing", "nothing persisted on rejection");
+    assert.equal(s.contractV2, undefined);
+    assert.equal(s.task, undefined);
+  });
+
+  it("rejects an old files/behaviors payload with a reason naming sources, tests and tasks", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const legacy = {
+      title: "My Task",
+      instruction: "do the thing",
+      files: [{ path: "src/a.ts", status: "M" }],
+      done: "tests pass",
+      behaviors: [
+        { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+      ],
+    };
+
+    const res = await getSaveTask(pi).execute("c1", legacy, undefined, undefined, ctx);
+
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /sources/);
+    assert.match(res.content[0].text, /tests/);
+    assert.match(res.content[0].text, /tasks/);
+    assert.equal(s.contractV2, undefined);
+  });
+
+  it("derives state.task files with D kept, A untracked and M tracked at HEAD", async () => {
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async (cmd, args) => {
+      if (cmd === "git" && args[0] === "ls-tree") {
+        return { stdout: "src/tracked.ts\ndel.ts\n", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    });
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const payload = {
+      title: "My Task",
+      instruction: "do the thing",
+      done: "tests pass",
+      sources: [
+        { path: "src/tracked.ts", tasks: ["T1"] },
+        { path: "src/new.ts", tasks: ["T1"] },
+        { path: "del.ts", status: "D", tasks: ["T1"] },
+      ],
+      tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+      tasks: [{ id: "T1", description: "x", expectedOutput: ["returns x"], status: "active" }],
+    };
+
+    const res = await getSaveTask(pi).execute("c1", payload, undefined, undefined, ctx);
+    assert.notEqual(res.isError, true, res.content?.[0]?.text ?? "");
+
+    const byPath = new Map(s.task!.files.map((f) => [f.path, f.status]));
+    assert.equal(byPath.get("src/tracked.ts"), "M", "tracked at HEAD -> M");
+    assert.equal(byPath.get("src/new.ts"), "A", "untracked -> A");
+    assert.equal(byPath.get("del.ts"), "D", "declared D is kept");
+    assert.equal(byPath.get("tests/a.test.ts"), "A", "untracked test file -> A");
+  });
+
+  it("derives one behavior per task: kind by tests ownership, '; ' join, first owned source as sourceFile", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const payload = {
+      title: "My Task",
+      instruction: "do the thing",
+      done: "tests pass",
+      sources: [
+        { path: "src/first.ts", tasks: ["T1"] },
+        { path: "src/second.ts", tasks: ["T1"] },
+        { path: "src/manual.ts", tasks: ["T2"] },
+      ],
+      tests: [{ path: "tests/b.test.ts", tasks: ["T1"] }],
+      tasks: [
+        { id: "T1", description: "d1", expectedOutput: ["e1", "e2"], status: "active" },
+        { id: "T2", description: "d2", expectedOutput: ["manual step"], status: "active" },
+      ],
+    };
+
+    const res = await getSaveTask(pi).execute("c1", payload, undefined, undefined, ctx);
+    assert.notEqual(res.isError, true, res.content?.[0]?.text ?? "");
+
+    assert.equal(s.task!.behaviors.length, 2, "one behavior per task");
+    const t1 = s.task!.behaviors[0]!;
+    assert.equal(t1.kind, "test", "T1 owns a tests path");
+    assert.equal(t1.expectedOutput, "e1; e2", "assertions joined with '; '");
+    assert.equal(t1.sourceFile, "src/first.ts", "first owned source path");
+    const t2 = s.task!.behaviors[1]!;
+    assert.equal(t2.kind, "manual", "T2 owns no tests path");
+    assert.equal(t2.sourceFile, "src/manual.ts");
+    assert.equal(t2.description, "d2");
+  });
+
+  it("re-saving keeps status done for task ids done in the prior contract", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s: WorkflowState = {
+      phase: "discussing",
+      specText: "topic",
+      contractV2: {
+        ...VALID_V2,
+        tasks: [{ id: "T1", description: "x", expectedOutput: ["returns x"], status: "done" }],
+      },
+    };
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID_V2, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true, res.content?.[0]?.text ?? "");
+    assert.equal(s.contractV2!.tasks[0]!.status, "done", "preserved in the saved contract");
+    assert.equal(s.task!.behaviors[0]!.status, "done", "preserved in the derived view");
+    assert.match(res.content[0].text, /Preserved done behaviors: T1/);
+  });
+
+  it("deriveAllowlist of the saved contract gives an ownerless-looking tests path its owner T2", async () => {
+    const { deriveAllowlist } = await import("../extensions/contract-derive.ts");
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const payload = {
+      title: "My Task",
+      instruction: "do the thing",
+      done: "tests pass",
+      sources: [{ path: "src/x.ts", tasks: ["T2"] }],
+      tests: [{ path: "tests/b.test.ts", tasks: ["T2"] }],
+      tasks: [{ id: "T2", description: "d", expectedOutput: ["e"], status: "active" }],
+    };
+
+    await getSaveTask(pi).execute("c1", payload, undefined, undefined, ctx);
+
+    const entry = deriveAllowlist(s.contractV2!).find((e) => e.path === "tests/b.test.ts");
+    assert.deepEqual(entry?.refs, ["T2"], "the tests path carries its owning task");
+  });
+
+  it("contract modulesWithinLineBudget: the four split modules are each at most 250 lines and finalize.ts at most 300", () => {
+    const limits: Array<[string, number]> = [
+      ["task-contract.ts", 250],
+      ["contract-v2-validate.ts", 250],
+      ["completion-gate.ts", 250],
+      ["contract-v1-view.ts", 250],
+      ["finalize.ts", 300],
+    ];
+    for (const [file, limit] of limits) {
+      const text = fs.readFileSync(new URL(`../extensions/${file}`, import.meta.url), "utf8");
+      const lines = text.split("\n").length;
+      assert.ok(lines <= limit, `${file} has ${lines} lines (budget ${limit})`);
+    }
   });
 });

@@ -28,7 +28,7 @@ import type {
   TaskContract,
   TaskUnit,
 } from "./state.ts";
-import { validateContract } from "./task-contract.ts";
+import { validateContract } from "./contract-v2-validate.ts";
 import { isTestPath } from "./test-scan-profiles.ts";
 
 /** Result of migrating one persisted v1 contract to the v2 format. */

@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
-import { evaluateCompletionGate } from "./task-contract.ts";
+import { evaluateCompletionGate } from "./completion-gate.ts";
 import { appendFindings, renderFindingsSection, type Finding } from "./findings-ledger.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import { renderPreviousHaltSection } from "./resume-context.ts";

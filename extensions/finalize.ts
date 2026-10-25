@@ -4,7 +4,8 @@ import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
 import type { FileEntry } from "./state.ts";
-import { validateTask, preserveDoneStatuses } from "./task-contract.ts";
+import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
+import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
 import { loadWorkflowConfig } from "./paths.ts";
 import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
 import { ensureTestTool } from "./test-tool-ensure.ts";
@@ -22,6 +23,8 @@ const SCAN_EXCLUDES = ["node_modules", ".git", "dist", "build", "coverage", ".ve
 const SCAN_BUDGET_MS = 5000;
 /** Per-file size cap for JS-side reads; larger files are skipped, not fatal. */
 const MAX_SCAN_FILE_BYTES = 256 * 1024;
+/** Tracked-path read budget: one git ls-tree, 5s covers cold caches. */
+const TRACKED_BUDGET_MS = 5000;
 
 /** Read a file JS-side with size cap and binary sniffing; null when skipped. */
 function readCapped(full: string): string | null {
@@ -33,6 +36,33 @@ function readCapped(full: string): string | null {
     return buf.toString("utf8");
   } catch {
     return null;
+  }
+}
+
+/**
+ * Read the repo-relative paths tracked at HEAD (T10): the input the derived
+ * v1 view needs to render a path M when tracked and A when untracked.
+ *
+ * @param pi  - ExtensionAPI reference (for exec access).
+ * @param cwd - Repository working directory.
+ * @returns The tracked path set; empty when git is unavailable (everything
+ *          then renders as A).
+ */
+async function readTrackedPaths(pi: ExtensionAPI, cwd: string): Promise<Set<string>> {
+  try {
+    const res = await pi.exec("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+      cwd,
+      timeout: TRACKED_BUDGET_MS,
+    });
+    if (res.code !== 0) return new Set();
+    return new Set(
+      (res.stdout ?? "")
+        .split("\n")
+        .map((l) => l.trim().replace(/^\.\//, ""))
+        .filter(Boolean),
+    );
+  } catch {
+    return new Set();
   }
 }
 
@@ -121,10 +151,15 @@ export async function runFinalize(
 /**
  * Register the `save_task` AI tool.
  *
- * The agent calls save_task to persist a drafted or revised task contract.
- * The extension validates the payload deterministically, stores the task,
- * and transitions the workflow to the finalizing phase. Idempotent: safe
- * to call again while already finalizing to update the contract.
+ * The agent calls save_task to persist a drafted or revised contract v2
+ * payload ({ title, instruction, done, sources, tests, tasks }). The
+ * extension validates it deterministically, stores it directly as
+ * `state.contractV2` (so no declared path is ever ownerless), derives the
+ * v1 TaskContract view older consumers read into `state.task`, and
+ * transitions the workflow to the finalizing phase. The legacy
+ * files/behaviors payload is rejected with a reason naming the v2 fields.
+ * Idempotent: safe to call again while already finalizing to update the
+ * contract (done statuses are preserved by task id).
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -137,74 +172,91 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       "revised. Validates the payload, stores the task, and transitions " +
       "the workflow to the finalizing phase.",
 
-    parameters: Type.Object({
-      title: Type.String({ description: "Short task title" }),
-      instruction: Type.String({ description: "What to implement" }),
-      files: Type.Array(
-        Type.Object({
-          path: Type.String({ description: "Repo-relative file path" }),
-          status: Type.Union(
-            [Type.Literal("A"), Type.Literal("M"), Type.Literal("D")],
-            { description: "A = added, M = modified, D = deleted" },
-          ),
-        }),
-        {
-          description:
-            "Authoritative file allowlist: every file the task adds (A), " +
-            "modifies (M) or deletes (D), listed with its status",
-        },
-      ),
-      done: Type.String({ description: "Definition of done" }),
-      behaviors: Type.Array(
-        Type.Object({
-          id: Type.String({ description: "Stable behavior id, e.g. T1" }),
-          description: Type.String({ description: "Behavior under test" }),
-          expectedOutput: Type.String({ description: "Expected output" }),
-          kind: Type.String({ description: "test | manual" }),
-          status: Type.String({ description: "active | removed | done" }),
-          sourceFile: Type.Optional(
-            Type.String({ description: "File that surfaces this behavior" }),
-          ),
-        }),
-        { description: "Behaviors covered by the task contract" },
-      ),
-    }),
+    parameters: Type.Object(
+      {
+        title: Type.String({ description: "Short task title" }),
+        instruction: Type.String({ description: "What to implement" }),
+        done: Type.Optional(Type.String({ description: "Definition of done" })),
+        sources: Type.Optional(
+          Type.Array(Type.Unknown(), {
+            description: "Implementation files: { path, status?, tasks }",
+          }),
+        ),
+        tests: Type.Optional(
+          Type.Array(Type.Unknown(), {
+            description: "Test/fixture files: { path, status?, tasks }",
+          }),
+        ),
+        tasks: Type.Optional(
+          Type.Array(Type.Unknown(), {
+            description: "Task units: { id, description, expectedOutput[], status? }",
+          }),
+        ),
+        files: Type.Optional(
+          Type.Unknown({ description: "Legacy allowlist — rejected; use sources/tests/tasks" }),
+        ),
+        behaviors: Type.Optional(
+          Type.Unknown({ description: "Legacy behaviors — rejected; use tasks" }),
+        ),
+      },
+      { additionalProperties: true },
+    ),
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);
       if (!state || (state.phase !== "discussing" && state.phase !== "finalizing")) {
         return {
           content: [
+            { type: "text", text: "save_task requires the discussing or finalizing phase." },
+          ],
+          isError: true,
+        };
+      }
+      const raw = params as Record<string, unknown>;
+      const legacy = raw.files !== undefined || raw.behaviors !== undefined;
+      if (legacy || raw.sources === undefined || raw.tests === undefined || raw.tasks === undefined) {
+        return {
+          content: [
             {
               type: "text",
-              text: "save_task requires the discussing or finalizing phase.",
+              text:
+                "save_task rejected: the legacy files/behaviors payload is not " +
+                "accepted — call save_task with the contract v2 payload " +
+                "{ title, instruction, done, sources, tests, tasks } where each " +
+                "sources/tests entry is { path, status?, tasks } and each tasks " +
+                "entry is { id, description, expectedOutput[], status? } " +
+                "(see content/finalize-prompt.md).",
             },
           ],
           isError: true,
         };
       }
-      const result = validateTask(params);
+      const result = validateContract(raw);
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `save_task rejected: ${result.reason}` }],
           isError: true,
         };
       }
-      const warnings = result.warnings;
+      // T10: validated contract stored directly; done statuses preserved from
+      // the prior v2 contract by task id; the v1 view derives from it.
+      const preserved = preserveContractDoneStatuses(state.contractV2, result.contract);
+      state.contractV2 = preserved.contract;
+      const tracked = await readTrackedPaths(pi, ctx.cwd);
+      state.task = deriveTaskContract(preserved.contract, tracked);
+      const behaviorWarnings = state.task.behaviors.flatMap(collectBehaviorWarnings);
       // T3/T7: ensure the test tool AFTER validation: it populates
       // state.testTool and echoes the detection evidence line. The generated
       // extension is orchestrator-owned — it is never injected into the
       // contract's allowlist. Precedence: config testCommands -> external
-      // `test` tool -> manifest detection + generation -> none (warned).
+      // `test` -> manifest detection + generation -> none (warned).
       const workflow = await loadWorkflowConfig(ctx.cwd);
       const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
       const ensured = await ensureTestTool(pi, ctx.cwd, detection);
-      const scan = await runContractScan(pi, ctx.cwd, result.task.files);
-      const allWarnings = [...warnings, ...(scan?.warnings ?? [])];
-      const entering = state.phase === "discussing";
-      const { task, preserved } = preserveDoneStatuses(state.task, result.task);
-      state.task = task;
       state.testTool = { source: ensured.source, suites: ensured.suites };
+      const scan = await runContractScan(pi, ctx.cwd, state.task.files);
+      const allWarnings = [...behaviorWarnings, ...(scan?.warnings ?? [])];
+      const entering = state.phase === "discussing";
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
       if (entering) {
@@ -228,9 +280,9 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
             .join("\n");
       }
       // T3: echo the test-tool detection evidence line.
-      text += `\n\n${ensured.message}`;
-      if (preserved.length > 0) {
-        text += `\n\nPreserved done behaviors: ${preserved.join(", ")}`;
+      text += `\n${ensured.message}`;
+      if (preserved.preserved.length > 0) {
+        text += `\n\nPreserved done behaviors: ${preserved.preserved.join(", ")}`;
       }
       if (allWarnings.length > 0) {
         text +=

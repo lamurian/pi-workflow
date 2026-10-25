@@ -2,12 +2,14 @@ import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   validateTask,
-  validateContract,
-  parseTestOutput,
-  evaluateCompletionGate,
   formatTask,
   formatFiles,
 } from "../extensions/task-contract.ts";
+import { validateContract } from "../extensions/contract-v2-validate.ts";
+import {
+  parseTestOutput,
+  evaluateCompletionGate,
+} from "../extensions/completion-gate.ts";
 import { handlePreCompact } from "../extensions/compaction.ts";
 import type {
   WorkflowState,

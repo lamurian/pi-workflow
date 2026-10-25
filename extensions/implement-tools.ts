@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { loadState, transitionTo, updateUi, saveState } from "./state.ts";
-import { evaluateCompletionGate } from "./task-contract.ts";
+import { evaluateCompletionGate } from "./completion-gate.ts";
 import { readGitHead } from "./git-ops.ts";
 import { runTestGate } from "./test-gate-run.ts";
 import { formatGateEvidenceLine } from "./test-gate-report.ts";
