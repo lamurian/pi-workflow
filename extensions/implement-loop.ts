@@ -2,20 +2,19 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
 import { evaluateCompletionGate } from "./task-contract.ts";
 import { appendFindings, renderFindingsSection, type Finding } from "./findings-ledger.ts";
-import { deriveDiagnosis, type AttemptRecord } from "./halt-report.ts";
+import type { AttemptRecord } from "./halt-report.ts";
 import { renderPreviousHaltSection } from "./resume-context.ts";
-import { runImplementerUnit, type UnitTask } from "./implementer-runner.ts";
+import type { UnitTask } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
-import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
+import { readTreeState } from "./git-ops.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
-import { writeContractGuardFile } from "./contract-guard-file.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
-import { buildEngineerNoteSection, loadUnitPrompt } from "./unit-task-text.ts";
+import { buildEngineerNoteSection } from "./unit-task-text.ts";
+import { createDefaultUnitRunner } from "./unit-runner-default.ts";
+import { createHalt } from "./orchestrator-halt.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
-
-// ─── Types ─────────────────────────────────────────────────────────────────────
 
 /** Result of one unit attempt: the parsed report plus failure diagnostics. */
 export type UnitAttempt = ImplementerReport & {
@@ -63,56 +62,6 @@ export interface OrchestratorResult {
   findings?: Finding[];
   diagnosis?: string;
   recommendation?: string;
-}
-
-// ─── Orchestrator loop ─────────────────────────────────────────────────────────
-
-/**
- * Build the default unit runner for one /implement run: writes the
- * per-spawn payload to `.git/pi-workflow/contract-guard.json` before
- * every spawn (base attempt, retry, fix, continuation) and runs the unit
- * with `PI_UNIT_FILE` pointing at it so the child contract-guard
- * extension can enforce the allowlist in-turn (`PI_CONTRACT_GUARD_FILE`
- * stays set as the legacy read-fallback for one release). v2 sessions
- * (state.contractV2) get the derived allowlist plus the unit's slice
- * (`unit { id, sources, tests, packages, testSuites }`); v1 sessions keep
- * the plain `files` payload.
- *
- * @param pi    - ExtensionAPI (used for the baseline `git ls-tree` query).
- * @param state - Current workflow state (supplies baselineHead, contractV2).
- * @param task  - The task contract (supplies the declared files).
- * @returns A UnitRunner that writes the payload file, then spawns the unit.
- */
-export function createDefaultUnitRunner(
-  pi: ExtensionAPI,
-  state: WorkflowState,
-  task: TaskContract,
-): UnitRunner {
-  return async (unit, cwd, signal, onEvent) => {
-    // T5: v2 sessions write the derived allowlist + the unit's slice; the
-    // taskId keys the slice (ignored by the writer in v1 mode, where the
-    // plain `files` payload is kept — no ownership refs exist there).
-    const guardPath = await writeContractGuardFile(
-      pi, cwd, task.files, state.baselineHead ?? "HEAD",
-      {
-        contract: state.contractV2,
-        taskId: unit.behaviorId,
-        testSuites: state.testTool?.suites ?? [],
-      },
-    );
-    // T5: keep the child alive after every report — test-kind children absorb
-    // hook-rejected/no-changes fixes as warm steers; the behavior loop shuts
-    // them down on landing, halt, cancel and completion paths.
-    return runImplementerUnit(
-      loadUnitPrompt(), unit.taskText, cwd, signal, undefined,
-      onEvent, true,
-      {
-        PI_UNIT_FILE: guardPath,
-        // Legacy read-fallback for one release (T5).
-        PI_CONTRACT_GUARD_FILE: guardPath,
-      },
-    );
-  };
 }
 
 /**
@@ -185,45 +134,7 @@ export async function runOrchestratedImplement(
   // reset per behavior, feeds the attempt table, diagnosis and lastHalt.
   const attemptHistory: AttemptRecord[] = [];
 
-  // Steering (T4): while a verification pause is open, plain user input at
-  // the main prompt is forwarded to the live child; unregistered on every
-  // exit path via cleanupOrchestration.
-
-  const halt = async (
-    behaviorId: string,
-    error: string,
-    pendingCommand?: PendingCommand,
-  ) => {
-    await cleanupOrchestration();
-    result.haltedOn = behaviorId;
-    result.error = error;
-    result.treeState = await readTreeState(pi, cwd);
-    if (pendingCommand) result.pendingCommand = pendingCommand;
-    // T8: enrich the halt with baseline commits, attempt history, findings
-    // tail and a derived diagnosis — all persisted to lastHalt.
-    const commits = await readCommitsSinceBaseline(pi, cwd, state.baselineHead);
-    if (commits?.length) result.commitsSinceBaseline = commits;
-    result.attempts = attemptHistory.map((entry) => ({ ...entry }));
-    result.findings = state.findings?.length ? [...state.findings] : undefined;
-    const diagnosis = deriveDiagnosis(result.attempts, error);
-    result.diagnosis = diagnosis.diagnosis;
-    result.recommendation = diagnosis.recommendation;
-    state.lastHalt = {
-      behaviorId,
-      error,
-      treeState: result.treeState,
-      landedCommits: [...landedCommits],
-      attempts: result.attempts,
-      diagnosis: diagnosis.diagnosis,
-      recommendation: diagnosis.recommendation,
-      ...(pendingCommand ? { pendingCommand } : {}),
-      at: new Date().toISOString(),
-    };
-    saveState(pi, state);
-    updateUi(state, ctx);
-    ctx.ui.setStatus("implement", undefined);
-    return result;
-  };
+  const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
   if (units.length === 0) {
     result.complete = evaluateCompletionGate(state) === null;
@@ -259,6 +170,7 @@ export async function runOrchestratedImplement(
   }
 
   const resuming = state.phase === "implementing";
+  // Steering (T4): user input during an open verification pause goes to the live child.
   registerWorkflowInputHandler(pi, ctx);
   let resumeTreeContext = "";
   if (resuming) {
