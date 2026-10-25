@@ -20,7 +20,7 @@ import {
   type GateInput,
 } from "../extensions/commit-gate.ts";
 import { classifyStagedDiff } from "../extensions/staged-diff-guard.ts";
-import { commitAndGate } from "../extensions/git-ops.ts";
+import { commitAndGate } from "../extensions/git-commit-gate.ts";
 import type { Behavior, ContractV2, TaskContract } from "../extensions/state.ts";
 
 const BEHAVIOR: Behavior = {

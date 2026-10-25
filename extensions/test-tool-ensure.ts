@@ -18,7 +18,7 @@ import type {
 import { saveState } from "./state.ts";
 import type { ContractV2, GateResult, GateSuiteResult, WorkflowState } from "./state.ts";
 import { deriveUnitScope } from "./contract-derive.ts";
-import { commitTestExtensionChore, type ChoreCommitResult } from "./git-ops.ts";
+import { commitTestExtensionChore, type ChoreCommitResult } from "./test-extension-chore.ts";
 import { RETRY_BUDGET } from "./commit-gate.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────

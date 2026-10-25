@@ -3639,7 +3639,7 @@ describe("T9: implement-start test extension chore commit", () => {
   }
 
   it("implementStartCommitsTestExtensionChore: at /implement start, before the first unit spawns, the orchestrator runs ensureTestTool and commits the changed generated file alone as 'chore: regenerate test extension'", async () => {
-    const { TEST_EXTENSION_CHORE_SUBJECT } = await import("../extensions/git-ops.ts");
+    const { TEST_EXTENSION_CHORE_SUBJECT } = await import("../extensions/test-extension-chore.ts");
     const { GENERATED_MARKER } = await import("../extensions/test-tool-ensure.ts");
     const cwd = tempProject();
     const { pi, execLog } = piWithChoreExec();
@@ -3713,7 +3713,7 @@ describe("T9: implement-start test extension chore commit", () => {
     assert.equal(state.lastHalt?.behaviorId, "T1", "the halt is persisted for resume");
   });
 
-  it("noOtherOrchestratorCommitPath: git commit is invoked nowhere in extensions/ except git-ops.ts (commitAndGate + the T9 chore commit)", async () => {
+  it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by git-commit-gate.ts (commitAndGate) and test-extension-chore.ts (the T9 chore commit), one call site each", async () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
     const collect = (dir: string): string[] => {
       const files: string[] = [];
@@ -3727,12 +3727,26 @@ describe("T9: implement-start test extension chore commit", () => {
     const offenders = collect(extDir)
       .filter((file) => /\[\s*"commit"\s*,/.test(readFileSync(file, "utf8")))
       .map((file) => relative(extDir, file).split(sep).join("/"));
-    assert.deepEqual(offenders, ["git-ops.ts"], "only git-ops.ts may invoke git commit");
-    const gitOps = readFileSync(join(extDir, "git-ops.ts"), "utf8");
-    assert.equal(
-      (gitOps.match(/\[\s*"commit"\s*,/g) ?? []).length,
-      2,
-      "exactly two commit call sites: the behavior commit gate and the T9 test-extension chore commit",
+    assert.deepEqual(
+      offenders.sort(),
+      ["git-commit-gate.ts", "test-extension-chore.ts"],
+      "only the commit gate and the chore-commit module may invoke git commit",
     );
+    for (const file of offenders) {
+      const text = readFileSync(join(extDir, file), "utf8");
+      assert.equal(
+        (text.match(/\[\s*"commit"\s*,/g) ?? []).length,
+        1,
+        `${file} has exactly one commit call site`,
+      );
+    }
+  });
+
+  it("gitModulesWithinLineBudget: the split git modules are each at most 250 lines", () => {
+    const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
+    for (const file of ["git-ops.ts", "git-commit-gate.ts", "git-guard-diff.ts", "test-extension-chore.ts"]) {
+      const lines = readFileSync(join(extDir, file), "utf8").split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
   });
 });

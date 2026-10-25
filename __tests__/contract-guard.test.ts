@@ -10,7 +10,7 @@ import {
   normalizeRepoPath,
   planUnstage,
 } from "../extensions/contract-guard-core.ts";
-import { commitAndGate } from "../extensions/git-ops.ts";
+import { commitAndGate } from "../extensions/git-commit-gate.ts";
 import {
   deriveDiagnosis,
   renderHaltReport,
