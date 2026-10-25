@@ -960,7 +960,7 @@ describe("B5: halt report as an agent turn", () => {
 // ═══ T1: capability-conditional commit instruction ═══
 describe("T1: capability-conditional commit instruction", () => {
   it("buildTddPrompt(task, true) instructs commit_changes after each mark, no behavior id", async () => {
-    const { buildTddPrompt } = await import("../extensions/implement.ts");
+    const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
     const prompt = await buildTddPrompt(finalizingState().task!, true);
     assert.match(prompt, /commit_changes/);
     assert.match(prompt, /conventional/i);
@@ -969,7 +969,7 @@ describe("T1: capability-conditional commit instruction", () => {
   });
 
   it("buildTddPrompt(task, false) contains no commit instruction", async () => {
-    const { buildTddPrompt } = await import("../extensions/implement.ts");
+    const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
     const prompt = await buildTddPrompt(finalizingState().task!, false);
     assert.doesNotMatch(prompt, /commit_changes/);
   });
@@ -3786,6 +3786,17 @@ describe("implement-loop module split (T8)", () => {
   it("implementLoopModulesWithinLineBudget: implement-loop and its two extracted modules are at most 250 lines", () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
     for (const file of ["implement-loop.ts", "unit-runner-default.ts", "orchestrator-halt.ts"]) {
+      const lines = readFileSync(join(extDir, file), "utf8").split("\n").length;
+      assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
+    }
+  });
+});
+
+// "T13": implement.ts splits into implement + implement-solo.
+describe("implement module split (T13)", () => {
+  it("implementModulesWithinLineBudget: implement.ts and implement-solo.ts are each at most 250 lines", () => {
+    const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
+    for (const file of ["implement.ts", "implement-solo.ts"]) {
       const lines = readFileSync(join(extDir, file), "utf8").split("\n").length;
       assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
     }

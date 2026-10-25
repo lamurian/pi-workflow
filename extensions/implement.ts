@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { loadContent, renderTemplate } from "./utils.ts";
+import { loadContent } from "./utils.ts";
 import {
   loadState,
   transitionTo,
@@ -9,13 +9,13 @@ import {
   type TaskContract,
   type LastHalt,
 } from "./state.ts";
-import { formatTask } from "./task-contract.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
   type UnitRunner,
 } from "./implement-loop.ts";
-import { buildEngineerNoteSection, setUnitPrompt } from "./unit-task-text.ts";
+import { runSoloImplement } from "./implement-solo.ts";
+import { setUnitPrompt } from "./unit-task-text.ts";
 import { readGitHead } from "./git-ops.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { composeCompletionReport, composeHaltReport } from "./implement-report.ts";
@@ -44,16 +44,6 @@ export function parseImplementArgs(args: string): { solo: boolean; note: string 
 const IN_FLIGHT_WARNING =
   "An orchestrated implementation is already in flight. " +
   "Wait for it to settle (watch status/notifications), then re-run /implement to resume.";
-
-/**
- * Detect whether the `commit_changes` tool is registered in this session.
- *
- * @param pi - ExtensionAPI reference.
- * @returns True when a tool named `commit_changes` is registered.
- */
-export function hasCommitTool(pi: ExtensionAPI): boolean {
-  return pi.getAllTools().some((t) => t.name === "commit_changes");
-}
 
 /**
  * Start the TDD implementation phase from a finalizing task contract.
@@ -107,9 +97,7 @@ export async function runImplement(
     ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
     return;
   }
-  // Legacy refusal: contracts persisted before the D/M/A allowlist carry
-  // plain-string file entries. They cannot be enforced as an authoritative
-  // allowlist, so the user must re-finalize before implementing.
+  // Legacy refusal: plain-string files predate the D/M/A allowlist, cannot be enforced — re-finalize first.
   if (task.files.some((f) => typeof f === "string")) {
     ctx.ui.notify(
       "This task contract predates the authoritative D/M/A file allowlist: its " +
@@ -123,22 +111,19 @@ export async function runImplement(
   if (!resuming) {
     transitionTo(pi, state, "implementing");
   }
-  // Resume keeps the original baseline so the soft-warn still spans the
-  // whole implementation, not just the current /implement invocation.
+  // Resume keeps the original baseline so the soft-warn spans the whole run.
   state.baselineHead =
     state.baselineHead ?? ((await readGitHead(pi, ctx.cwd)) ?? undefined);
   saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
-  // Persist the engineer's note: a new note replaces the persisted one, a
-  // resume without args reuses it (state.ts serializes the whole object).
+  // Persist the note: a new note replaces the stored one; a bare resume reuses it.
   if (note) {
     state.engineerNote = note;
     saveState(pi, state);
   }
 
-  // Cache the implementer unit prompt once per /implement so the orchestrator
-  // default runner can build subprocess argv without re-reading the file.
+  // Cache the unit prompt once per /implement for the default runner's argv.
   setUnitPrompt(await loadContent("unit-prompt.md"));
 
   if (solo) {
@@ -146,9 +131,7 @@ export async function runImplement(
     return;
   }
 
-  // Fire-and-forget: launch the loop as a background task so this handler
-  // returns immediately (the RPC prompt response must beat the client's
-  // deadline). The catch-to-lastHalt logic stays inside the background task.
+  // Fire-and-forget: launch the loop in the background so this handler returns immediately (RPC deadline).
   const activeCount = task.behaviors.filter((b) => b.status === "active").length;
   const settled = runOrchestratedImplementSafely(
     pi,
@@ -263,52 +246,4 @@ async function runOrchestratedImplementSafely(
       error: lastHalt.error,
     };
   }
-}
-
-/**
- * In-session TDD loop (`--solo`): steer the agent with the TDD prompt.
- *
- * @param note  - Optional engineer's note appended to the prompt.
- * @param pi    - ExtensionAPI reference.
- * @param ctx   - Extension context.
- * @param task  - The task contract.
- */
-async function runSoloImplement(
-  note: string,
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  task: TaskContract,
-): Promise<void> {
-  let prompt = await buildTddPrompt(task, hasCommitTool(pi));
-  if (note) {
-    prompt += buildEngineerNoteSection(note);
-  }
-  ctx.ui.notify(
-    "Starting TDD implementation. I'll work through the contract behavior by behavior.",
-    "info",
-  );
-  pi.sendUserMessage(prompt, { deliverAs: "steer" });
-}
-
-/**
- * Build the TDD prompt from the task contract.
- *
- * @param task - The task contract.
- * @returns The rendered TDD prompt string.
- */
-export async function buildTddPrompt(
-  task: TaskContract,
-  hasCommitTool = false,
-): Promise<string> {
-  const template = await loadContent("tdd-prompt.md");
-  const commitInstruction = hasCommitTool
-    ? "\n## Commits\n\n" +
-      "After each `mark_task_done`, call `commit_changes` with a conventional commit subject line " +
-      "(`type(scope): description`, ≤75 chars) that describes what the behavior changed. " +
-      "Do NOT include the behavior id in the subject.\n"
-    : "";
-  return renderTemplate(template, {
-    task: formatTask(task),
-    commitInstruction,
-  });
 }
