@@ -6,6 +6,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   formatDeclaredList,
+  TEST_EXTENSION_PATH,
   type ContaminatedPath,
   type DeclaredFile,
 } from "./contract-guard-core.ts";
@@ -71,6 +72,80 @@ export async function runBaselineNameStatus(
     return "";
   } catch {
     return "";
+  }
+}
+
+/**
+ * Whether one name-status line names the orchestrator-owned test extension.
+ *
+ * @param line - One `<status>\t<path>` line (from --no-renames output).
+ * @returns True when the line's path is TEST_EXTENSION_PATH.
+ */
+function isTestExtensionLine(line: string): boolean {
+  const path = line.split("\t")[1]?.trim().replace(/^\.\//, "");
+  return path === TEST_EXTENSION_PATH;
+}
+
+/**
+ * Drop the orchestrator-owned test extension from a baseline name-status.
+ *
+ * The orchestrator commits `.pi/extensions/test.ts` itself (the start-of-run
+ * chore commit), possibly AFTER the /implement baseline was recorded. A diff
+ * against that baseline then shows the file as changed although no unit
+ * touched it. The line is omitted unless the path is also staged with changes
+ * relative to HEAD — a real unit change stays visible and stays a violation.
+ * Every other line is kept verbatim. Pure.
+ *
+ * @param baselineNameStatus - Raw `git diff --cached --name-status <baseline>` output.
+ * @param headStagedPaths    - Paths staged with changes relative to HEAD.
+ * @returns The name-status output without the chore-only extension line.
+ */
+export function filterOrchestratorOwned(
+  baselineNameStatus: string,
+  headStagedPaths: readonly string[],
+): string {
+  if (headStagedPaths.includes(TEST_EXTENSION_PATH)) return baselineNameStatus;
+  return baselineNameStatus
+    .split("\n")
+    .filter((line) => !isTestExtensionLine(line))
+    .join("\n");
+}
+
+/**
+ * Read the guard name-status: the baseline diff minus chore-only changes to
+ * the orchestrator-owned test extension (bug 1).
+ *
+ * Only when the baseline diff lists the extension does it query
+ * `git diff --cached --name-only HEAD -- .pi/extensions/test.ts`; the path
+ * counts as changed only when that output lists it exactly. A failed query
+ * keeps the line (fail closed: the guard still sees it).
+ *
+ * @param pi  - ExtensionAPI reference.
+ * @param cwd - Working directory.
+ * @param ref - Baseline ref (baselineHead or "HEAD").
+ * @returns The filtered name-status output.
+ */
+export async function readGuardNameStatus(
+  pi: ExtensionAPI,
+  cwd: string,
+  ref: string,
+): Promise<string> {
+  const raw = await runBaselineNameStatus(pi, cwd, ref);
+  if (!raw.split("\n").some(isTestExtensionLine)) return raw;
+  try {
+    const res = await pi.exec(
+      "git",
+      ["diff", "--cached", "--name-only", "HEAD", "--", TEST_EXTENSION_PATH],
+      { cwd },
+    );
+    if (res.code !== 0) return raw;
+    const headStaged = (res.stdout ?? "")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line === TEST_EXTENSION_PATH);
+    return filterOrchestratorOwned(raw, headStaged);
+  } catch {
+    return raw;
   }
 }
 

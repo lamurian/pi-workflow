@@ -21,6 +21,7 @@ import {
 } from "../extensions/commit-gate.ts";
 import { classifyStagedDiff } from "../extensions/staged-diff-guard.ts";
 import { commitAndGate } from "../extensions/git-commit-gate.ts";
+import { filterOrchestratorOwned } from "../extensions/git-guard-diff.ts";
 import type { Behavior, ContractV2, TaskContract } from "../extensions/state.ts";
 
 const BEHAVIOR: Behavior = {
@@ -500,5 +501,83 @@ describe("remediationKeepsWorkOnDisk", () => {
     const note = (attempt.remediation ?? []).join("\n");
     assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
     assert.match(note, /T2/, "the note names the owner task");
+  });
+});
+
+// "Bug 1": the orchestrator-owned test extension vs the /implement baseline.
+describe("orchestrator-owned test extension vs baseline (bug 1)", () => {
+  /** A real temp repo whose test extension changed via a commit AFTER the baseline. */
+  function repoWithPostBaselineChore(): {
+    repo: string;
+    baseline: string;
+    gitIn: (...args: string[]) => string;
+    pi: ExtensionAPI;
+  } {
+    const repo = mkdtempSync(join(tmpdir(), "pi-bug1-"));
+    const gitIn = (...args: string[]): string => {
+      const res = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
+      assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr ?? ""}`);
+      return (res.stdout ?? "").trim();
+    };
+    gitIn("init", "-q");
+    gitIn("config", "user.email", "bug1@test");
+    gitIn("config", "user.name", "bug1");
+    gitIn("config", "commit.gpgsign", "false");
+    mkdirSync(join(repo, "src"), { recursive: true });
+    mkdirSync(join(repo, ".pi", "extensions"), { recursive: true });
+    writeFileSync(join(repo, "src", "mine.ts"), "mine v1\n");
+    writeFileSync(join(repo, ".pi", "extensions", "test.ts"), "// generated v1\n");
+    gitIn("add", "--all");
+    gitIn("commit", "-q", "-m", "chore: baseline");
+    const baseline = gitIn("rev-parse", "HEAD");
+    // The orchestrator's start-of-run chore commit lands AFTER the baseline.
+    writeFileSync(join(repo, ".pi", "extensions", "test.ts"), "// generated v2\n");
+    gitIn("add", "--", ".pi/extensions/test.ts");
+    gitIn("commit", "-q", "-m", "chore: regenerate test extension");
+    // The unit's declared work.
+    writeFileSync(join(repo, "src", "mine.ts"), "mine v2\n");
+    const exec = async (command: string, args: string[]) => {
+      const res = spawnSync(command, args, { cwd: repo, encoding: "utf8" });
+      return { stdout: res.stdout ?? "", stderr: res.stderr ?? "", code: res.status ?? 1, killed: false };
+    };
+    return { repo, baseline, gitIn, pi: { exec } as unknown as ExtensionAPI };
+  }
+
+  it("lands the task commit when .pi/extensions/test.ts differs from the baseline only through a post-baseline commit", async () => {
+    const { baseline, gitIn, pi, repo } = repoWithPostBaselineChore();
+    const attempt = await commitAndGate(
+      pi, repo, "feat(core): land T1", BEHAVIOR, TASK, 1, baseline, CONTAMINATION_CONTRACT,
+    );
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    assert.equal(gitIn("show", "HEAD:src/mine.ts"), "mine v2", "the task commit landed");
+    assert.equal(gitIn("log", "-1", "--pretty=%s"), "feat(core): land T1");
+  });
+
+  it("still returns a contract-guard outcome naming .pi/extensions/test.ts when it is staged with changes against HEAD", async () => {
+    const { baseline, gitIn, pi, repo } = repoWithPostBaselineChore();
+    const headBefore = gitIn("rev-parse", "HEAD");
+    writeFileSync(join(repo, ".pi", "extensions", "test.ts"), "// unit tampering\n");
+    const attempt = await commitAndGate(
+      pi, repo, "feat(core): land T1", BEHAVIOR, TASK, 1, baseline, CONTAMINATION_CONTRACT,
+    );
+    assert.equal(attempt.outcome?.kind, "contract-guard");
+    const violations = (attempt.outcome as { violations: string[] }).violations.join("\n");
+    assert.match(violations, /\.pi\/extensions\/test\.ts/, "the violation names the extension");
+    assert.equal(gitIn("rev-parse", "HEAD"), headBefore, "nothing was committed");
+  });
+
+  it("filterOrchestratorOwned omits the test-extension line when the HEAD-relative staged set lacks it and keeps other lines verbatim", () => {
+    const nameStatus = "M\t.pi/extensions/test.ts\nA\tsrc/mine.ts\nD\tsrc/old.ts\n";
+    assert.equal(filterOrchestratorOwned(nameStatus, []), "A\tsrc/mine.ts\nD\tsrc/old.ts\n");
+    assert.equal(
+      filterOrchestratorOwned(nameStatus, [".pi/extensions/test.ts"]),
+      nameStatus,
+      "a HEAD-relative change keeps the line (a real unit change stays a violation)",
+    );
+    assert.equal(
+      filterOrchestratorOwned("A\tsrc/mine.ts\n", []),
+      "A\tsrc/mine.ts\n",
+      "output without the extension line is untouched",
+    );
   });
 });

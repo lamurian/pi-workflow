@@ -9,7 +9,7 @@ import {
 import { deriveAllowlist } from "./contract-derive.ts";
 import {
   ownerlessHalt,
-  runBaselineNameStatus,
+  readGuardNameStatus,
   unstageContamination,
   withRemediation,
 } from "./git-guard-diff.ts";
@@ -109,7 +109,9 @@ export async function commitAndGate(
     const declared: readonly DeclaredFile[] = contract
       ? deriveAllowlist(contract)
       : task.files;
-    let nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
+    // Chore-only changes to the orchestrator-owned test extension are filtered
+    // out (bug 1): the start-of-run chore commit may postdate the baseline.
+    let nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
     const allowlist = classifyBaselineDiff({
       nameStatus: nameStatusRes,
       files: declared,
@@ -142,7 +144,7 @@ export async function commitAndGate(
       remediation = unstaged.remediation;
       if (remediation.length > 0) {
         // Re-read the staged diff so every later gate sees only the owned subset.
-        nameStatusRes = await runBaselineNameStatus(pi, cwd, baselineRef);
+        nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
       }
     }
     // Staged-diff tamper guard: inspect before committing. On a violation the
