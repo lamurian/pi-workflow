@@ -1,5 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentConfig } from "../extensions/scout-runner.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════════

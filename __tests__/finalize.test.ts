@@ -608,7 +608,7 @@ describe("save_task test-tool ensure wiring (T3)", () => {
     };
   }
 
-  it("generates .pi/extensions/test.ts, auto-declares it A, persists testTool, echoes the line", async () => {
+  it("generates .pi/extensions/test.ts, persists testTool, echoes the line", async () => {
     const dir = tmpProject({
       "package.json": JSON.stringify({ scripts: { test: "vitest" } }),
       "src/a.ts": "export const x = 1;\n",
@@ -624,8 +624,8 @@ describe("save_task test-tool ensure wiring (T3)", () => {
     assert.notEqual(res.isError, true);
     assert.match(
       res.content[0].text,
-      /test tool generated: \.pi\/extensions\/test\.ts \(declared A\)/,
-      "the save result echoes the detection evidence line",
+      /test tool generated: \.pi\/extensions\/test\.ts — runs 1 suite\(s\)/,
+      "the save result echoes the no-status detection evidence line (T7: no injection)",
     );
     assert.deepEqual(
       s.testTool,
@@ -633,8 +633,8 @@ describe("save_task test-tool ensure wiring (T3)", () => {
       "state.testTool records the detection result",
     );
     assert.ok(
-      s.task!.files.some((f) => f.path === ".pi/extensions/test.ts" && f.status === "A"),
-      `task.files must carry the auto-declared A entry, got ${JSON.stringify(s.task!.files)}`,
+      !s.task!.files.some((f) => f.path === ".pi/extensions/test.ts"),
+      `task.files must NOT carry the generated entry (T7: orchestrator-owned, no injection), got ${JSON.stringify(s.task!.files)}`,
     );
     assert.ok(
       s.task!.files.some((f) => f.path === "src/a.ts" && f.status === "M"),
