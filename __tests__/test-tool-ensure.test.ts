@@ -626,7 +626,7 @@ describe("dogfood: pi-workflow's own generated test extension (T5)", () => {
   });
 });
 
-// ═══ T5 — README documents detection, generation, auto-declaration ═══
+// ═══ T5 — README documents detection, generation, orchestrator ownership ═══
 describe("README test-tool documentation (T5)", () => {
   const readme = (): string => readFileSync(new URL("../README.md", import.meta.url), "utf8");
 
@@ -646,22 +646,24 @@ describe("README test-tool documentation (T5)", () => {
     assert.match(content, /generat/i, "generation must be documented");
   });
 
-  it("documents auto-declaration of the generated entry in the files allowlist", () => {
+  it("documents the generated test extension as orchestrator-owned, never auto-declared", () => {
     const content = readme();
-    assert.match(
+    assert.doesNotMatch(
       content,
       /auto-declar/i,
-      "auto-declaration of the generated entry must be documented",
+      "the auto-declaration paragraph must be replaced by orchestrator-owned wording",
     );
+    assert.match(content, /orchestrator-owned/i, "orchestrator ownership must be documented");
   });
 });
 
 // ═══ T5 — finalize-prompt.md and tdd-prompt.md updates ═══
 describe("prompt content updates (T5)", () => {
-  it("finalize-prompt.md notes the auto-injected .pi/extensions/test.ts entry", async () => {
+  it("finalize-prompt.md treats .pi/extensions/test.ts as orchestrator-owned, not auto-injected", async () => {
     const content = await loadContent("finalize-prompt.md");
     assert.match(content, /\.pi\/extensions\/test\.ts/, "the generated file is named");
-    assert.match(content, /auto-injected/i, "the auto-injection into files is noted");
+    assert.doesNotMatch(content, /auto-injected/i, "the auto-injection paragraph must be gone");
+    assert.match(content, /orchestrator-owned/i, "orchestrator-owned wording must replace it");
   });
 
   it("tdd-prompt.md directs the solo agent to the test tool when present", async () => {
