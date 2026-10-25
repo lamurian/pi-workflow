@@ -15,6 +15,10 @@ import type {
   TestSuiteDetection,
   TestSuiteSource,
 } from "./test-tool-detect.ts";
+import { saveState } from "./state.ts";
+import type { ContractV2, GateResult, GateSuiteResult, WorkflowState } from "./state.ts";
+import { deriveUnitScope } from "./contract-derive.ts";
+import { RETRY_BUDGET } from "./commit-gate.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -72,7 +76,7 @@ export function resolveTestExtensionPath(cwd: string): string | undefined {
  * @param suite - The detected suite (label + argv).
  * @returns True for `go test ...` suites.
  */
-function isFilterableSuite(suite: TestSuite): boolean {
+export function isFilterableSuite(suite: TestSuite): boolean {
   return suite.argv[0] === "go" && suite.argv[1] === "test";
 }
 
@@ -288,6 +292,290 @@ export default function testToolExtension(pi) {
   });
 }
 `;
+}
+
+// ── Orchestrator test gates (T8) ───────────────────────────────────────────
+
+/** Result of one orchestrator-run gate: per-suite verdicts plus overall pass. */
+export interface TestGateRun {
+  /** True when every executed suite exited 0 without being killed. */
+  passed: boolean;
+  /** Per-suite verdicts with capped output tails. */
+  suites: GateSuiteResult[];
+}
+
+/**
+ * Resolve the per-suite wall-clock budget for gate runs.
+ *
+ * @param env - Environment map (defaults to process.env); injectable for tests.
+ * @returns The timeout in ms (> 0).
+ */
+export function gateTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  const raw = Number(env.PI_TEST_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_SUITE_TIMEOUT_MS;
+}
+
+/**
+ * Cap combined suite output to the gate tail budget.
+ *
+ * @param text - Raw combined stdout+stderr of one suite.
+ * @returns The capped tail (marked with an ellipsis when truncated).
+ */
+function gateTail(text: string): string {
+  return text.length > OUTPUT_TAIL_CHARS ? `\u2026${text.slice(-OUTPUT_TAIL_CHARS)}` : text;
+}
+
+/**
+ * The argv one suite runs with inside a gate run (T8).
+ *
+ * Filterable (Go) suites get the scope packages mapped to `./<path>/...`
+ * (`./...` when no scope is given); non-filterable suites always run their
+ * plain argv unfiltered — a gate never passes a filter to them.
+ *
+ * @param suite - The detected suite (label + argv).
+ * @param scope - Optional repo-relative package dirs (the scope gate).
+ * @returns The argv the suite runs with.
+ */
+export function gateSuiteArgv(suite: TestSuite, scope?: readonly string[]): string[] {
+  if (!isFilterableSuite(suite)) return suite.argv;
+  const extra = suite.argv.slice(2).filter((arg) => arg !== "./...");
+  const patterns =
+    scope && scope.length > 0
+      ? [...scope].map((p) => (p === "." ? "./..." : `./${p}/...`))
+      : ["./..."];
+  return ["go", "test"].concat(patterns).concat(extra);
+}
+
+/**
+ * Run an orchestrator test gate over the given suites (T8).
+ *
+ * Runs every suite sequentially via pi.exec (argv arrays, never shell strings)
+ * with the PI_TEST_TIMEOUT_MS budget — orchestrator-run, outside any unit's
+ * tool call. With a `scope`, every filterable suite runs with the scoped
+ * package patterns while every non-filterable suite runs unfiltered (the
+ * per-task SCOPE GATE after each task commit); without a scope every suite
+ * runs unfiltered (the FULL GATE before complete_implementation).
+ *
+ * @param pi     - ExtensionAPI used for exec.
+ * @param cwd    - Repository working directory.
+ * @param suites - state.testTool.suites to run.
+ * @param scope  - Optional derived packages scope (scope gate); omitted = full gate.
+ * @returns The per-suite verdicts and the overall pass flag.
+ */
+export async function runTestGate(
+  pi: ExtensionAPI,
+  cwd: string,
+  suites: readonly TestSuite[],
+  scope?: readonly string[],
+): Promise<TestGateRun> {
+  const timeout = gateTimeoutMs();
+  const results: GateSuiteResult[] = [];
+  for (const suite of suites) {
+    const argv = gateSuiteArgv(suite, scope);
+    const [cmd = "", ...rest] = argv;
+    let execResult: { code: number; killed?: boolean; stdout?: string; stderr?: string };
+    try {
+      execResult = await pi.exec(cmd, rest, { cwd, timeout });
+    } catch (err) {
+      results.push({
+        label: suite.label,
+        passed: false,
+        tail: `spawn failed: ${String((err as Error)?.message ?? err)}`,
+      });
+      continue;
+    }
+    const passed = execResult.code === 0 && !execResult.killed;
+    results.push({
+      label: suite.label,
+      passed,
+      tail:
+        gateTail([execResult.stdout ?? "", execResult.stderr ?? ""].filter(Boolean).join("\n")) ||
+        "(no output)",
+    });
+  }
+  return { passed: results.every((r) => r.passed), suites: results };
+}
+
+/**
+ * Build the fix-forward task text for a red scope gate (T8).
+ *
+ * The commit landed, but the orchestrator-run gate stayed red: the task is
+ * not done and a fix-forward attempt goes through the retry path with this
+ * text — gate report (failing suite + output tail) plus the original task.
+ *
+ * @param result   - The red gate result.
+ * @param attempt  - 1-based fix-forward attempt number.
+ * @param original - The original unit task text for this behavior.
+ * @returns Rendered fix-forward task text.
+ */
+export function buildScopeGateFixTask(
+  result: GateResult,
+  attempt: number,
+  original: string,
+): string {
+  return (
+    `## Previous attempt failed (retry ${attempt}/${RETRY_BUDGET})\n` +
+    `${renderGateReport(result, "scope gate")}\n\n` +
+    `The scope gate is run by the ORCHESTRATOR after your commit landed — it is ` +
+    `not your own test-tool call and cannot be satisfied by reporting success: ` +
+    `every filterable suite runs with this task's derived package scope plus ` +
+    `every non-filterable suite, unfiltered. Fix forward: make the failing suite ` +
+    `pass with real code changes. Do NOT delete, skip, or weaken a test to turn ` +
+    `the gate green.\n\n` +
+    `## Original task\n` + original
+  );
+}
+
+/**
+ * Run the per-task SCOPE GATE for one committed task (T8).
+ *
+ * From `state.testTool.suites`: every filterable suite runs with the task's
+ * derived packages scope, every non-filterable suite runs unfiltered — the
+ * orchestrator's own exec, never the unit's tool call. Tasks with no tests
+ * refs (empty derived packages) and sessions without suites get no gate
+ * (manual-ness is derived, not declared).
+ *
+ * @param pi         - ExtensionAPI used for exec.
+ * @param cwd        - Repository working directory.
+ * @param contract   - The v2 contract the task scope derives from.
+ * @param suites     - state.testTool.suites.
+ * @param behaviorId - The committed task's id.
+ * @returns The recorded gate result, or null when no gate applies.
+ */
+export async function runTaskScopeGate(
+  pi: ExtensionAPI,
+  cwd: string,
+  contract: ContractV2,
+  suites: readonly TestSuite[],
+  behaviorId: string,
+): Promise<GateResult | null> {
+  if (suites.length === 0) return null;
+  const scope = deriveUnitScope(contract, behaviorId);
+  if (scope.packages.length === 0) return null;
+  const gate = await runTestGate(pi, cwd, suites, scope.packages);
+  return {
+    behaviorId,
+    scope: [...scope.packages],
+    passed: gate.passed,
+    suites: gate.suites,
+    at: new Date().toISOString(),
+  };
+}
+
+/**
+ * Run and record the per-task scope gate after one landed commit (T8).
+ *
+ * Orchestrator-run, outside the unit's tool call: delegates to
+ * {@link runTaskScopeGate} when the session carries a v2 contract, then
+ * records the verdict on `state.gateResults` and persists it — the red
+ * result is persisted while the behavior is still active, so a red gate
+ * keeps the task open and the behavior loop steers fix-forward. Returns
+ * null when no gate applies (v1 session, no suites, task with no tests
+ * refs).
+ *
+ * @param pi         - ExtensionAPI used for exec and state persistence.
+ * @param cwd        - Repository working directory.
+ * @param state      - Current workflow state (mutated: gateResults).
+ * @param behaviorId - The committed task's id.
+ * @returns The recorded gate result, or null when no gate applies.
+ */
+export async function commitScopeGate(
+  pi: ExtensionAPI,
+  cwd: string,
+  state: WorkflowState,
+  behaviorId: string,
+): Promise<GateResult | null> {
+  if (!state.contractV2) return null;
+  const result = await runTaskScopeGate(
+    pi,
+    cwd,
+    state.contractV2,
+    state.testTool?.suites ?? [],
+    behaviorId,
+  );
+  if (result) {
+    state.gateResults = { ...(state.gateResults ?? {}), [behaviorId]: result };
+    saveState(pi, state);
+  }
+  return result;
+}
+
+/**
+ * The halt text for a scope gate that stayed red past the retry budget (T8).
+ *
+ * @param result - The red gate result.
+ * @returns The halt message: the task is not done, plus the gate report.
+ */
+export function redGateHaltText(result: GateResult): string {
+  return (
+    `Scope gate for ${result.behaviorId} stayed red after ${RETRY_BUDGET} fix-forward ` +
+    `attempts — the task is not done.\n\n${renderGateReport(result, "scope gate")}`
+  );
+}
+
+/**
+ * The notification text for a red scope gate steering fix-forward (T8).
+ *
+ * @param result  - The red gate result.
+ * @param attempt - The current fix-forward attempt number.
+ * @returns One-line warning naming the failing suite count and retry position.
+ */
+export function redGateNotifyText(result: GateResult, attempt: number): string {
+  return (
+    `Scope gate red for ${result.behaviorId}: ` +
+    `${result.suites.filter((s) => !s.passed).length} suite(s) failed — ` +
+    `steering fix-forward (retry ${attempt}/${RETRY_BUDGET})`
+  );
+}
+
+/**
+ * Render one recorded gate result as report/investigation text (T8).
+ *
+ * Names the gate kind and verdict, the scope, every suite verdict, and the
+ * full output tail of each failing suite — the text a red scope gate's
+ * fix-forward attempt (or a refused completion) receives.
+ *
+ * @param result - The recorded gate result (a state.gateResults entry).
+ * @param kind   - "scope gate" (per-task) or "full gate" (completion).
+ * @returns Multi-line report text.
+ */
+export function renderGateReport(
+  result: GateResult,
+  kind: "scope gate" | "full gate",
+): string {
+  const failing = result.suites.filter((s) => !s.passed);
+  const parts = [
+    `## Orchestrator ${kind}: ${result.behaviorId} — ${result.passed ? "GREEN" : "RED"}`,
+    "",
+    `Scope: ${result.scope.length > 0 ? result.scope.join(", ") : "(all packages — unfiltered)"}`,
+    `Suites: ${
+      result.suites.length > 0
+        ? result.suites.map((s) => `${s.label} ${s.passed ? "PASS" : "FAIL"}`).join("; ")
+        : "(none)"
+    }`,
+    "",
+  ];
+  for (const f of failing) {
+    parts.push(`### ${f.label} (FAIL) — output tail`, "", f.tail, "");
+  }
+  return parts.join("\n").replace(/\n+$/, "");
+}
+
+/**
+ * The one-line gate evidence for mark_task_done (T8): scope + pass/fail.
+ *
+ * @param result - The recorded gate result (a state.gateResults entry).
+ * @returns e.g. `orchestrator gate T1 — scope pkg/foo — passed (2/2 suites)`.
+ */
+export function formatGateEvidenceLine(result: GateResult): string {
+  const passedCount = result.suites.filter((s) => s.passed).length;
+  return (
+    `orchestrator gate ${result.behaviorId} — scope ` +
+    `${result.scope.length > 0 ? result.scope.join(", ") : "(all packages)"} — ` +
+    `${result.passed ? "passed" : "failed"} (${passedCount}/${result.suites.length} suites)`
+  );
 }
 
 // ── Ensure step ───────────────────────────────────────────────────────────────

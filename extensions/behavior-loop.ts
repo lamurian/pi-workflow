@@ -9,6 +9,7 @@ import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { commitAndGate, getCommitTimeoutMs, isOutOfRepoBehavior, pickCommitSubject, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
+import { buildScopeGateFixTask, commitScopeGate, redGateHaltText, redGateNotifyText } from "./test-tool-ensure.ts";
 import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
@@ -116,6 +117,16 @@ export async function runBehaviorLoop(
     await runFollowUp(taskText);
     retry++;
   };
+  /** One fix-forward round: warm-steer the live test-kind child below the cap, else fresh-spawn. */
+  const runFixRound = async (taskText: string) => {
+    if (behavior.kind === "test" && canSteerWarmChild(liveChild, warmSteersUsed)) {
+      warmSteersUsed++;
+      attempt = await recorder.runSteer(liveChild!, taskText);
+      adoptRound();
+    } else {
+      await runFollowUp(taskText);
+    }
+  };
 
   while (retry <= RETRY_BUDGET + 1) {
     // B2: cancellation checkpoint (top of loop) — /discuss cancelled the run while the unit attempt was in flight. Kill-induced child errors after the cancel surface here as attempts with an error; return immediately instead of retrying. No saveState, no lastHalt, no commit.
@@ -143,8 +154,7 @@ export async function runBehaviorLoop(
         // A partial report without progress consumes one retry as today.
         if (retry > RETRY_BUDGET) {
           return haltWithChild(behavior.id,
-            `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without advancing the tree ` +
-              `or adding findings: ${attempt.summary ?? "no summary"}`);
+            `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without advancing the tree or adding findings: ${attempt.summary ?? "no summary"}`);
         }
         await runRetry(buildRetryTask(behavior, task, attempt, retry, unitOptions) + noteSection + findingsSection());
         continue;
@@ -168,15 +178,12 @@ export async function runBehaviorLoop(
       recorder.sealLast("blocked");
       const pendingCommand: PendingCommand = { command: mustRun.command, ...(mustRun.reason ? { reason: mustRun.reason } : {}) };
       return haltWithChild(behavior.id,
-        `Unit ${behavior.id} reported a sandbox-blocked command that must run now: ` +
-          `${mustRun.command}${mustRun.reason ? ` (${mustRun.reason})` : ""}. Run it outside the sandbox, then /implement resumes.`,
+        `Unit ${behavior.id} reported a sandbox-blocked command that must run now: ${mustRun.command}${mustRun.reason ? ` (${mustRun.reason})` : ""}. Run it outside the sandbox, then /implement resumes.`,
         pendingCommand);
     }
 
     // Deferrable entries never block landing: the commit gate runs as usual and the commands are reported to the user at completion.
-    for (const entry of attempt.blockedCommands ?? []) {
-      result.deferredCommands!.push(entry);
-    }
+    for (const entry of attempt.blockedCommands ?? []) result.deferredCommands!.push(entry);
     // The attempt reached the commit gate with a usable report: any no-progress streak from earlier partial attempts is broken.
     noProgressStreak = 0;
 
@@ -218,15 +225,26 @@ export async function runBehaviorLoop(
     if (commit.remediation?.length) recordFindings(behavior.id, commit.remediation);
 
     if (commit.outcome === null) {
+      // T8: per-task SCOPE GATE — the orchestrator itself runs every
+      // filterable suite with the task's derived packages scope plus every
+      // non-filterable suite, unfiltered, outside the unit's tool call; a
+      // red gate keeps the task open and steers fix-forward via the retry path.
+      const gate = await commitScopeGate(pi, cwd, state, behavior.id);
+      if (gate && !gate.passed) {
+        landedCommits.push(subject); // the commit landed; only the gate is red
+        if (retry > RETRY_BUDGET) return haltWithChild(behavior.id, redGateHaltText(gate));
+        ctx.ui.notify(redGateNotifyText(gate, retry), "warning");
+        ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): scope-gate fix ${retry}/${RETRY_BUDGET}…`);
+        await runFixRound(buildScopeGateFixTask(gate, retry, baseCore) + noteSection + findingsSection());
+        retry++;
+        continue;
+      }
       await shutdownWarmChild(liveChild); // T5: landing ends the behavior — no live child survives it
       liveChild = undefined;
       landedCommits.push(subject);
       behavior.status = "done";
       if (pauseOutcome?.timedOut) {
-        const check: PendingManualCheck = {
-          behaviorId: behavior.id,
-          description: behavior.description,
-        };
+        const check: PendingManualCheck = { behaviorId: behavior.id, description: behavior.description };
         state.pendingManualChecks = [...(state.pendingManualChecks ?? []), check];
         result.pendingManualChecks = [...(result.pendingManualChecks ?? []), check];
       }
@@ -248,22 +266,18 @@ export async function runBehaviorLoop(
     if (commit.outcome.kind === "contract-guard") {
       return haltWithChild(behavior.id,
         `Staged diff for ${behavior.id} violates the contract's file allowlist — the declared files are authoritative. ` +
-          `Fix the change to match the declarations, or re-declare the affected paths via /discuss -> /finalize ` +
-          `with A/M/D status, then /implement resumes.\n\n` + commit.outcome.investigation);
+          `Fix the change to match the declarations, or re-declare the affected paths via /discuss -> /finalize with A/M/D status, then /implement resumes.\n\n` + commit.outcome.investigation);
     }
 
     if (commit.outcome.kind === "test-guard") {
       return haltWithChild(behavior.id,
         `Staged-diff guard blocked the commit for ${behavior.id} — tests are the specification. If the contract ` +
-          `requires updating or removing test paths, re-declare them via /discuss -> /finalize listing those ` +
-          `paths in files, then /implement resumes.\n\n` + commit.outcome.investigation);
+          `requires updating or removing test paths, re-declare them via /discuss -> /finalize listing those paths in files, then /implement resumes.\n\n` + commit.outcome.investigation);
     }
 
     if (commit.outcome.kind === "commit-timeout") {
       return haltWithChild(behavior.id,
-        `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms ` +
-          `(PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the ` +
-          `project's pre-commit hooks.`);
+        `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms (PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the project's pre-commit hooks.`);
     }
 
     if (retry > RETRY_BUDGET) {
@@ -274,16 +288,10 @@ export async function runBehaviorLoop(
       return haltWithChild(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
     }
 
-    // T5: hook-rejected/no-changes fixes steer into the live test-kind child below the cap; else fresh-spawn.
+    // T5/T8: hook-rejected/no-changes and red scope-gate fixes steer into the live test-kind child below the cap; else fresh-spawn.
     const fixText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-    if (behavior.kind === "test" && canSteerWarmChild(liveChild, warmSteersUsed)) {
-      warmSteersUsed++;
-      attempt = await recorder.runSteer(liveChild!, fixText);
-      adoptRound();
-    } else {
-      await runFollowUp(fixText);
-    }
+    await runFixRound(fixText);
     retry++;
   }
   return undefined;

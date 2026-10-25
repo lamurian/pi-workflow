@@ -212,6 +212,38 @@ export interface WorkflowState {
    * resuming on the still-supported v1 path).
    */
   contractV2?: ContractV2;
+  /**
+   * Orchestrator-run test-gate results per task (T8), keyed by task id:
+   * written by the per-task scope gate after each landed commit (scope,
+   * pass/fail, per-suite tails) and read by mark_task_done so gate-backed
+   * evidence replaces the unit's self-report. Optional: absent when no gate
+   * has run and on sessions persisted before this field existed.
+   */
+  gateResults?: Record<string, GateResult>;
+}
+
+/** One orchestrator test-gate suite verdict (T8). */
+export interface GateSuiteResult {
+  /** Suite label, e.g. "javascript (npm run test)". */
+  label: string;
+  /** True when the suite exited 0 without being killed. */
+  passed: boolean;
+  /** Capped output tail carried into gate reports and evidence lines. */
+  tail: string;
+}
+
+/** One orchestrator test-gate result recorded per task (T8). */
+export interface GateResult {
+  /** The task the gate ran for. */
+  behaviorId: string;
+  /** The derived packages scope the filterable suites ran with. */
+  scope: string[];
+  /** True when every executed suite passed. */
+  passed: boolean;
+  /** Per-suite verdicts with output tails. */
+  suites: GateSuiteResult[];
+  /** ISO timestamp of the gate run. */
+  at: string;
 }
 
 /** Test-tool wiring recorded by save_task's ensure step (T3). */

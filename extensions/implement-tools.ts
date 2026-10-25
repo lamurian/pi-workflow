@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { loadState, transitionTo, updateUi, saveState } from "./state.ts";
 import { evaluateCompletionGate } from "./task-contract.ts";
 import { readGitHead } from "./git-ops.ts";
+import { formatGateEvidenceLine, runTestGate } from "./test-tool-ensure.ts";
 import {
   formatImplementerActivity,
   type ImplementerActivityData,
@@ -94,6 +95,14 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
         return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], isError: true };
       }
       behavior.status = "done";
+      // T8: gate-backed evidence — for a task with tests refs the evidence
+      // carries the orchestrator's gate result line (scope + pass/fail),
+      // not the unit's self-report. The gate result is written by the
+      // behavior loop's per-task scope gate after each landed commit.
+      const gateResult = state.gateResults?.[params.behaviorId];
+      const gateLine = gateResult
+        ? `\nOrchestrator gate: ${formatGateEvidenceLine(gateResult)}`
+        : "";
       // T2 soft-warn: HEAD unchanged since the previous mark (or the
       // /implement baseline) means no commit landed for the last behavior.
       const head = await readGitHead(pi, ctx.cwd);
@@ -113,7 +122,7 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
         content: [
           {
             type: "text",
-            text: `${params.behaviorId} marked done. Evidence: ${params.evidence}${warning}`,
+            text: `${params.behaviorId} marked done. Evidence: ${params.evidence}${gateLine}${warning}`,
           },
         ],
       };
@@ -125,8 +134,9 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
  * Register the `complete_implementation` AI tool.
  *
  * Ends the implementing phase and returns the workflow to idle. Refuses
- * while any behavior is still active; test outcomes are not consulted
- * (verification is owned by the project's own commit hooks).
+ * while any behavior is still active. Before completing, runs the FULL
+ * GATE: every suite from state.testTool unfiltered, orchestrator-run — a
+ * red gate blocks completion, naming the failing suite and its output tail.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -155,6 +165,31 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
           content: [{ type: "text", text: `Cannot complete: ${refusal}.` }],
           isError: true,
         };
+      }
+      // T8: FULL GATE — the orchestrator runs ALL suites unfiltered before
+      // completion; red blocks completion, naming the failing suite and its
+      // output tail. Runs outside any unit's tool call.
+      const suites = state.testTool?.suites ?? [];
+      if (suites.length > 0) {
+        const gate = await runTestGate(pi, ctx.cwd, suites);
+        if (!gate.passed) {
+          const failing = gate.suites.filter((s) => !s.passed);
+          const detail = failing
+            .map((s) => `### ${s.label} (FAIL) — output tail\n\n${s.tail}`)
+            .join("\n\n");
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Cannot complete: the full test gate is red — ` +
+                  `${failing.length}/${gate.suites.length} suite(s) failed.\n\n${detail}\n\n` +
+                  `Fix the failing suite and re-run complete_implementation.`,
+              },
+            ],
+            isError: true,
+          };
+        }
       }
       transitionTo(pi, state, "idle");
       updateUi(null, ctx);
