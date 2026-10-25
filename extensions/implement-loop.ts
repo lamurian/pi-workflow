@@ -8,8 +8,9 @@ import { runImplementerUnit, type UnitTask } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
-import { readCommitsSinceBaseline, readTreeState } from "./git-ops.ts";
+import { readCommitsSinceBaseline, readTreeState, TEST_EXTENSION_CHORE_SUBJECT } from "./git-ops.ts";
 import { writeContractGuardFile } from "./contract-guard-file.ts";
+import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
 import { buildEngineerNoteSection, loadUnitPrompt } from "./unit-task-text.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
 
@@ -234,6 +235,26 @@ export async function runOrchestratedImplement(
     }
     ctx.ui.setStatus("implement", undefined);
     return result;
+  }
+
+  // T9: at /implement start, before the first unit spawns, the orchestrator
+  // runs the ensure step for the generated test extension (orchestrator-owned,
+  // never writable by a unit) and lands any regeneration as the SOLE
+  // chore-commit exception: the commit may contain only
+  // .pi/extensions/test.ts. Any other staged path aborts the chore commit
+  // and halts the run before any unit work begins.
+  const startEnsure = await ensureTestExtensionAtStart(pi, cwd, state);
+  if (startEnsure.kind === "aborted" || startEnsure.kind === "failed") {
+    return halt(
+      units[0]!.id,
+      `Test-extension chore commit ${startEnsure.kind} at /implement start — the run halts before any unit spawns.\n\n${startEnsure.investigation}`,
+    );
+  }
+  if (startEnsure.kind === "landed") {
+    ctx.ui.notify(
+      `${TEST_EXTENSION_CHORE_SUBJECT} — .pi/extensions/test.ts committed alone (sole chore-commit path)`,
+      "info",
+    );
   }
 
   const resuming = state.phase === "implementing";

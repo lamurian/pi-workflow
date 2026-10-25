@@ -22,6 +22,10 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const DEFAULT_ACTIVE_TOOLS = ["read", "bash", "write", "edit", "commit_changes"];
 
@@ -3559,5 +3563,176 @@ describe("T8: orchestrator test gates", () => {
     );
     assert.match(res2.content[0].text, /orchestrator gate/i);
     assert.match(res2.content[0].text, /failed/, "the gate line carries the fail verdict");
+  });
+});
+
+// ═══ T9: implement-start ensure + sole chore commit ═══
+describe("T9: implement-start test extension chore commit", () => {
+  const JS_SUITE = { label: "javascript (npm run test)", argv: ["npm", "run", "test"] };
+
+  /** A finalizing state with one active behavior and the recorded test suite. */
+  function choreState(): WorkflowState {
+    const state = finalizingState();
+    state.testTool = { source: "detected", suites: [JS_SUITE] };
+    return state;
+  }
+
+  interface GitExecEntry { cmd: string; args: string[] }
+
+  /**
+   * Exec mock for the start-chore flow: git commits advance HEAD; the chore
+   * staged-set query (exactly `diff --cached --name-status`) answers from the
+   * sole-path staging flag plus the injected foreign staged paths; every
+   * baseline/gate diff stays empty so the behavior commit lands clean.
+   */
+  function piWithChoreExec(foreignStaged: string[] = []): {
+    pi: ExtensionAPI & { calls: Record<string, unknown[]> };
+    execLog: GitExecEntry[];
+  } {
+    const pi = mockPi();
+    const execLog: GitExecEntry[] = [];
+    let headCounter = 0;
+    let choreStaged = false;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "rev-parse") return ok(`head${headCounter}\n`);
+      if (cmd === "git" && args[0] === "add" && args[1] === "--") {
+        choreStaged = true; // sole-path staging of the changed generated file
+        return ok();
+      }
+      if (cmd === "git" && args[0] === "diff" && args[1] === "--cached" && args[2] === "--name-status") {
+        if (args.length === 3) {
+          // The chore commit's staged-set query (index vs HEAD).
+          const lines = [
+            ...(choreStaged ? ["M\t.pi/extensions/test.ts"] : []),
+            ...foreignStaged.map((p) => `M\t${p}`),
+          ];
+          return ok(lines.length ? lines.join("\n") + "\n" : "");
+        }
+        return ok(); // commitAndGate baseline query: clean tree
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return ok(`[main c${headCounter}] committed`);
+      }
+      return ok(); // status / add --all / unified diff / ls-tree / anything else
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  /** Temp project dir holding a manifest (deterministic dogfood-free cwd). */
+  function tempProject(): string {
+    const dir = mkdtempSync(join(tmpdir(), "pi-t9-"));
+    writeFileSync(
+      join(dir, "package.json"),
+      JSON.stringify({ name: "t9", scripts: { test: "vitest run" } }),
+    );
+    return dir;
+  }
+
+  /** Extension context pinned to a real temp cwd carrying the given state. */
+  function ctxAt(state: WorkflowState, cwd: string): ExtensionContext {
+    const ctx = ctxWithState(state);
+    (ctx as { cwd: string }).cwd = cwd;
+    return ctx;
+  }
+
+  it("implementStartCommitsTestExtensionChore: at /implement start, before the first unit spawns, the orchestrator runs ensureTestTool and commits the changed generated file alone as 'chore: regenerate test extension'", async () => {
+    const { TEST_EXTENSION_CHORE_SUBJECT } = await import("../extensions/git-ops.ts");
+    const { GENERATED_MARKER } = await import("../extensions/test-tool-ensure.ts");
+    const cwd = tempProject();
+    const { pi, execLog } = piWithChoreExec();
+    const state = choreState();
+    const ctx = ctxAt(state, cwd);
+    let spawnIdx = -1;
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawnIdx = execLog.length;
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat: implement x" };
+    });
+
+    // The orchestrator-owned ensure step generated the test extension.
+    const generated = join(cwd, ".pi", "extensions", "test.ts");
+    assert.ok(existsSync(generated), "ensureTestTool generated the test extension");
+    assert.ok(
+      readFileSync(generated, "utf8").includes(GENERATED_MARKER),
+      "the generated file carries the GENERATED marker",
+    );
+
+    // The chore commit staged ONLY the chore path and used the fixed subject.
+    const choreAdd = execLog.findIndex(
+      (e) => e.cmd === "git" && e.args[0] === "add" && e.args[1] === "--",
+    );
+    assert.ok(choreAdd >= 0, "the chore file is staged sole-path (git add -- <path>), never add --all");
+    assert.deepEqual(execLog[choreAdd]!.args, ["add", "--", ".pi/extensions/test.ts"]);
+    const choreCommit = execLog.findIndex(
+      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args[2] === TEST_EXTENSION_CHORE_SUBJECT,
+    );
+    assert.ok(choreCommit >= 0, `the chore commit lands with subject "${TEST_EXTENSION_CHORE_SUBJECT}"`);
+    assert.deepEqual(execLog[choreCommit]!.args, ["commit", "-m", "chore: regenerate test extension"]);
+    assert.ok(spawnIdx > choreCommit, "the chore commit lands before the first unit spawns");
+
+    // The run itself is unaffected: the behavior lands its own separate commit.
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.deepEqual(
+      result.landedCommits,
+      ["feat: implement x"],
+      "the behavior commit is separate from the chore commit",
+    );
+    const behaviorCommits = execLog.filter(
+      (e) => e.cmd === "git" && e.args[0] === "commit" && e.args[2] !== TEST_EXTENSION_CHORE_SUBJECT,
+    );
+    assert.equal(behaviorCommits.length, 1, "exactly one behavior commit after the chore commit");
+    assert.equal(state.task!.behaviors[0]!.status, "done");
+  });
+
+  it("choreCommitRejectsOtherPaths: any other staged path aborts the chore commit and halts before any unit spawns", async () => {
+    const cwd = tempProject();
+    const { pi, execLog } = piWithChoreExec(["src/other.ts"]);
+    const state = choreState();
+    const ctx = ctxAt(state, cwd);
+    let spawns = 0;
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async () => {
+      spawns++;
+      return { summary: "should never run", suggestedCommit: "feat: nope" };
+    });
+
+    assert.equal(spawns, 0, "the halt precedes any unit spawn");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit").length,
+      0,
+      "no commit is invoked — the chore commit is aborted, never partially landed",
+    );
+    assert.equal(result.complete, false);
+    assert.equal(result.haltedOn, "T1", "the run halts on the first active behavior");
+    assert.match(result.error ?? "", /src\/other\.ts/, "the halt names the foreign staged path");
+    assert.match(result.error ?? "", /only \.pi\/extensions\/test\.ts/, "the halt states the sole-path rule");
+    assert.match(result.error ?? "", /git restore --staged/, "the halt carries the unstage remediation");
+    assert.equal(state.lastHalt?.behaviorId, "T1", "the halt is persisted for resume");
+  });
+
+  it("noOtherOrchestratorCommitPath: git commit is invoked nowhere in extensions/ except git-ops.ts (commitAndGate + the T9 chore commit)", async () => {
+    const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
+    const collect = (dir: string): string[] => {
+      const files: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name);
+        if (entry.isDirectory()) files.push(...collect(full));
+        else if (entry.name.endsWith(".ts")) files.push(full);
+      }
+      return files;
+    };
+    const offenders = collect(extDir)
+      .filter((file) => /\[\s*"commit"\s*,/.test(readFileSync(file, "utf8")))
+      .map((file) => relative(extDir, file).split(sep).join("/"));
+    assert.deepEqual(offenders, ["git-ops.ts"], "only git-ops.ts may invoke git commit");
+    const gitOps = readFileSync(join(extDir, "git-ops.ts"), "utf8");
+    assert.equal(
+      (gitOps.match(/\[\s*"commit"\s*,/g) ?? []).length,
+      2,
+      "exactly two commit call sites: the behavior commit gate and the T9 test-extension chore commit",
+    );
   });
 });

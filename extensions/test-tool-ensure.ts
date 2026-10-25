@@ -18,6 +18,7 @@ import type {
 import { saveState } from "./state.ts";
 import type { ContractV2, GateResult, GateSuiteResult, WorkflowState } from "./state.ts";
 import { deriveUnitScope } from "./contract-derive.ts";
+import { commitTestExtensionChore, type ChoreCommitResult } from "./git-ops.ts";
 import { RETRY_BUDGET } from "./commit-gate.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -661,5 +662,72 @@ export async function ensureTestTool(
     message:
       `test tool ${verb}: ${TEST_EXTENSION_RELATIVE} — runs ` +
       `${detection.suites.length} suite(s): ${suiteList}`,
+  };
+}
+
+// ── Implement-start ensure + chore commit (T9) ──────────────────────────────
+
+/** Outcome of the /implement-start test-extension ensure step (T9). */
+export interface StartEnsureResult {
+  /**
+   * "landed" = the regenerated file was committed alone; "skipped" = nothing
+   * to commit (no file written, or the file is unchanged); "aborted"/"failed"
+   * = the caller must halt before any unit spawns.
+   */
+  kind: ChoreCommitResult["kind"];
+  /** One-line evidence message from the ensure step. */
+  message: string;
+  /** Staged foreign paths that aborted the chore commit (aborted only). */
+  otherPaths: string[];
+  /** Halt text when the chore commit aborted or failed (empty otherwise). */
+  investigation: string;
+}
+
+/**
+ * Run the ensure step at /IMPLEMENT START and land the chore commit (T9).
+ *
+ * Regenerates `.pi/extensions/test.ts` from the session's recorded suites
+ * (`state.testTool`, recorded by save_task; sessions without recorded suites
+ * skip the step entirely — no re-detection) — the file is orchestrator-owned
+ * and never writable by a unit. When the generated file changed it is
+ * committed alone as `chore: regenerate test extension` via
+ * commitTestExtensionChore: the commit may contain only the generated path;
+ * any other staged path aborts it so the orchestrator halts instead of
+ * sweeping foreign work into the chore commit.
+ *
+ * @param pi    - ExtensionAPI (tool registry + exec).
+ * @param cwd   - Repository working directory.
+ * @param state - Workflow state (supplies the recorded test suites).
+ * @returns The ensure/chore outcome: kind, evidence message, abort paths,
+ *          and the halt investigation when the chore commit aborted/failed.
+ */
+export async function ensureTestExtensionAtStart(
+  pi: ExtensionAPI,
+  cwd: string,
+  state: Pick<WorkflowState, "testTool">,
+): Promise<StartEnsureResult> {
+  const recorded = state.testTool?.suites ?? [];
+  if (recorded.length === 0) {
+    return {
+      kind: "skipped",
+      message: "no test tool recorded in state.testTool — no start-time regeneration",
+      otherPaths: [],
+      investigation: "",
+    };
+  }
+  const detection: TestSuiteDetection = {
+    source: state.testTool?.source ?? "detected",
+    suites: recorded,
+  };
+  const ensured = await ensureTestTool(pi, cwd, detection);
+  if (!ensured.path) {
+    return { kind: "skipped", message: ensured.message, otherPaths: [], investigation: "" };
+  }
+  const chore = await commitTestExtensionChore(pi, cwd, TEST_EXTENSION_RELATIVE);
+  return {
+    kind: chore.kind,
+    message: `${ensured.message} — chore commit: ${chore.kind}`,
+    otherPaths: chore.otherPaths,
+    investigation: chore.investigation,
   };
 }
