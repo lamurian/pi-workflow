@@ -3802,3 +3802,190 @@ describe("implement module split (T13)", () => {
     }
   });
 });
+
+// ═══ T4: early halt on cross-ownership hook blocks ═══
+describe("T4: early halt on cross-ownership hook blocks", () => {
+  /** Hook output naming another task's declared path (extensions/other.ts is owned by T7/T2). */
+  const CROSS_OWNED_HOOK =
+    "golangci-lint run failed\n" +
+    "extensions/other.ts:12:5: undefined: Probe\n" +
+    "exit status 1";
+
+  /** Hook output naming only the unit's own path plus an undeclared path. */
+  const OWN_ONLY_HOOK =
+    "golangci-lint run failed\n" +
+    "src/a.ts:10:1: lint error\n" +
+    "some/undeclared/file.go:3:1: nope\n" +
+    "exit status 1";
+
+  /** Finalizing state whose v2 contract gives T1 src/a.ts and T7/T2 extensions/other.ts. */
+  function ownershipState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      contractV2: {
+        title: "Ownership Task",
+        instruction: "do things",
+        done: "all green",
+        sources: [
+          { path: "src/a.ts", tasks: ["T1"] },
+          { path: "extensions/other.ts", tasks: ["T7", "T2"] },
+        ],
+        tests: [{ path: "__tests__/a.test.ts", tasks: ["T1"] }],
+        tasks: [
+          { id: "T1", description: "first behavior", expectedOutput: ["e1"], status: "active" },
+          { id: "T7", description: "other behavior", expectedOutput: ["e7"], status: "active" },
+          { id: "T2", description: "third behavior", expectedOutput: ["e2"], status: "active" },
+        ],
+      },
+      task: {
+        title: "Ownership Task",
+        instruction: "do things",
+        files: [
+          { path: "src/a.ts", status: "M" },
+          { path: "extensions/other.ts", status: "M" },
+        ],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  /**
+   * Exec mock: a dirty tree whose baseline name-status lists only the unit's
+   * own path; the pre-commit hook always rejects with `hookStderr` (HEAD never
+   * moves), so every commit attempt classifies as hook-rejected.
+   *
+   * @param hookStderr - Raw hook output of the failing git commit.
+   * @returns The mock ExtensionAPI.
+   */
+  function piWithHook(hookStderr: string) {
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
+      if (cmd === "git" && args[0] === "status") return ok(" M src/a.ts\n");
+      if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
+        return ok("M\tsrc/a.ts\n");
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: hookStderr, code: 1, killed: false };
+      }
+      return ok();
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("crossOwnershipHaltsImmediately: a hook-rejected commit naming another task's path halts with no fix-forward round and no retry charge", async () => {
+    const pi = piWithHook(CROSS_OWNED_HOOK);
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+    const statuses: Array<[string, string | undefined]> = [];
+    ctx.ui.setStatus = ((key: string, value: string | undefined) => {
+      statuses.push([key, value]);
+    }) as unknown as ExtensionContext["ui"]["setStatus"];
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(result.complete, false, "the cross-ownership block halts the run");
+    assert.equal(result.haltedOn, "T1");
+    assert.deepEqual(spawns, ["T1"], "no fix-forward round is spawned after the cross-ownership rejection");
+    assert.equal(result.unitsRun, 1, "the retry budget is never charged");
+    const retryFrames = statuses.filter(([, v]) => typeof v === "string" && v.includes("retry"));
+    assert.deepEqual(retryFrames, [], "no retry frame — the loop halts before any fix round");
+    assert.doesNotMatch(result.error ?? "", /after \d+ retries/, "not a budget-exhaustion halt");
+  });
+
+  it("crossOwnershipHaltNamesPathOwnersFallback: the halt error names the blocking path, its owning task ids, and the manual fallback", async () => {
+    const pi = piWithHook(CROSS_OWNED_HOOK);
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async () => ({
+      summary: "implemented T1",
+      suggestedCommit: "feat(core): add first behavior",
+    }));
+
+    const error = result.error ?? "";
+    assert.match(error, /extensions\/other\.ts/, "the blocking path is named");
+    assert.match(error, /T7/, "the first owning task id is named");
+    assert.match(error, /T2/, "the second owning task id is named");
+    assert.match(error, /fix the file for the owning task/i, "fallback: fix the file for the owning task");
+    assert.match(
+      error,
+      /unstage\/keep it out of this unit's commit/i,
+      "fallback: unstage/keep the path out of this unit's commit",
+    );
+    assert.match(state.lastHalt?.error ?? "", /extensions\/other\.ts/, "lastHalt persists the same error");
+  });
+
+  it("ownOrUndeclaredHookPathsKeepFixForward: a hook rejection naming only the unit's own or undeclared paths takes the normal fix-forward path", async () => {
+    const pi = piWithHook(OWN_ONLY_HOOK);
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(
+      spawns.length,
+      6,
+      "initial attempt + 5 budgeted fix rounds — the ordinary fix-forward path",
+    );
+    assert.equal(result.complete, false);
+    assert.match(
+      result.error ?? "",
+      /pre-commit hook rejected the commit for T1 after 5 retries/,
+      "the ordinary budget-exhaustion halt",
+    );
+    assert.doesNotMatch(result.error ?? "", /Cross-ownership/, "no cross-ownership halt for own/undeclared paths");
+    assert.equal(state.task!.behaviors[0]!.status, "active");
+  });
+
+  it("diagnosisHelperIsPure: extractRepoPaths + findCrossOwnershipBlock match the contract ownership refs without I/O", async () => {
+    const { extractRepoPaths, findCrossOwnershipBlock, buildCrossOwnershipHaltText } = await import(
+      "../extensions/halt-diagnosis.ts"
+    );
+    const contract = ownershipState().contractV2!;
+
+    const paths = extractRepoPaths(
+      "approve.go:42:1: undefined\n M src/a.ts\n./pkg/x/y.go | 2 +-\nsome/undeclared/file.go:3",
+    );
+    assert.ok(paths.includes("approve.go"), "a dotted file name is extracted");
+    assert.ok(paths.includes("src/a.ts"), "a git-status path is extracted");
+    assert.ok(paths.includes("pkg/x/y.go"), "a ./-prefixed path is normalized");
+    assert.ok(paths.includes("some/undeclared/file.go"), "an undeclared path is still extracted");
+
+    const block = findCrossOwnershipBlock(
+      "lint failed:\nextensions/other.ts:12:5: undefined: Probe",
+      contract,
+      "T1",
+    );
+    assert.deepEqual(block, { path: "extensions/other.ts", owners: ["T7", "T2"] }, "cross-owned path blocks with its owners");
+    assert.equal(
+      findCrossOwnershipBlock("lint failed: src/a.ts:10", contract, "T1"),
+      undefined,
+      "the unit's own path never blocks",
+    );
+    assert.equal(
+      findCrossOwnershipBlock("lint failed: some/undeclared/file.go", contract, "T1"),
+      undefined,
+      "an undeclared path never blocks",
+    );
+    assert.equal(findCrossOwnershipBlock("x extensions/other.ts", undefined, "T1"), undefined, "v1 sessions (no contract) never block");
+
+    const text = buildCrossOwnershipHaltText("extensions/other.ts:12:5: bad", contract, "T1");
+    assert.match(text ?? "", /extensions\/other\.ts/, "the built error names the path");
+    assert.match(text ?? "", /T7, T2/, "the built error names every owning task id");
+    assert.equal(buildCrossOwnershipHaltText("src/a.ts:10:1: bad", contract, "T1"), undefined, "no block → no error");
+  });
+});

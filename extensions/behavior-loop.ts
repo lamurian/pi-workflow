@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError } from "./unit-progress.ts";
+import { buildCrossOwnershipHaltText } from "./halt-diagnosis.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
@@ -93,12 +94,10 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   const runFollowUp = async (taskText: string) => {
     await shutdownWarmChild(liveChild); liveChild = undefined; // never leak a stale kept-alive child across fresh spawns
     attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind });
-    liveChild = attempt.client;
-    adoptRound(); result.unitsRun++;
+    liveChild = attempt.client; adoptRound(); result.unitsRun++;
   };
   const runRetry = async (taskText: string) => {
-    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-    await runFollowUp(taskText); retry++;
+    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText); retry++;
   };
   /**
    * One fix-forward round: warm-steer the live test-kind child below the cap, else fresh-spawn.
@@ -271,6 +270,11 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     if (commit.outcome.kind === "commit-timeout") {
       return haltWithChild(behavior.id,
         `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms (PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the project's pre-commit hooks.`);
+    }
+
+    if (commit.outcome.kind === "hook-rejected") { // T4: the hook names another task's path — the unit cannot fix a file it does not own: halt now, no fix-forward round, no retry charge.
+      const crossBlock = buildCrossOwnershipHaltText(commit.outcome.investigation + "\n" + commit.outcome.hookOutput, state.contractV2, behavior.id);
+      if (crossBlock) return haltWithChild(behavior.id, crossBlock);
     }
 
     if (retry > RETRY_BUDGET) {

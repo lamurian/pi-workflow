@@ -5,6 +5,8 @@
 
 import { EARLY_HALT_DIAGNOSIS } from "./unit-progress.ts";
 import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "./halt-report.ts";
+import { deriveOwnership } from "./contract-derive.ts";
+import type { ContractV2 } from "./state.ts";
 
 /**
  * Classify a fresh attempt before the commit gate sees it.
@@ -141,4 +143,99 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
       "Review the error and attempt history above, fix the blocker (or split the behavior " +
       "via /discuss -> /finalize), then run /implement again.",
   };
+}
+
+// ─── Cross-ownership hook blocks (T4) ─────────────────────────────────────────
+// Pure path extraction and ownership matching over the hook output/investigation
+// of a rejected commit: the loop passes the captured text and the contract,
+// this module decides whether another task's path blocks the current unit.
+
+/** One hook-named path owned by tasks other than the current unit. */
+export interface CrossOwnershipBlock {
+  /** The repo-relative path the hook output/investigation named. */
+  path: string;
+  /** The contract's owning task ids for the path (never empty). */
+  owners: string[];
+}
+
+/** Path-candidate token: word chars plus `/ . _ - + ~ @` — colons split off. */
+const PATH_TOKEN = /[\w./+~@-]+/g;
+
+/**
+ * Extract repo-relative path candidates from hook output / investigation text.
+ *
+ * Splits on anything outside the path charset (whitespace, quotes, brackets,
+ * colons — so `file.go:42:1` yields `file.go`), normalizes a leading `./` and
+ * a trailing dot, and drops letterless tokens. Over-extraction is safe:
+ * candidates only ever match exactly against the contract's declared paths.
+ *
+ * @param text - Raw hook output / investigation text.
+ * @returns Deduplicated path candidates in first-seen order.
+ */
+export function extractRepoPaths(text: string): string[] {
+  const paths: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of text.match(PATH_TOKEN) ?? []) {
+    const path = raw.replace(/^\.\//, "").replace(/\.+$/, "");
+    if (!path || !/[A-Za-z]/.test(path) || seen.has(path)) continue;
+    seen.add(path);
+    paths.push(path);
+  }
+  return paths;
+}
+
+/**
+ * Find the first hook-named path owned by tasks other than the current unit.
+ *
+ * A path owned by the unit itself, or declared nowhere, never blocks: the unit
+ * may fix its own files, and undeclared paths keep the normal fix-forward path.
+ * Pure: exact membership of {@link extractRepoPaths} candidates in the
+ * contract's ownership refs (sources ∪ tests).
+ *
+ * @param text     - Hook output / investigation text of the rejected commit.
+ * @param contract - The v2 contract supplying ownership refs (absent on v1 sessions).
+ * @param taskId   - The current unit's task id.
+ * @returns The blocking path with its owning task ids, or undefined.
+ */
+export function findCrossOwnershipBlock(
+  text: string,
+  contract: ContractV2 | undefined,
+  taskId: string,
+): CrossOwnershipBlock | undefined {
+  if (!contract) return undefined;
+  const ownership = deriveOwnership(contract);
+  for (const path of extractRepoPaths(text)) {
+    const owners = ownership.get(path);
+    if (owners && owners.length > 0 && !owners.includes(taskId)) return { path, owners };
+  }
+  return undefined;
+}
+
+/**
+ * Build the early-halt error for a cross-ownership hook block (T4).
+ *
+ * Returns undefined when no other-task path is named, so hook rejections that
+ * name only the unit's own or undeclared paths keep the normal fix-forward
+ * path. The error names the blocking path, its owning task ids and the manual
+ * fallback: fix the file for the owning task, or unstage/keep it out of this
+ * unit's commit.
+ *
+ * @param text       - Hook output / investigation text of the rejected commit.
+ * @param contract   - The v2 contract (absent on v1 sessions → no block).
+ * @param behaviorId - The current behavior/unit id.
+ * @returns The halt error text, or undefined when nothing blocks.
+ */
+export function buildCrossOwnershipHaltText(
+  text: string,
+  contract: ContractV2 | undefined,
+  behaviorId: string,
+): string | undefined {
+  const block = findCrossOwnershipBlock(text, contract, behaviorId);
+  if (!block) return undefined;
+  return (
+    `Cross-ownership hook block for ${behaviorId}: the pre-commit hook rejected the commit and named ` +
+    `${block.path}, owned by task ${block.owners.join(", ")} — a path this unit does not own, so no ` +
+    `fix-forward round can address it. Manual fallback: fix the file for the owning task, or ` +
+    `unstage/keep it out of this unit's commit (the work stays on disk), then run /implement again to resume.`
+  );
 }
