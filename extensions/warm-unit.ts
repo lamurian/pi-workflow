@@ -1,6 +1,6 @@
 // ─── Warm unit children (T5) ──────────────────────────────────────────────────
 // Test-kind children stay alive after their report so hook-rejected/no-changes
-// retries steer into the SAME child (attempt recording, warm steer, completion shutdowns).
+// retries re-deliver fix tasks as `prompt` + streamingBehavior "steer" into the SAME child (attempt recording, warm rounds, completion shutdowns).
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
@@ -63,8 +63,8 @@ export type SteerRoundResult = ImplementerReport & {
 };
 
 /**
- * Steer a fix task into a kept-alive child and await a NEW report: only stdout
- * emitted AFTER the steer settles it (never the earlier report); timers re-arm per round.
+ * Prompt a fix task into a kept-alive child with streamingBehavior "steer" and
+ * await a NEW report: only stdout emitted AFTER the delivery settles it (never the earlier report); timers re-arm per round.
  * @param client    - Live child from the previous attempt.
  * @param taskText  - Fix task text (buildFixTask output).
  * @param onEvent   - Optional sink for live stdout events (relay + digest).
@@ -114,7 +114,7 @@ export async function steerFixRound(
           Math.floor(timeoutMs * SOFT_DEADLINE_RATIO),
         )
       : undefined;
-  client.steer(taskText);
+  client.prompt(taskText, "steer");
   await done;
   if (timer) clearTimeout(timer);
   if (softTimer) clearTimeout(softTimer);
@@ -132,7 +132,7 @@ export async function steerFixRound(
       ...report,
       error:
         client.stderrText().trim() ||
-        `unit child exited with code ${exitCode} without a new report after the steer`,
+        `unit child exited with code ${exitCode} without a new report after the fix prompt`,
     };
   }
   return report;

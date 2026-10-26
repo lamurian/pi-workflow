@@ -149,7 +149,11 @@ function reportJson(summary: string, extra: Record<string, unknown> = {}): strin
 
 interface FakeClientHandle {
   client: RpcUnitClient;
-  record: { steers: string[]; prompts: string[]; shutdowns: number };
+  record: {
+    steers: string[];
+    prompts: Array<{ message: string; streamingBehavior?: string }>;
+    shutdowns: number;
+  };
   /** Append stdout content (JSONL) and notify event listeners. */
   emit: (text: string) => void;
   /** Kill the child: isAlive() turns false and exit listeners fire. */
@@ -157,13 +161,19 @@ interface FakeClientHandle {
 }
 
 /**
- * Fake kept-alive RpcUnitClient. `onSteer` (if given) runs inside steer() so a
- * warm round can emit its NEW report synchronously, like a real child would.
+ * Fake kept-alive RpcUnitClient. `onPrompt` (if given) runs inside prompt() so
+ * a warm fix round can emit its NEW report synchronously, like a real child would.
  */
-function makeWarmClient(onSteer?: (message: string, emit: (text: string) => void) => void): FakeClientHandle {
+function makeWarmClient(
+  onPrompt?: (message: string, emit: (text: string) => void) => void,
+): FakeClientHandle {
   let stdout = "";
   let alive = true;
-  const record = { steers: [] as string[], prompts: [] as string[], shutdowns: 0 };
+  const record = {
+    steers: [] as string[],
+    prompts: [] as Array<{ message: string; streamingBehavior?: string }>,
+    shutdowns: 0,
+  };
   const listeners = new Set<(event: Record<string, unknown>) => void>();
   const exitListeners = new Set<(info: { code: number }) => void>();
   const emit = (text: string) => {
@@ -183,12 +193,12 @@ function makeWarmClient(onSteer?: (message: string, emit: (text: string) => void
     },
     send: () => {},
     command: async () => ({ type: "response", success: true, id: "x" }),
-    prompt: (message: string) => {
-      record.prompts.push(message);
+    prompt: (message: string, streamingBehavior?: string) => {
+      record.prompts.push(streamingBehavior ? { message, streamingBehavior } : { message });
+      onPrompt?.(message, emit);
     },
     steer: (message: string) => {
       record.steers.push(message);
-      onSteer?.(message, emit);
     },
     onEvent: (l: (event: Record<string, unknown>) => void) => {
       listeners.add(l);
@@ -241,19 +251,23 @@ describe("warm child gate and shutdown", () => {
 
 // ═══ steerFixRound ═══
 describe("steerFixRound", () => {
-  it("delivers the fix via steer and settles on the NEW report, not the earlier one", async () => {
+  it("delivers the fix via prompt with streamingBehavior steer and settles on the NEW report, not the earlier one", async () => {
     const warm = makeWarmClient((_message, emit) => {
       emit(assistantLine(reportJson("fixed after hook rejection", { suggestedCommit: "feat(core): fix" })));
     });
-    // The child already printed the base report before the steer.
+    // The child already printed the base report before the fix round.
     warm.emit(assistantLine(reportJson("stale base report", { suggestedCommit: "feat(core): stale" })));
 
     const result = await steerFixRound(warm.client, "## Previous attempt failed (retry 1/5)", undefined, 0);
 
-    assert.equal(result.summary, "fixed after hook rejection", "only post-steer content settles the round");
+    assert.equal(result.summary, "fixed after hook rejection", "only post-delivery content settles the round");
     assert.equal(result.suggestedCommit, "feat(core): fix");
-    assert.deepEqual(warm.record.steers, ["## Previous attempt failed (retry 1/5)"], "fix text goes through steer");
-    assert.deepEqual(warm.record.prompts, [], "no new prompt: the child is not respawned");
+    assert.deepEqual(
+      warm.record.prompts,
+      [{ message: "## Previous attempt failed (retry 1/5)", streamingBehavior: "steer" }],
+      "the fix task text rides a prompt with steer semantics",
+    );
+    assert.deepEqual(warm.record.steers, [], "no steer command carries the fix");
   });
 
   it("arms the wrap-up and kill timers per round and clears them on settle", async () => {
@@ -263,9 +277,14 @@ describe("steerFixRound", () => {
       const round1 = steerFixRound(warm.client, "fix-1", undefined, 1_000);
       await vi.advanceTimersByTimeAsync(750);
       assert.deepEqual(
+        warm.record.prompts,
+        [{ message: "fix-1", streamingBehavior: "steer" }],
+        "the fix text is prompted once at round start",
+      );
+      assert.deepEqual(
         warm.record.steers,
-        ["fix-1", WRAP_UP_STEER_MESSAGE],
-        "the fix text is steered, then the soft deadline fires mid-round",
+        [WRAP_UP_STEER_MESSAGE],
+        "the soft deadline wrap-up steer still arrives via steer",
       );
       warm.emit(assistantLine(reportJson("round 1")));
       const res1 = await round1;
@@ -273,16 +292,19 @@ describe("steerFixRound", () => {
 
       const round2 = steerFixRound(warm.client, "fix-2", undefined, 1_000);
       assert.deepEqual(
-        warm.record.steers,
-        ["fix-1", WRAP_UP_STEER_MESSAGE, "fix-2"],
-        "the round steer itself",
+        warm.record.prompts,
+        [
+          { message: "fix-1", streamingBehavior: "steer" },
+          { message: "fix-2", streamingBehavior: "steer" },
+        ],
+        "the round prompt itself",
       );
       await vi.advanceTimersByTimeAsync(750);
-      assert.equal(warm.record.steers.length, 4, "the per-round timer is rearmed for round 2");
+      assert.equal(warm.record.steers.length, 2, "the per-round wrap-up timer is rearmed for round 2");
       warm.emit(assistantLine(reportJson("round 2")));
       await round2;
       await vi.advanceTimersByTimeAsync(2_000);
-      assert.equal(warm.record.steers.length, 4, "timers are cleared once the round settles");
+      assert.equal(warm.record.steers.length, 2, "timers are cleared once the round settles");
     } finally {
       vi.useRealTimers();
     }
@@ -315,7 +337,7 @@ describe("orchestrator warm retries", () => {
     }
   }
 
-  it("a hook-rejected commit steers the fix into the same live child and lands from the new report", async () => {
+  it("a hook-rejected commit delivers the fix via prompt into the same live child and lands from the new report", async () => {
     const pi = piWithGate({ landOnCommit: 2 });
     const state = warmTask();
     const ctx = ctxWithState(state);
@@ -339,14 +361,16 @@ describe("orchestrator warm retries", () => {
     assert.equal(result.complete, true, "the steered retry lands");
     assert.deepEqual(result.landedCommits, ["feat(core): fix T1"], "the commit uses the post-steer report");
     assert.equal(calls.length, 1, "no fresh fix unit is spawned while the child is alive");
-    assert.equal(result.unitsRun, 1, "a warm steer is not a new unit");
-    assert.equal(warm.record.steers.length, 1, "one warm steer");
-    assert.match(warm.record.steers[0]!, /## Previous attempt failed \(retry 1\/5\)/, "the fix task text");
-    assert.match(warm.record.steers[0]!, /husky - pre-commit hook failed/, "the hook output rides the steer");
+    assert.equal(result.unitsRun, 1, "a warm round is not a new unit");
+    assert.equal(warm.record.prompts.length, 1, "one warm fix prompt");
+    assert.equal(warm.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
+    assert.match(warm.record.prompts[0]!.message, /## Previous attempt failed \(retry 1\/5\)/, "the fix task text");
+    assert.match(warm.record.prompts[0]!.message, /husky - pre-commit hook failed/, "the hook output rides the prompt");
+    assert.deepEqual(warm.record.steers, [], "no steer command: the report settles before the soft deadline");
     assert.equal(warm.record.shutdowns, 1, "the child is shut down on landing");
   });
 
-  it("a no-changes commit outcome also steers into the same live child", async () => {
+  it("a no-changes commit outcome also delivers the fix via prompt into the same live child", async () => {
     const pi = piWithGate({ landOnCommit: 2, failCode: 0, dirty: () => false });
     const state = warmTask();
     const ctx = ctxWithState(state);
@@ -364,8 +388,14 @@ describe("orchestrator warm retries", () => {
 
     assert.equal(result.complete, true, "the steered retry lands");
     assert.equal(calls.length, 1, "no fresh spawn for a no-changes fix");
-    assert.equal(warm.record.steers.length, 1, "one warm steer");
-    assert.match(warm.record.steers[0]!, /No changes detected/, "the no-changes investigation rides the steer");
+    assert.equal(warm.record.prompts.length, 1, "one warm fix prompt");
+    assert.equal(warm.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
+    assert.match(
+      warm.record.prompts[0]!.message,
+      /No changes detected/,
+      "the no-changes investigation rides the prompt",
+    );
+    assert.deepEqual(warm.record.steers, [], "no steer command");
     assert.deepEqual(result.landedCommits, ["feat(core): fix T1"]);
   });
 
@@ -392,9 +422,10 @@ describe("orchestrator warm retries", () => {
     const result = await runLoop(pi, ctx, state, runner);
 
     assert.equal(result.complete, true, "the fresh fix unit lands the commit");
-    assert.equal(calls.length, 2, "one warm steer, then one fresh fix unit");
+    assert.equal(calls.length, 2, "one warm fix round, then one fresh fix unit");
     assert.match(calls[1]!.taskText, /## Previous attempt failed \(retry 2\/5\)/, "the fresh unit gets the fix task");
-    assert.equal(first.record.steers.length, 1, "only the first round was steered");
+    assert.equal(first.record.prompts.length, 1, "only the first round was delivered, via prompt");
+    assert.deepEqual(first.record.steers, [], "no steer command to the warm child");
     assert.equal(first.record.shutdowns, 0, "a dead child is not shut down again");
     assert.equal(second.record.shutdowns, 1, "the fresh child is shut down on landing");
   });
@@ -418,8 +449,9 @@ describe("orchestrator warm retries", () => {
     assert.equal(result.complete, false, "the run halts once the budget is spent");
     assert.equal(result.haltedOn, "T1");
     assert.match(result.error ?? "", /after 5 retries/);
-    assert.equal(calls.length, 1, "all five retries were warm steers, no fresh spawn");
-    assert.equal(warm.record.steers.length, WARM_STEER_CAP, "exactly 5 steers before the halt");
+    assert.equal(calls.length, 1, "all five retries were warm rounds, no fresh spawn");
+    assert.equal(warm.record.prompts.length, WARM_STEER_CAP, "exactly 5 fix prompts before the halt");
+    assert.deepEqual(warm.record.steers, [], "no steer commands: every fix rides a prompt");
     assert.equal(result.attempts?.length, 6, "base attempt plus 5 steered rounds in the attempt table");
     assert.equal(warm.record.shutdowns, 1, "the child is shut down on halt");
   });

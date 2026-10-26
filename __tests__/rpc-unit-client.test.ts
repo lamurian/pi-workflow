@@ -65,6 +65,53 @@ describe("spawnRpcUnitClient", () => {
     });
   });
 
+  it("prompt includes streamingBehavior \"steer\" when steer semantics are requested", async () => {
+    // Fake echoes every stdin line to stderr so the test can assert the wire format.
+    const fake = fakePi(
+      'while IFS= read -r line; do\n  printf "ECHO:%s\\n" "$line" >&2\ndone\n',
+    );
+    const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
+    await withPiBin(fake, async () => {
+      const client = spawnRpcUnitClient({ systemPrompt: "sys", cwd: "/tmp" });
+      try {
+        client.prompt("fix the hook failure", "steer");
+        assert.ok(
+          await waitFor(() => /streamingBehavior/.test(client.stderrText())),
+          "the streamingBehavior field must reach the child's stdin",
+        );
+        assert.match(client.stderrText(), /"type":"prompt"/, "the command stays a prompt");
+        assert.match(client.stderrText(), /"streamingBehavior":"steer"/, "steer semantics ride the field");
+        assert.match(client.stderrText(), /"message":"fix the hook failure"/, "the fix text rides the prompt");
+      } finally {
+        await client.shutdown(200);
+      }
+    });
+  });
+
+  it("prompt omits streamingBehavior when steer semantics are not requested", async () => {
+    const fake = fakePi(
+      'while IFS= read -r line; do\n  printf "ECHO:%s\\n" "$line" >&2\ndone\n',
+    );
+    const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
+    await withPiBin(fake, async () => {
+      const client = spawnRpcUnitClient({ systemPrompt: "sys", cwd: "/tmp" });
+      try {
+        client.prompt("Implement behavior T2.");
+        assert.ok(
+          await waitFor(() => /"type":"prompt"/.test(client.stderrText())),
+          "prompt command must reach the child's stdin as JSONL",
+        );
+        assert.doesNotMatch(
+          client.stderrText(),
+          /streamingBehavior/,
+          "no streamingBehavior field without steer semantics",
+        );
+      } finally {
+        await client.shutdown(200);
+      }
+    });
+  });
+
   it("steer attaches images when present", async () => {
     const fake = fakePi(
       'while IFS= read -r line; do\n  printf "ECHO:%s\\n" "$line" >&2\ndone\n',

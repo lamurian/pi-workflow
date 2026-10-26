@@ -53,8 +53,12 @@ export interface RpcUnitClient {
   send(command: Record<string, unknown>): void;
   /** Send a command and await its correlated response. */
   command(command: Record<string, unknown>, timeoutMs?: number): Promise<RpcResponse>;
-  /** Deliver the task text as a `prompt` command on stdin. */
-  prompt(message: string): void;
+  /**
+   * Deliver the task text as a `prompt` command on stdin. Pass "steer" to ride
+   * `streamingBehavior` in the JSONL command (an idle child starts a new run on
+   * the warm session; a streaming child queues a genuine steer).
+   */
+  prompt(message: string, streamingBehavior?: "steer"): void;
   /** Forward user feedback as a `steer` command (images supported). */
   steer(message: string, images?: RpcImage[]): void;
   /** Graceful shutdown: `abort` command + stdin close, SIGKILL fallback. */
@@ -223,8 +227,12 @@ export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient
           resolve(response);
         });
       }),
-    prompt: (message) => {
-      write({ type: "prompt", message });
+    prompt: (message, streamingBehavior) => {
+      write(
+        streamingBehavior
+          ? { type: "prompt", message, streamingBehavior }
+          : { type: "prompt", message },
+      );
     },
     steer: (message, images) => {
       write(images && images.length > 0 ? { type: "steer", message, images } : { type: "steer", message });
