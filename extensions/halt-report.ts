@@ -28,6 +28,7 @@ export type AttemptOutcome =
   | "partial"
   | "missing-report"
   | "unit-error"
+  | "transport"
   | "hook-rejected"
   | "no-changes"
   | "test-guard"
@@ -61,6 +62,8 @@ export interface AttemptLike {
   missingReport?: boolean;
   /** Failure detail from the unit runner. */
   error?: string;
+  /** True when a warm fix round was never picked up by the kept-alive child (T3). */
+  undeliveredSteer?: boolean;
 }
 
 /** Diagnosis plus recommended next action for a halted orchestration. */

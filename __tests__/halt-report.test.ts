@@ -5,10 +5,16 @@ import { fileURLToPath } from "node:url";
 import {
   ATTEMPT_TEXT_LIMIT,
   HALT_REPORT_CLOSING_LINE,
+  renderAttemptTable,
   renderHaltReport,
   truncateAttemptText,
   type AttemptRecord,
 } from "../extensions/halt-report.ts";
+import {
+  UNDELIVERED_HALT_THRESHOLD,
+  UNDELIVERED_STEER_ERROR,
+  buildUndeliveredHaltText,
+} from "../extensions/warm-unit.ts";
 import { classifyAttemptOutcome, deriveDiagnosis } from "../extensions/halt-diagnosis.ts";
 import {
   composeCompletionReport,
@@ -30,6 +36,7 @@ type UnitAttemptResult = ImplementerReport & {
   error?: string;
   timedOut?: boolean;
   missingReport?: boolean;
+  undeliveredSteer?: boolean;
 };
 
 // ─── Harness (mirrors __tests__/unit-progress.test.ts mocks) ─────────────────
@@ -434,5 +441,104 @@ describe("halt-diagnosis split and pre-spawn rule (T9)", () => {
       const lines = readFileSync(full, "utf8").split("\n").length;
       assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
     }
+  });
+});
+
+// ═══ T3: transport outcomes for undelivered rounds ═══
+describe("halt-report: transport outcomes (T3)", () => {
+  const timeoutRecord: AttemptRecord = {
+    attempt: 1,
+    outcome: "timeout",
+    durationSec: 900,
+    progress: false,
+    lastText: "explored the parser",
+  };
+  const transportRecord: AttemptRecord = {
+    attempt: 2,
+    outcome: "transport",
+    durationSec: 3,
+    progress: false,
+    lastText: UNDELIVERED_STEER_ERROR,
+  };
+
+  it("classifyAttemptOutcome returns transport for the undeliveredSteer marker, ahead of the timeout and unit-error checks", () => {
+    assert.equal(
+      classifyAttemptOutcome({ undeliveredSteer: true, error: UNDELIVERED_STEER_ERROR }),
+      "transport",
+      "an undelivered round is a transport outcome, not a unit error",
+    );
+    assert.equal(
+      classifyAttemptOutcome({ undeliveredSteer: true, timedOut: true, error: "boom" }),
+      "transport",
+      "the marker wins even when the timeout flag and an error are set too",
+    );
+    assert.equal(classifyAttemptOutcome({ error: "boom" }), "unit-error", "plain errors keep their outcome");
+    assert.equal(classifyAttemptOutcome({ timedOut: true }), "timeout", "plain timeouts keep their outcome");
+  });
+
+  it("transport attempts do not count toward the two-consecutive no-progress timeout/partial early halt", () => {
+    const mixed = deriveDiagnosis([timeoutRecord, transportRecord], "");
+    assert.notEqual(
+      mixed.diagnosis,
+      "exploration not converging",
+      "the transport round is not the second timeout/partial — no early-halt diagnosis",
+    );
+    const twoTransports = deriveDiagnosis(
+      [transportRecord, { ...transportRecord, attempt: 3 }],
+      "",
+    );
+    assert.notEqual(twoTransports.diagnosis, "exploration not converging", "two transport rounds never form the pair");
+    const control = deriveDiagnosis(
+      [timeoutRecord, { ...timeoutRecord, attempt: 2 }],
+      "",
+    );
+    assert.equal(control.diagnosis, "exploration not converging", "two no-progress timeouts still halt-diagnose");
+  });
+
+  it("deriveDiagnosis for a history whose last outcome is transport names the orchestrator delivery failure", () => {
+    const haltError = buildUndeliveredHaltText("T1", UNDELIVERED_HALT_THRESHOLD);
+    for (const history of [[transportRecord], [timeoutRecord, transportRecord]]) {
+      const derived = deriveDiagnosis(history, haltError);
+      assert.match(derived.diagnosis, /infrastructure/, "the diagnosis is an infrastructure failure");
+      assert.match(derived.diagnosis, /orchestrator/, "the diagnosis names the orchestrator");
+      assert.match(derived.diagnosis, /deliver/, "the diagnosis names the delivery failure");
+      assert.match(derived.recommendation, /\/implement/, "the recommendation re-runs /implement");
+      assert.match(derived.recommendation, /unit-side fix/, "the recommendation rules out a unit-side fix");
+    }
+  });
+
+  it("renderAttemptTable renders the transport outcome in the attempt-history row", () => {
+    const rows = renderAttemptTable([timeoutRecord, transportRecord]);
+    assert.ok(
+      rows.some((row) => row.includes("| 2 | transport | 3s | no |")),
+      "the transport attempt row names the outcome",
+    );
+    const report = renderHaltReport({
+      haltedOn: "T1",
+      error: buildUndeliveredHaltText("T1", UNDELIVERED_HALT_THRESHOLD),
+      commits: [],
+      attempts: [{ ...transportRecord, attempt: 1 }],
+    });
+    assert.match(report, /\| 1 \| transport \| 3s \| no \|/, "the halt report table shows the transport outcome");
+    assert.match(report, /Diagnosis: .*infrastructure/, "the infrastructure diagnosis rides the report");
+  });
+
+  it("undelivered attempts through the orchestrator loop land as transport outcomes with the infrastructure diagnosis", async () => {
+    const pi = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const runner: UnitRunner = async (): Promise<UnitAttemptResult> => {
+      return { summary: "", error: UNDELIVERED_STEER_ERROR, undeliveredSteer: true };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, false, "the undelivered run halts");
+    assert.ok(result.attempts?.length === 6, "initial run + 5 retries");
+    assert.ok(
+      result.attempts!.every((a) => a.outcome === "transport"),
+      "every undelivered attempt is classified as transport",
+    );
+    assert.match(result.diagnosis ?? "", /infrastructure/, "the halt diagnosis names the infrastructure failure");
   });
 });

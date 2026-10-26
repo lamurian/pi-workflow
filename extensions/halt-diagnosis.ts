@@ -9,7 +9,9 @@ import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "
 /**
  * Classify a fresh attempt before the commit gate sees it.
  *
- * Precedence matches the loop's partial path: timeout first, then
+ * Precedence starts with the undelivered-steer marker (T3): a fix round the
+ * kept-alive child never picked up is a "transport" outcome ahead of every
+ * other check. Then it matches the loop's partial path: timeout, then
  * missing-report, unit error, and a "partial" report status; a usable
  * report that reaches the commit gate is "ok" until its verdict seals it.
  *
@@ -17,6 +19,7 @@ import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "
  * @returns The pre-commit outcome kind.
  */
 export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
+  if (attempt.undeliveredSteer) return "transport";
   if (attempt.timedOut) return "timeout";
   if (attempt.missingReport) return "missing-report";
   if (attempt.error) return "unit-error";
@@ -29,11 +32,14 @@ export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
  *
  * An empty attempt history means the run halted before any unit spawned
  * (a failed start-time chore commit, a refused completion gate) — that
- * gets the pre-unit diagnosis first (T9). Otherwise the priority is:
- * repeated no-progress timeouts/partials ("exploration not converging",
- * also detected via the early-halt error text), then test-guard,
- * hook-rejected, no-changes, blocked, commit-timeout, and finally a
- * generic per-last-outcome fallback.
+ * gets the pre-unit diagnosis first (T9). A history whose last attempt is
+ * a transport outcome (an undelivered steer, T3) gets the infrastructure
+ * transport diagnosis next: the orchestrator never delivered its steer, so
+ * no unit-side fix applies. Otherwise the priority is: repeated no-progress
+ * timeouts/partials ("exploration not converging", also detected via the
+ * early-halt error text; transport attempts never count toward the pair),
+ * then test-guard, hook-rejected, no-changes, blocked, commit-timeout, and
+ * finally a generic per-last-outcome fallback.
  *
  * @param attempts - The halted behavior's attempt history.
  * @param error    - The halt error text.
@@ -47,6 +53,19 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
     };
   }
   const outcomes = attempts.map((a) => a.outcome);
+  const last = outcomes[outcomes.length - 1];
+  // T3: the last round was never delivered to the unit — an orchestrator-side
+  // infrastructure transport failure, not a unit verdict. It outranks every
+  // other diagnosis; the timeout/partial tally below never counts transport
+  // attempts, so they cannot trigger the early-halt diagnosis either.
+  if (last === "transport") {
+    return {
+      diagnosis: "the orchestrator's delivery of its steer to the unit failed — infrastructure transport failure",
+      recommendation:
+        "Re-run /implement to resume with a fresh child; no unit-side fix is needed — " +
+        "the unit never received the instruction.",
+    };
+  }
   const lastTwo = attempts.slice(-2);
   const nonConverging =
     error.includes(EARLY_HALT_DIAGNOSIS) ||
@@ -109,7 +128,6 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
         "then run /implement again.",
     };
   }
-  const last = outcomes[outcomes.length - 1];
   if (last === "missing-report") {
     return {
       diagnosis: "the unit ended without its required JSON report",
