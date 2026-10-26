@@ -19,12 +19,10 @@ import { runBehaviorLoop } from "./behavior-loop.ts";
 /** Result of one unit attempt: the parsed report plus failure diagnostics. */
 export type UnitAttempt = ImplementerReport & {
   error?: string;
-  /** True when the unit subprocess was killed by the wall-clock timeout. */
-  timedOut?: boolean;
-  /** True when the unit exited 0 without the mandatory JSON report block. */
-  missingReport?: boolean;
-  /** Live rpc client handle; present only for manual-kind behaviors (T3). */
-  client?: RpcUnitClient;
+  timedOut?: boolean; // True when the unit subprocess was killed by the wall-clock timeout.
+  missingReport?: boolean; // True when the unit exited 0 without the mandatory JSON report block.
+  undeliveredSteer?: boolean; // True when a warm fix round was never picked up by the child (T2).
+  client?: RpcUnitClient; // Live rpc client handle; only for manual-kind behaviors (T3).
 };
 
 /** Injectable unit runner: execute one behavior, return its report. */

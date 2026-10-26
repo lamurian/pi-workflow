@@ -5,6 +5,9 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import {
   WARM_STEER_CAP,
+  UNDELIVERED_HALT_THRESHOLD,
+  UNDELIVERED_STEER_ERROR,
+  buildUndeliveredHaltText,
   canSteerWarmChild,
   shutdownWarmChild,
   steerFixRound,
@@ -152,6 +155,7 @@ interface FakeClientHandle {
   record: {
     steers: string[];
     prompts: Array<{ message: string; streamingBehavior?: string }>;
+    commands: Array<Record<string, unknown>>;
     shutdowns: number;
   };
   /** Append stdout content (JSONL) and notify event listeners. */
@@ -163,15 +167,19 @@ interface FakeClientHandle {
 /**
  * Fake kept-alive RpcUnitClient. `onPrompt` (if given) runs inside prompt() so
  * a warm fix round can emit its NEW report synchronously, like a real child would.
+ * `onCommand` (if given) shapes command() responses — return `{ isStreaming: false }`
+ * to make the T2 get_state probe mark warm rounds undelivered.
  */
 function makeWarmClient(
   onPrompt?: (message: string, emit: (text: string) => void) => void,
+  onCommand?: (command: Record<string, unknown>) => { isStreaming?: boolean },
 ): FakeClientHandle {
   let stdout = "";
   let alive = true;
   const record = {
     steers: [] as string[],
     prompts: [] as Array<{ message: string; streamingBehavior?: string }>,
+    commands: [] as Array<Record<string, unknown>>,
     shutdowns: 0,
   };
   const listeners = new Set<(event: Record<string, unknown>) => void>();
@@ -192,7 +200,11 @@ function makeWarmClient(
       for (const l of exitListeners) l({ code: 1 });
     },
     send: () => {},
-    command: async () => ({ type: "response", success: true, id: "x" }),
+    command: async (commandObj: Record<string, unknown>) => {
+      record.commands.push(commandObj);
+      const data = onCommand?.(commandObj);
+      return { type: "response", success: true, id: "x", ...(data ? { data } : {}) };
+    },
     prompt: (message: string, streamingBehavior?: string) => {
       record.prompts.push(streamingBehavior ? { message, streamingBehavior } : { message });
       onPrompt?.(message, emit);
@@ -322,6 +334,148 @@ describe("steerFixRound", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("marks the round undelivered when the child reports isStreaming false with no new stdout (T2)", async () => {
+    vi.useFakeTimers();
+    try {
+      const warm = makeWarmClient(undefined, () => ({ isStreaming: false }));
+      const round = steerFixRound(warm.client, "fix", undefined, 60_000);
+      await vi.advanceTimersByTimeAsync(300); // the 250ms probe fires, far before the 60s hard timeout
+      const res = await round;
+      assert.equal(res.undeliveredSteer, true, "an idle child that never picked the prompt up settles as undelivered");
+      assert.equal(res.error, UNDELIVERED_STEER_ERROR, "the delivery-failure error text rides the result");
+      assert.notEqual(res.timedOut, true, "the round returns promptly instead of waiting out the hard timeout");
+      assert.equal(warm.client.isAlive(), true, "an undelivered round does not kill the child");
+      assert.deepEqual(warm.record.prompts, [{ message: "fix", streamingBehavior: "steer" }], "the fix text still rode a steer prompt");
+      assert.ok(
+        warm.record.commands.some((c) => c.type === "get_state"),
+        "the child state is probed via get_state shortly after delivery",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps awaiting the new report for a streaming child or new stdout before the probe (T2)", async () => {
+    vi.useFakeTimers();
+    try {
+      const streaming = makeWarmClient(undefined, () => ({ isStreaming: true }));
+      let settled = false;
+      const round1 = steerFixRound(streaming.client, "fix-a", undefined, 60_000).then((res) => {
+        settled = true;
+        return res;
+      });
+      await vi.advanceTimersByTimeAsync(300);
+      assert.equal(settled, false, "a streaming child leaves the round awaiting the new report");
+      streaming.emit(assistantLine(reportJson("late but real report")));
+      const res1 = await round1;
+      assert.equal(res1.undeliveredSteer, undefined, "a delivered report carries no undelivered marker");
+      assert.equal(res1.summary, "late but real report");
+
+      const chatty = makeWarmClient(undefined, () => ({ isStreaming: false }));
+      const round2 = steerFixRound(chatty.client, "fix-b", undefined, 60_000);
+      chatty.emit(assistantLine(reportJson("chatty child report")));
+      await vi.advanceTimersByTimeAsync(300);
+      const res2 = await round2;
+      assert.equal(res2.undeliveredSteer, undefined, "new stdout before the probe keeps the round awaiting the report");
+      assert.equal(res2.summary, "chatty child report");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ═══ T2: undelivered fix rounds ═══
+describe("undelivered fix rounds (T2)", () => {
+  /** Fresh loop run with the cancelled flag reset (cancelOrchestration is sticky). */
+  async function runLoop(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState, runner: UnitRunner) {
+    beginOrchestration(Promise.resolve());
+    try {
+      return await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+    } finally {
+      endOrchestration();
+    }
+  }
+
+  it("an undelivered round falls back to a fresh spawn without charging the retry or the warm steer (T2)", async () => {
+    const pi = piWithGate({ landOnCommit: 3 }); // hook rejects commits 1-2, lands 3
+    const state = warmTask();
+    const ctx = ctxWithState(state);
+    const calls: UnitTask[] = [];
+    // The first fix round goes warm into an idle child: the get_state probe reports
+    // isStreaming false and no stdout ever follows the prompt — the round is undelivered.
+    // (A SECOND consecutive undelivered round would halt the run — see the next test.)
+    const idle = makeWarmClient(undefined, () => ({ isStreaming: false }));
+    const deliver = makeWarmClient((_message, emit) => {
+      emit(assistantLine(reportJson("fixed after undelivered rounds", { suggestedCommit: "feat(core): fix T1" })));
+    });
+    const clients = [idle, deliver];
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      const handle = clients[calls.length - 1]!;
+      setActiveUnitClient(handle.client);
+      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base", client: handle.client };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, true, "the run lands once a warm round is delivered");
+    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"], "the commit uses the delivered report");
+    assert.equal(calls.length, 2, "base plus one fresh fallback — the undelivered round spawned no unit of its own");
+    assert.equal(calls[1]!.behaviorId, "T1", "the fresh fallback targets the same behavior");
+    assert.match(
+      calls[1]!.taskText,
+      /## Previous attempt failed \(retry 1\/5\)/,
+      "the fallback fresh spawn carries the same fix text with the retry counter untouched",
+    );
+    assert.equal(idle.record.prompts.length, 1, "the undelivered round still rode a warm prompt (steer refunded)");
+    assert.equal(idle.record.shutdowns, 1, "the idle child is shut down by its fallback");
+    assert.equal(deliver.record.prompts.length, 1, "the next fix round still went warm into the live child");
+    assert.equal(deliver.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
+    assert.match(
+      deliver.record.prompts[0]!.message,
+      /## Previous attempt failed \(retry 1\/5\)/,
+      "the retry counter was never incremented by the undelivered round",
+    );
+    assert.equal(result.unitsRun, 2, "the undelivered round contributes its fallback fresh spawn, not itself");
+    assert.equal(deliver.record.shutdowns, 1, "the delivered child is shut down on landing");
+  });
+
+  it("two consecutive undelivered rounds halt with the infrastructure delivery error (T2)", async () => {
+    const pi = piWithGate({}); // the hook always rejects
+    const state = warmTask();
+    const ctx = ctxWithState(state);
+    const calls: UnitTask[] = [];
+    const idleA = makeWarmClient(undefined, () => ({ isStreaming: false }));
+    const idleB = makeWarmClient(undefined, () => ({ isStreaming: false }));
+    const clients = [idleA, idleB];
+    const runner: UnitRunner = async (unit) => {
+      calls.push(unit);
+      const handle = clients[calls.length - 1]!;
+      setActiveUnitClient(handle.client);
+      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base", client: handle.client };
+    };
+
+    const result = await runLoop(pi, ctx, state, runner);
+
+    assert.equal(result.complete, false, "the run halts on the second consecutive undelivered round");
+    assert.equal(result.haltedOn, "T1");
+    assert.match(result.error ?? "", /infrastructure/, "the halt names the infrastructure delivery failure");
+    assert.doesNotMatch(result.error ?? "", /failed after \d+ retries/, "never a retry-budget message");
+    assert.ok(
+      (result.error ?? "").includes(buildUndeliveredHaltText("T1", UNDELIVERED_HALT_THRESHOLD)),
+      "the halt text is buildUndeliveredHaltText at the threshold",
+    );
+    assert.equal(calls.length, 2, "one fresh fallback after the first undelivered round, none after the halt");
+    assert.equal(idleA.record.prompts.length, 1, "warm fix round 1 into child A");
+    assert.equal(idleB.record.prompts.length, 1, "warm fix round 2 into child B");
+    assert.equal(idleB.record.shutdowns, 1, "the halt shuts the live child down");
+
+    // The undelivered rounds land in the attempt history with progress false and the delivery error.
+    const undelivered = (result.attempts ?? []).filter((a) => a.lastText === UNDELIVERED_STEER_ERROR);
+    assert.equal(undelivered.length, UNDELIVERED_HALT_THRESHOLD, "one attempt record per undelivered round");
+    assert.ok(undelivered.every((a) => a.progress === false), "undelivered rounds record no progress");
   });
 });
 
