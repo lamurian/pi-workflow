@@ -305,26 +305,35 @@ interface T6Call {
   stdout: string;
 }
 
-/** The two name-status views the commit gate reads. */
+/** The views the commit gate reads in a v2 session (T3). */
 interface T6Fixture {
-  /** Output of `git diff --cached --name-status --no-renames <baselineRef>`. */
-  baseline: string;
-  /** Output of `git diff --cached --name-status --no-renames HEAD` — the staged set. */
-  head: string;
+  /** `git diff --name-status --no-renames <baselineRef>` — the worktree teeth. */
+  worktree?: string;
+  /** `git diff --cached --name-status --no-renames <baselineRef>` — the staged set. */
+  baseline?: string;
+  /** `git diff --cached --name-status --no-renames HEAD` — the staged set. */
+  head?: string;
+  /** `git status --short`. */
+  status?: string;
+  /** `git ls-files --cached --others --exclude-standard` — the stageable paths. */
+  lsFiles?: string;
 }
 
 /**
- * Exec mock for the T6/T2 commit path: records every git command with its
- * stdout, advances HEAD on commit, serves the baseline and HEAD name-status
- * views separately, and honors `git restore --staged -- <path>` by dropping
- * that path from both views.
+ * Exec mock for the T6/T2/T3 commit path: records every git command with its
+ * stdout, advances HEAD on commit, serves the worktree-teeth, staged-baseline
+ * and HEAD name-status views separately, answers `git status`/`git ls-files`
+ * from the fixture, and honors `git restore --staged -- <path>` by dropping
+ * that path from every name-status view.
  *
- * @param fixture - Both name-status views (a plain string fills both).
+ * @param fixture - The gate's views (a plain string fills all name-status views).
  * @returns The mock ExtensionAPI plus the recorded call log.
  */
 function piT6(fixture: string | T6Fixture): { pi: ExtensionAPI; calls: T6Call[] } {
   const fx: T6Fixture =
-    typeof fixture === "string" ? { baseline: fixture, head: fixture } : fixture;
+    typeof fixture === "string"
+      ? { worktree: fixture, baseline: fixture, head: fixture }
+      : fixture;
   const calls: T6Call[] = [];
   const restored = new Set<string>();
   let head = 0;
@@ -349,8 +358,14 @@ function piT6(fixture: string | T6Fixture): { pi: ExtensionAPI; calls: T6Call[] 
       if (cmd === "git" && args[0] === "rev-parse") stdout = `head${head}\n`;
       else if (cmd === "git" && args[0] === "restore") {
         restored.add(args[args.length - 1] ?? "");
-      } else if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
-        stdout = args[args.length - 1] === "HEAD" ? render(fx.head) : render(fx.baseline);
+      } else if (cmd === "git" && args[0] === "ls-files") stdout = fx.lsFiles ?? "";
+      else if (cmd === "git" && args[0] === "status") stdout = fx.status ?? "";
+      else if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
+        if (!args.includes("--cached")) stdout = render(fx.worktree ?? "");
+        else
+          stdout = render(
+            args[args.length - 1] === "HEAD" ? (fx.head ?? "") : (fx.baseline ?? ""),
+          );
       } else if (cmd === "git" && args[0] === "commit") {
         head++;
         stdout = "[main t6] landed\n";
@@ -402,23 +417,29 @@ describe("commitUnstagesCrossTaskContamination", () => {
     const reads = nameStatusReads(calls);
     assert.equal(
       reads.length,
-      3,
-      "baseline read, HEAD staged-set read, baseline re-read after the unstage",
+      4,
+      "worktree teeth read, staged-set read, HEAD staged-set read, staged re-read after the unstage",
     );
     assert.deepEqual(
       reads[0]!.args,
-      ["diff", "--cached", "--name-status", "--no-renames", "base123"],
-      "the allowlist check still measures the staged diff against the baseline ref",
+      ["diff", "--name-status", "--no-renames", "base123"],
+      "the allowlist check measures the WORKTREE against the baseline ref (teeth, T3)",
     );
+    assert.match(reads[0]!.stdout, /src\/theirs\.ts/, "teeth: the worktree lists both changes");
     assert.deepEqual(
       reads[1]!.args,
+      ["diff", "--cached", "--name-status", "--no-renames", "base123"],
+      "the staged set is still measured against the baseline ref",
+    );
+    assert.deepEqual(
+      reads[2]!.args,
       ["diff", "--cached", "--name-status", "--no-renames", "HEAD"],
       "contamination is measured against HEAD",
     );
-    assert.match(reads[0]!.stdout, /src\/theirs\.ts/, "before: contamination is staged");
-    assert.match(reads[1]!.stdout, /src\/theirs\.ts/, "before: contamination is staged vs HEAD");
-    assert.doesNotMatch(reads[2]!.stdout, /src\/theirs\.ts/, "after: contamination is gone");
-    assert.match(reads[2]!.stdout, /src\/mine\.ts/, "after: the owned path is still staged");
+    assert.match(reads[1]!.stdout, /src\/theirs\.ts/, "before: contamination is staged");
+    assert.match(reads[2]!.stdout, /src\/theirs\.ts/, "before: contamination is staged vs HEAD");
+    assert.doesNotMatch(reads[3]!.stdout, /src\/theirs\.ts/, "after: contamination is gone");
+    assert.match(reads[3]!.stdout, /src\/mine\.ts/, "after: the owned path is still staged");
     // The attempt report carries the remediation note: path + owner task + command.
     const note = (attempt.remediation ?? []).join("\n");
     assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
@@ -468,19 +489,28 @@ describe("committedSinceBaselineIsNotContamination (T2)", () => {
       "no remediation line for a file committed since the baseline",
     );
     const reads = nameStatusReads(calls);
-    assert.equal(reads.length, 2, "no post-unstage re-read without an unstage");
+    assert.equal(
+      reads.length,
+      3,
+      "teeth + staged baseline + HEAD; no post-unstage re-read without an unstage",
+    );
     assert.deepEqual(
       reads[0]!.args,
+      ["diff", "--name-status", "--no-renames", "base123"],
+      "the allowlist check measures the WORKTREE against the baseline ref (teeth, T3)",
+    );
+    assert.deepEqual(
+      reads[1]!.args,
       ["diff", "--cached", "--name-status", "--no-renames", "base123"],
-      "the allowlist check still measures the staged diff against the baseline ref",
+      "the staged set is still measured against the baseline ref",
     );
     assert.match(
-      reads[0]!.stdout,
+      reads[1]!.stdout,
       /src\/theirs\.ts/,
       "the baseline diff still lists the committed file",
     );
     assert.doesNotMatch(
-      reads[1]!.stdout,
+      reads[2]!.stdout,
       /src\/theirs\.ts/,
       "the HEAD staged set does not — it is committed, not staged",
     );
@@ -570,17 +600,17 @@ describe("commitStillHaltsOnUndeclaredPath", () => {
   });
 });
 
-describe("remediationKeepsWorkOnDisk", () => {
-  it("the unstage never removes files from disk and keeps the foreign work out of the commit", async () => {
-    const repo = mkdtempSync(join(tmpdir(), "pi-t6-remediation-"));
+describe("pathScopedRealRepoKeepsForeignWorkOutOfCommit (T3 A2)", () => {
+  it("path-scoped staging keeps the foreign file out of the commit: no add --all, no restore, the work stays on disk", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "pi-t3-pathscoped-"));
     const gitIn = (...args: string[]): string => {
       const res = spawnSync("git", args, { cwd: repo, encoding: "utf8" });
       assert.equal(res.status, 0, `git ${args.join(" ")} failed: ${res.stderr ?? ""}`);
       return (res.stdout ?? "").trim();
     };
     gitIn("init", "-q");
-    gitIn("config", "user.email", "t6@test");
-    gitIn("config", "user.name", "t6");
+    gitIn("config", "user.email", "t3@test");
+    gitIn("config", "user.name", "t3");
     gitIn("config", "commit.gpgsign", "false");
     mkdirSync(join(repo, "src"), { recursive: true });
     writeFileSync(join(repo, "src", "mine.ts"), "mine v1\n");
@@ -591,10 +621,12 @@ describe("remediationKeepsWorkOnDisk", () => {
     writeFileSync(join(repo, "src", "mine.ts"), "mine v2\n");
     writeFileSync(join(repo, "src", "theirs.ts"), "theirs v2\n");
 
+    const calls: Array<{ cmd: string; args: string[] }> = [];
     const execShim = async (
       command: string,
       args: string[],
     ): Promise<{ stdout: string; stderr: string; code: number; killed: boolean }> => {
+      if (command === "git") calls.push({ cmd: command, args });
       const res = spawnSync(command, args, { cwd: repo, encoding: "utf8" });
       return {
         stdout: res.stdout ?? "",
@@ -615,7 +647,22 @@ describe("remediationKeepsWorkOnDisk", () => {
     );
 
     assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
-    // The unstaged file survives on disk with the owning task's edits intact.
+    assert.ok(
+      !calls.some((c) => c.args[0] === "add" && c.args.includes("--all")),
+      "never git add --all under a v2 contract",
+    );
+    assert.ok(
+      calls.some(
+        (c) => c.args[0] === "add" && c.args.includes("--") && c.args.includes("src/mine.ts"),
+      ),
+      "the unit's owned path is staged sole-path (git add -- <paths>)",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "restore"),
+      "the foreign file is never staged, so nothing is ever unstaged",
+    );
+    assert.equal(attempt.remediation, undefined, "no remediation note: nothing was unstaged");
+    // The foreign file survives on disk with the owning task's edits intact.
     assert.ok(existsSync(join(repo, "src", "theirs.ts")), "the file stays on disk");
     assert.equal(
       readFileSync(join(repo, "src", "theirs.ts"), "utf8"),
@@ -625,16 +672,11 @@ describe("remediationKeepsWorkOnDisk", () => {
     // The commit carries only the committing task's paths.
     assert.equal(gitIn("show", "HEAD:src/mine.ts"), "mine v2");
     assert.equal(gitIn("show", "HEAD:src/theirs.ts"), "theirs v1", "foreign work is not committed");
-    // The foreign work remains as an UNSTAGED modification (index-only unstage);
-    // gitIn trims stdout, so the porcelain leading space may be gone.
     assert.match(
       gitIn("status", "--porcelain"),
       /^ ?M src\/theirs\.ts$/m,
-      "the contaminated path is an unstaged modification, not deleted",
+      "the foreign path is an unstaged modification, not deleted",
     );
-    const note = (attempt.remediation ?? []).join("\n");
-    assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
-    assert.match(note, /T2/, "the note names the owner task");
   });
 });
 
@@ -713,5 +755,121 @@ describe("orchestrator-owned test extension vs baseline (bug 1)", () => {
       "A\tsrc/mine.ts\n",
       "output without the extension line is untouched",
     );
+  });
+});
+
+// ═══ T3: path-scoped staging (v2 sessions) ═══
+
+describe("pathScopedStaging (T3 A1)", () => {
+  it("stages only the unit's owned paths via git add -- <paths> and never git add --all", async () => {
+    const { pi, calls } = piT6({
+      worktree: "M\tsrc/mine.ts\n",
+      baseline: "M\tsrc/mine.ts\n",
+      head: "M\tsrc/mine.ts\n",
+      status: " M src/mine.ts\n?? tests/a.test.ts\n",
+      lsFiles: "src/mine.ts\ntests/a.test.ts\n",
+    });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    const adds = calls.filter((c) => c.args[0] === "add");
+    assert.ok(adds.length > 0, "git add runs in a v2 session");
+    assert.deepEqual(
+      adds[0]!.args,
+      ["add", "--", "src/mine.ts", "tests/a.test.ts"],
+      "staged paths are the unit's owned scope, sources then tests",
+    );
+    assert.ok(
+      !adds.some((c) => c.args.includes("--all")),
+      "git add --all is never invoked under a v2 contract",
+    );
+  });
+});
+
+describe("pathScopedTeethKeepContractGuard (T3 A3)", () => {
+  it("an owned path edited outside the allowlist raises contract-guard from the WORKTREE view and never commits", async () => {
+    // src/rogue.ts is edited on disk but never staged: the index views below
+    // never carry it, so only the worktree teeth can raise the halt.
+    const { pi, calls } = piT6({
+      worktree: "M\tsrc/mine.ts\nM\tsrc/rogue.ts\n",
+      baseline: "M\tsrc/mine.ts\n",
+      head: "M\tsrc/mine.ts\n",
+      status: " M src/mine.ts\n M src/rogue.ts\n",
+      lsFiles: "src/mine.ts\n",
+    });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "contract-guard", JSON.stringify(attempt.outcome));
+    const investigation = attempt.outcome?.investigation ?? "";
+    assert.match(investigation, /src\/rogue\.ts/, "the never-staged worktree edit is named");
+    assert.match(investigation, /\/discuss -> \/finalize/, "the contract-change hint is present");
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit never runs on a worktree allowlist violation",
+    );
+  });
+});
+
+describe("v1SessionsStillStageAll (T3 A4)", () => {
+  it("without a v2 contract commitAndGate falls back to git add --all", async () => {
+    const { pi, calls } = piT6("M\tsrc/a.ts\n");
+    const attempt = await commitAndGate(pi, "/tmp/test", "feat: x", BEHAVIOR, TASK, 1, "base123");
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    const add = calls.find((c) => c.args[0] === "add");
+    assert.ok(add, "git add runs in a v1 session");
+    assert.deepEqual(add!.args, ["add", "--all"], "v1 keeps the plain stage-all path");
+  });
+});
+
+describe("emptyOwnedStagedSetIsNoChanges (T3 A5)", () => {
+  it("a dirty foreign path with an empty owned staged set returns no-changes without invoking git commit", async () => {
+    const { pi, calls } = piT6({
+      worktree: "M\tsrc/theirs.ts\n",
+      baseline: "",
+      head: "",
+      status: " M src/theirs.ts\n",
+      lsFiles: "src/mine.ts\n",
+    });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "no-changes", JSON.stringify(attempt.outcome));
+    assert.match(attempt.outcome?.investigation ?? "", /T1/, "the investigation names the behavior");
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit is never invoked on an empty owned staged set",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "add" && c.args.includes("--all")),
+      "the foreign dirty file is never staged",
+    );
+    assert.equal(attempt.remediation, undefined, "no remediation note without an unstage");
   });
 });

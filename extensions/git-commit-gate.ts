@@ -1,22 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
-import type { DeclaredFile } from "./contract-guard-core.ts";
+import { TEST_EXTENSION_PATH, type DeclaredFile } from "./contract-guard-core.ts";
 import { classifyBaselineDiff, planUnstage } from "./contract-guard-diff.ts";
 import { deriveAllowlist } from "./contract-derive.ts";
 import {
-  ownerlessHalt,
-  readGuardNameStatus,
-  runHeadStagedNameStatus,
-  unstageContamination,
-  withRemediation,
+  filterOrchestratorOwned, ownerlessHalt, readGuardNameStatus,
+  runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
-import {
-  getCommitTimeoutMs,
-  readDiffStat,
-  readGitHead,
-  readTreeState,
-} from "./git-ops.ts";
+import { getCommitTimeoutMs, readDiffStat, readGitHead, readTreeState } from "./git-ops.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
 
@@ -37,10 +29,8 @@ export interface CommitAttempt {
 }
 
 /**
- * Pick the conventional commit subject for a unit.
- *
- * Prefers the subagent's suggestion; falls back to a generic subject so a
- * missing suggestion never blocks the commit step.
+ * Pick the conventional commit subject: the subagent's suggestion, or a
+ * generic subject so a missing suggestion never blocks the commit step.
  *
  * @param report   - The unit's parsed report.
  * @param behavior - The behavior the unit implemented.
@@ -55,26 +45,59 @@ export function pickCommitSubject(
   return `feat: implement ${behavior.description}`.slice(0, 75);
 }
 
+/** Build the contract-guard halt from a baseline classification (T3: shared by the v2 teeth guard and the v1 staged guard; never commits). */
+function guardHalt(result: ReturnType<typeof classifyBaselineDiff>): CommitAttempt {
+  return { outcome: { kind: "contract-guard", investigation: result.investigation, violations: result.violations } };
+}
+
 /**
- * Stage all changes and commit with the given subject; classify via HEAD gate.
+ * Read the WORKTREE name-status vs the baseline (the T3 allowlist teeth) with
+ * a chore-only change to the orchestrator-owned test extension filtered (bug
+ * 1) via a WORKTREE-vs-HEAD query: a post-baseline chore commit drops the
+ * line, a unit edit keeps it. Best-effort: "" when git fails.
  *
- * Never passes --no-verify: the project's pre-commit hooks are the gate.
- * Before committing, inspects the staged diff (git diff --cached) against
- * the tamper guard: undeclared test deletions, sourceFile deletions, and
- * retry-touching of undeclared tests block the commit without invoking it.
+ * @param pi - ExtensionAPI. @param cwd - Working directory.
+ * @param ref - Baseline ref (baselineHead or "HEAD").
+ * @returns Raw worktree name-status output, or "" when git fails.
+ */
+async function readTeethNameStatus(pi: ExtensionAPI, cwd: string, ref: string): Promise<string> {
+  let res = await pi.exec("git", ["diff", "--name-status", "--no-renames", ref], { cwd });
+  if (res.code !== 0 && ref !== "HEAD") {
+    res = await pi.exec("git", ["diff", "--name-status", "--no-renames", "HEAD"], { cwd });
+  }
+  const raw = res.code === 0 ? (res.stdout ?? "") : "";
+  const isExt = (line: string) =>
+    line.split("\t")[1]?.trim().replace(/^\.\//, "") === TEST_EXTENSION_PATH;
+  if (!raw.split("\n").some(isExt)) return raw;
+  const head = await pi.exec("git", ["diff", "--name-only", "HEAD", "--", TEST_EXTENSION_PATH], { cwd });
+  if (head.code !== 0) return raw; // fail closed: keep the line
+  const changed = (head.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => l === TEST_EXTENSION_PATH);
+  return filterOrchestratorOwned(raw, changed);
+}
+
+/**
+ * Stage the unit's scope and commit with the given subject; classify via the
+ * HEAD gate. Never passes --no-verify: the project's pre-commit hooks are the
+ * gate; the staged diff is inspected against the tamper guard (undeclared test
+ * deletions, sourceFile deletions and retry-touching of undeclared tests block
+ * the commit without invoking it).
  *
- * @param pi       - ExtensionAPI reference.
- * @param cwd      - Working directory.
- * @param subject  - Conventional commit subject line.
- * @param behavior - The behavior being committed (for investigations).
- * @param task     - The task contract (declared files + test-kind sourceFiles).
- * @param attempt  - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
+ * v2 sessions (T3): stage only the unit's owned paths (`git add -- <paths>` —
+ * `git add --all` never runs), gate the allowlist on the WORKTREE teeth so a
+ * never-staged edit outside the allowlist still halts, and return an explicit
+ * no-changes outcome without invoking git commit when the owned staged set is
+ * empty on a dirty tree. v1 sessions keep the plain stage-all path.
+ *
+ * @param pi / cwd - ExtensionAPI reference and working directory.
+ * @param subject   - Conventional commit subject line.
+ * @param behavior  - The behavior being committed (for investigations).
+ * @param task      - The task contract (declared files + test-kind sourceFiles).
+ * @param attempt   - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
  * @param baselineHead - HEAD recorded when /implement started; the staged diff
  *                       is measured against it (falls back to HEAD).
- * @param contract     - The v2 contract (T6): enables per-task ownership —
- *                       staged paths owned by other tasks are auto-unstaged
- *                       before gating and reported in `remediation`; absent
- *                       (v1 sessions) the plain files list gates unchanged.
+ * @param contract  - The v2 contract: per-task ownership (path-scoped staging,
+ *                    contamination auto-unstaged before gating, `remediation`);
+ *                    absent = v1 session, plain files list gates unchanged.
  * @returns The classified commit attempt (with the remediation note when
  *          cross-task contamination was unstaged).
  */
@@ -96,62 +119,75 @@ export async function commitAndGate(
   /** Remediation-note lines for cross-task contamination unstaged at commit (T6). */
   let remediation: string[] = [];
   try {
-    await pi.exec("git", ["add", "--all"], { cwd });
-    // Authoritative allowlist guard: name-status measured against the /implement
-    // baseline (falling back to HEAD). On a violation the commit is never
-    // invoked — the loop halts with a contract-guard outcome. v2 sessions gate
-    // on the derived allowlist (refs enable per-task ownership; taskId makes a
-    // staged D on another task's path a hard violation); v1 sessions keep the
-    // plain files list without a task id.
     const baselineRef = baselineHead ?? "HEAD";
     const declared: readonly DeclaredFile[] = contract
       ? deriveAllowlist(contract)
       : task.files;
-    // Chore-only changes to the orchestrator-owned test extension are filtered
-    // out (bug 1): the start-of-run chore commit may postdate the baseline.
-    let nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
-    const allowlist = classifyBaselineDiff({
-      nameStatus: nameStatusRes,
-      files: declared,
-      baselineRef,
-      ...(contract ? { taskId: behavior.id } : {}),
-    });
-    if (allowlist.violations.length > 0) {
-      return {
-        outcome: {
-          kind: "contract-guard",
-          investigation: allowlist.investigation,
-          violations: allowlist.violations,
-        },
-      };
-    }
-    // T6/T2: auto-unstage cross-task contamination BEFORE gating. The staged
-    // set is measured against HEAD — only a path present in
-    // `git diff --cached --name-status HEAD` is genuinely staged; a file
-    // committed since the baseline is in the baseline diff but not staged, so
-    // it is never contamination and never emits a remediation line. Staged
-    // paths declared but owned by OTHER tasks leave the index via
-    // `git restore --staged -- <path>` (the work stays on disk for the owning
-    // task), the owned subset proceeds to the commit, and every unstage is
-    // reported in the remediation note. Only truly undeclared/ownerless
-    // staged paths halt the commit — they are never unstaged.
+    let nameStatusRes: string;
     if (contract) {
+      // T3 A3: the allowlist guard reads the WORKTREE against the baseline (the
+      // teeth) — an owned path edited outside its allowlist halts even when the
+      // edit is never staged. Bug 1: a chore-only change to the orchestrator-
+      // owned test extension is filtered inside readTeethNameStatus.
+      const teeth = await readTeethNameStatus(pi, cwd, baselineRef);
+      const allowlist = classifyBaselineDiff({
+        nameStatus: teeth, files: declared, baselineRef, taskId: behavior.id,
+      });
+      if (allowlist.violations.length > 0) return guardHalt(allowlist);
+      // T3 A1: stage only the unit's owned scope (sources then tests) via
+      // `git add -- <paths>`; `git add --all` never runs in a v2 session. The
+      // status read keeps the add atomic: a declared path with no worktree
+      // entry is skipped (empty ⇒ no add).
+      const changed = new Set(
+        (await readTreeState(pi, cwd)).split("\n").map((l) => l.slice(2).trim()).filter(Boolean),
+      );
+      const ownedPaths = declared
+        .filter((e) => e.refs?.includes(behavior.id))
+        .map((e) => e.path)
+        .filter((path) => changed.has(path));
+      if (ownedPaths.length > 0) await pi.exec("git", ["add", "--", ...ownedPaths], { cwd });
+      // Staged set vs the baseline: feeds the A5 narrow and the test guard.
+      nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
+      // T3 A5: an empty staged set with non-empty worktree teeth (dirty tree)
+      // returns an explicit no-changes outcome without invoking git commit; a
+      // fully clean tree falls through so classifyCommit issues the same verdict.
+      if (nameStatusRes.trim() === "" && teeth.trim() !== "") {
+        return {
+          outcome: {
+            kind: "no-changes",
+            investigation:
+              `No changes detected for ${behavior.id}: the unit's owned staged set is empty — git commit was never invoked. ` +
+              "Land actual file changes in the unit's owned paths; git status shows only foreign or undeclared work.",
+          },
+        };
+      }
+      // T6/T2: auto-unstage cross-task contamination BEFORE gating. The staged
+      // set is measured against HEAD — only a path in `git diff --cached
+      // --name-status HEAD` is genuinely staged, so a file committed since the
+      // baseline is never contamination. Staged paths declared but owned by
+      // OTHER tasks leave the index via `git restore --staged -- <path>` (the
+      // work stays on disk for the owning task); undeclared or ownerless
+      // staged paths halt — they are never unstaged.
       const headNameStatus = await runHeadStagedNameStatus(pi, cwd);
       const plan = planUnstage(declared, headNameStatus, behavior.id);
       if (plan.undeclared.length > 0) {
         return { outcome: ownerlessHalt(plan.undeclared, headNameStatus, declared, "HEAD") };
       }
       const unstaged = await unstageContamination(pi, cwd, plan.contamination);
-      // Never proceed to the commit with contamination still staged.
-      if (!unstaged.ok) return { outcome: unstaged.halt };
+      if (!unstaged.ok) return { outcome: unstaged.halt }; // never commit with contamination staged
       remediation = unstaged.remediation;
       if (remediation.length > 0) {
-        // Re-read the staged diff so every later gate sees only the owned subset.
+        // Re-read so every later gate sees only the owned subset.
         nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
       }
+    } else {
+      // v1 sessions keep the legacy stage-all path with the plain files list.
+      await pi.exec("git", ["add", "--all"], { cwd });
+      nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
+      const allowlist = classifyBaselineDiff({ nameStatus: nameStatusRes, files: declared, baselineRef });
+      if (allowlist.violations.length > 0) return guardHalt(allowlist);
     }
-    // Staged-diff tamper guard: inspect before committing. On a violation the
-    // commit is never invoked — the loop halts with a test-guard outcome.
+    // Staged-diff tamper guard: inspect before committing (never invokes it).
     const unifiedRes = await pi.exec("git", ["diff", "--cached"], { cwd });
     const testKindSourceFiles = task.behaviors
       .filter((b) => b.kind === "test" && b.sourceFile)
