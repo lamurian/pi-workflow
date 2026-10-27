@@ -280,7 +280,7 @@ describe("classifyStagedDiff (T4)", () => {
   });
 });
 
-// ═══ T6: commit path — auto-unstage cross-task contamination ═══
+// ═══ T6/T2: commit path — auto-unstage cross-task contamination ═══
 
 /** v2 contract: T1 owns src/mine.ts + tests/a.test.ts; T2 owns src/theirs.ts. */
 const CONTAMINATION_CONTRACT: ContractV2 = {
@@ -305,20 +305,31 @@ interface T6Call {
   stdout: string;
 }
 
+/** The two name-status views the commit gate reads. */
+interface T6Fixture {
+  /** Output of `git diff --cached --name-status --no-renames <baselineRef>`. */
+  baseline: string;
+  /** Output of `git diff --cached --name-status --no-renames HEAD` — the staged set. */
+  head: string;
+}
+
 /**
- * Exec mock for the T6 commit path: records every git command with its
- * stdout, advances HEAD on commit, and honors `git restore --staged -- <path>`
- * by dropping that path from every later name-status read.
+ * Exec mock for the T6/T2 commit path: records every git command with its
+ * stdout, advances HEAD on commit, serves the baseline and HEAD name-status
+ * views separately, and honors `git restore --staged -- <path>` by dropping
+ * that path from both views.
  *
- * @param nameStatus - Fixture output for `git diff --cached --name-status`.
+ * @param fixture - Both name-status views (a plain string fills both).
  * @returns The mock ExtensionAPI plus the recorded call log.
  */
-function piT6(nameStatus: string): { pi: ExtensionAPI; calls: T6Call[] } {
+function piT6(fixture: string | T6Fixture): { pi: ExtensionAPI; calls: T6Call[] } {
+  const fx: T6Fixture =
+    typeof fixture === "string" ? { baseline: fixture, head: fixture } : fixture;
   const calls: T6Call[] = [];
   const restored = new Set<string>();
   let head = 0;
-  const stagedNow = () =>
-    nameStatus
+  const render = (raw: string) =>
+    raw
       .split("\n")
       .filter((line) => line.trim() !== "")
       .filter((line) => !restored.has(line.split("\t")[1] ?? ""))
@@ -339,7 +350,7 @@ function piT6(nameStatus: string): { pi: ExtensionAPI; calls: T6Call[] } {
       else if (cmd === "git" && args[0] === "restore") {
         restored.add(args[args.length - 1] ?? "");
       } else if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
-        stdout = stagedNow();
+        stdout = args[args.length - 1] === "HEAD" ? render(fx.head) : render(fx.baseline);
       } else if (cmd === "git" && args[0] === "commit") {
         head++;
         stdout = "[main t6] landed\n";
@@ -350,6 +361,11 @@ function piT6(nameStatus: string): { pi: ExtensionAPI; calls: T6Call[] } {
     }),
   } as unknown as ExtensionAPI;
   return { pi, calls };
+}
+
+/** Name-status reads recorded by the mock, in call order. */
+function nameStatusReads(calls: T6Call[]): T6Call[] {
+  return calls.filter((c) => c.args[0] === "diff" && c.args.includes("--name-status"));
 }
 
 describe("commitUnstagesCrossTaskContamination", () => {
@@ -381,14 +397,28 @@ describe("commitUnstagesCrossTaskContamination", () => {
       calls.some((c) => c.args[0] === "commit"),
       "the owned subset still reaches git commit",
     );
-    // The gates after the unstage only see the committing task's paths.
-    const reads = calls.filter(
-      (c) => c.args[0] === "diff" && c.args.includes("--name-status"),
+    // The allowlist gate keeps measuring the baseline diff; contamination is
+    // measured against HEAD; the staged diff is re-read after the unstage.
+    const reads = nameStatusReads(calls);
+    assert.equal(
+      reads.length,
+      3,
+      "baseline read, HEAD staged-set read, baseline re-read after the unstage",
     );
-    assert.equal(reads.length, 2, "the staged diff is re-read after the unstage");
+    assert.deepEqual(
+      reads[0]!.args,
+      ["diff", "--cached", "--name-status", "--no-renames", "base123"],
+      "the allowlist check still measures the staged diff against the baseline ref",
+    );
+    assert.deepEqual(
+      reads[1]!.args,
+      ["diff", "--cached", "--name-status", "--no-renames", "HEAD"],
+      "contamination is measured against HEAD",
+    );
     assert.match(reads[0]!.stdout, /src\/theirs\.ts/, "before: contamination is staged");
-    assert.doesNotMatch(reads[1]!.stdout, /src\/theirs\.ts/, "after: contamination is gone");
-    assert.match(reads[1]!.stdout, /src\/mine\.ts/, "after: the owned path is still staged");
+    assert.match(reads[1]!.stdout, /src\/theirs\.ts/, "before: contamination is staged vs HEAD");
+    assert.doesNotMatch(reads[2]!.stdout, /src\/theirs\.ts/, "after: contamination is gone");
+    assert.match(reads[2]!.stdout, /src\/mine\.ts/, "after: the owned path is still staged");
     // The attempt report carries the remediation note: path + owner task + command.
     const note = (attempt.remediation ?? []).join("\n");
     assert.match(note, /src\/theirs\.ts/, "the note names the unstaged path");
@@ -399,6 +429,110 @@ describe("commitUnstagesCrossTaskContamination", () => {
       "the note carries the exact command",
     );
     assert.match(note, /stays on disk/, "the note states the work stays on disk");
+  });
+});
+
+describe("committedSinceBaselineIsNotContamination (T2)", () => {
+  it("never classifies a file committed since the baseline as contamination and emits no remediation line", async () => {
+    // src/theirs.ts (owned by T2) changed since the baseline through a COMMIT:
+    // it is in the baseline diff but not in `git diff --cached --name-only
+    // HEAD`, so there is nothing to unstage — it must never be classified as
+    // contamination and must never emit a remediation line.
+    const { pi, calls } = piT6({
+      baseline: "M\tsrc/mine.ts\nM\tsrc/theirs.ts\n",
+      head: "M\tsrc/mine.ts\n",
+    });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    assert.ok(
+      calls.some((c) => c.args[0] === "commit"),
+      "the owned subset still reaches git commit",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "restore"),
+      "a file committed since the baseline is never unstaged",
+    );
+    assert.equal(
+      attempt.remediation,
+      undefined,
+      "no remediation line for a file committed since the baseline",
+    );
+    const reads = nameStatusReads(calls);
+    assert.equal(reads.length, 2, "no post-unstage re-read without an unstage");
+    assert.deepEqual(
+      reads[0]!.args,
+      ["diff", "--cached", "--name-status", "--no-renames", "base123"],
+      "the allowlist check still measures the staged diff against the baseline ref",
+    );
+    assert.match(
+      reads[0]!.stdout,
+      /src\/theirs\.ts/,
+      "the baseline diff still lists the committed file",
+    );
+    assert.doesNotMatch(
+      reads[1]!.stdout,
+      /src\/theirs\.ts/,
+      "the HEAD staged set does not — it is committed, not staged",
+    );
+  });
+});
+
+describe("commitStillHaltsOnOwnerlessStagedPath (T2)", () => {
+  it("halts a staged path no task owns as undeclared before any unstage", async () => {
+    // src/orphan.ts is declared but its refs name no owning task: the
+    // allowlist passes it, yet nobody may commit it — the gate must halt as
+    // undeclared before unstaging anything.
+    const OWNERLESS_CONTRACT: ContractV2 = {
+      title: "Ownership Task",
+      instruction: "shared context only",
+      done: "green",
+      sources: [
+        { path: "src/mine.ts", status: "M", tasks: ["T1"] },
+        { path: "src/orphan.ts", status: "M", tasks: [] },
+      ],
+      tests: [{ path: "tests/a.test.ts", status: "A", tasks: ["T1"] }],
+      tasks: [{ id: "T1", description: "mine", expectedOutput: ["lands the owned subset"], status: "active" }],
+    };
+    const { pi, calls } = piT6("M\tsrc/mine.ts\nM\tsrc/orphan.ts\n");
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      OWNERLESS_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "contract-guard");
+    const investigation = attempt.outcome?.investigation ?? "";
+    assert.match(investigation, /src\/orphan\.ts/, "the ownerless path is named");
+    assert.match(investigation, /no owning task/i, "the halt states the path has no owning task");
+    assert.match(
+      investigation,
+      /\/discuss -> \/finalize/,
+      "the contract-change hint is present",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit never runs on an ownerless path",
+    );
+    assert.ok(
+      !calls.some((c) => c.args[0] === "restore"),
+      "the halt happens before any unstage",
+    );
+    assert.equal(attempt.remediation, undefined, "no remediation note on a halting commit");
   });
 });
 

@@ -7,6 +7,7 @@ import { deriveAllowlist } from "./contract-derive.ts";
 import {
   ownerlessHalt,
   readGuardNameStatus,
+  runHeadStagedNameStatus,
   unstageContamination,
   withRemediation,
 } from "./git-guard-diff.ts";
@@ -124,16 +125,21 @@ export async function commitAndGate(
         },
       };
     }
-    // T6: auto-unstage cross-task contamination BEFORE gating. Staged paths
-    // declared but owned by OTHER tasks leave the index via
+    // T6/T2: auto-unstage cross-task contamination BEFORE gating. The staged
+    // set is measured against HEAD — only a path present in
+    // `git diff --cached --name-status HEAD` is genuinely staged; a file
+    // committed since the baseline is in the baseline diff but not staged, so
+    // it is never contamination and never emits a remediation line. Staged
+    // paths declared but owned by OTHER tasks leave the index via
     // `git restore --staged -- <path>` (the work stays on disk for the owning
     // task), the owned subset proceeds to the commit, and every unstage is
     // reported in the remediation note. Only truly undeclared/ownerless
     // staged paths halt the commit — they are never unstaged.
     if (contract) {
-      const plan = planUnstage(declared, nameStatusRes, behavior.id);
+      const headNameStatus = await runHeadStagedNameStatus(pi, cwd);
+      const plan = planUnstage(declared, headNameStatus, behavior.id);
       if (plan.undeclared.length > 0) {
-        return { outcome: ownerlessHalt(plan.undeclared, nameStatusRes, declared, baselineRef) };
+        return { outcome: ownerlessHalt(plan.undeclared, headNameStatus, declared, "HEAD") };
       }
       const unstaged = await unstageContamination(pi, cwd, plan.contamination);
       // Never proceed to the commit with contamination still staged.

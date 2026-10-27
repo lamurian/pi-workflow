@@ -76,6 +76,23 @@ export async function runBaselineNameStatus(
 }
 
 /**
+ * Read the HEAD-relative staged set (`git diff --cached --name-status
+ * --no-renames HEAD`): only paths whose index entry differs from HEAD are
+ * actually staged. A file committed since the /implement baseline appears in
+ * the baseline diff but not here, so it can never be contamination.
+ *
+ * @param pi  - ExtensionAPI reference.
+ * @param cwd - Working directory.
+ * @returns Raw name-status output of the staged set, or "" when git fails.
+ */
+export async function runHeadStagedNameStatus(
+  pi: ExtensionAPI,
+  cwd: string,
+): Promise<string> {
+  return runBaselineNameStatus(pi, cwd, "HEAD");
+}
+
+/**
  * Whether one name-status line names the orchestrator-owned test extension.
  *
  * @param line - One `<status>\t<path>` line (from --no-renames output).
