@@ -9,16 +9,6 @@ import { formatTask } from "./task-contract.ts";
 import { buildEngineerNoteSection } from "./unit-task-text.ts";
 
 /**
- * Detect whether the `commit_changes` tool is registered in this session.
- *
- * @param pi - ExtensionAPI reference.
- * @returns True when a tool named `commit_changes` is registered.
- */
-export function hasCommitTool(pi: ExtensionAPI): boolean {
-  return pi.getAllTools().some((t) => t.name === "commit_changes");
-}
-
-/**
  * In-session TDD loop (`--solo`): steer the agent with the TDD prompt.
  *
  * @param note  - Optional engineer's note appended to the prompt.
@@ -32,7 +22,7 @@ export async function runSoloImplement(
   ctx: ExtensionContext,
   task: TaskContract,
 ): Promise<void> {
-  let prompt = await buildTddPrompt(task, hasCommitTool(pi));
+  let prompt = await buildTddPrompt(task);
   if (note) {
     prompt += buildEngineerNoteSection(note);
   }
@@ -44,24 +34,45 @@ export async function runSoloImplement(
 }
 
 /**
- * Build the TDD prompt from the task contract.
+ * Build the path-scoped commit instruction from the task contract's
+ * declared file paths. Stages via `git add -- <paths>` and commits with a
+ * conventional subject; never mentions `commit_changes` or blanket staging.
+ *
+ * @param task - The task contract.
+ * @returns The rendered `## Commits` section (never empty).
+ */
+function buildCommitInstruction(task: TaskContract): string {
+  const declared = task.files.map((f) => f.path);
+  const addCommand =
+    declared.length > 0 ? `git add -- ${declared.join(" ")}` : "git add -- <paths>";
+  return (
+    "\n## Commits\n\n" +
+    "After each `mark_task_done`, stage the contract's declared paths explicitly " +
+    "and commit them yourself — the extension never commits in this mode.\n\n" +
+    "1. Stage ONLY the declared paths (never the whole working tree):\n\n" +
+    `   ${addCommand}\n\n` +
+    "   The form is always `git add -- <paths>`: pass the contract's declared " +
+    "paths from above, space-separated after `--`, including newly added test files.\n" +
+    "2. Commit them with a conventional subject line:\n\n" +
+    '   `git commit -m "type(scope): description"`\n\n' +
+    "The subject must follow the conventional format (`type(scope): description`, " +
+    "≤75 chars) and describe what the behavior changed. " +
+    "Do NOT include the behavior id in the subject.\n"
+  );
+}
+
+/**
+ * Build the TDD prompt from the task contract. The rendered prompt carries
+ * the contract's declared file paths plus path-scoped staging instructions
+ * (`git add -- <paths>`, then `git commit` with a conventional subject).
  *
  * @param task - The task contract.
  * @returns The rendered TDD prompt string.
  */
-export async function buildTddPrompt(
-  task: TaskContract,
-  hasCommitTool = false,
-): Promise<string> {
+export async function buildTddPrompt(task: TaskContract): Promise<string> {
   const template = await loadContent("tdd-prompt.md");
-  const commitInstruction = hasCommitTool
-    ? "\n## Commits\n\n" +
-      "After each `mark_task_done`, call `commit_changes` with a conventional commit subject line " +
-      "(`type(scope): description`, ≤75 chars) that describes what the behavior changed. " +
-      "Do NOT include the behavior id in the subject.\n"
-    : "";
   return renderTemplate(template, {
     task: formatTask(task),
-    commitInstruction,
+    commitInstruction: buildCommitInstruction(task),
   });
 }

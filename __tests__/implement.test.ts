@@ -957,41 +957,57 @@ describe("B5: halt report as an agent turn", () => {
   });
 });
 
-// ═══ T1: capability-conditional commit instruction ═══
-describe("T1: capability-conditional commit instruction", () => {
-  it("buildTddPrompt(task, true) instructs commit_changes after each mark, no behavior id", async () => {
+// ═══ T4: path-scoped staging instruction (supersedes the commit_changes path) ═══
+describe("T4: solo prompt path-scoped staging instruction", () => {
+  it("buildTddPrompt renders the declared paths and instructs `git add -- <paths>` then a conventional `git commit`", async () => {
     const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
-    const prompt = await buildTddPrompt(finalizingState().task!, true);
-    assert.match(prompt, /commit_changes/);
-    assert.match(prompt, /conventional/i);
-    assert.match(prompt, /after each `mark_task_done`/i);
-    assert.match(prompt, /Do NOT include the behavior id/i);
+    const prompt = await buildTddPrompt(finalizingState().task!);
+    assert.match(prompt, /Files: src\/a\.ts \(M\)/, "declared paths render in the contract block");
+    assert.match(prompt, /git add -- <paths>/, "the path-scoped staging form is spelled out");
+    assert.match(prompt, /git add --[^\n`]*src\/a\.ts/, "the concrete declared path rides the add command");
+    assert.match(prompt, /git commit/, "the prompt instructs committing");
+    assert.match(prompt, /conventional/i, "the commit subject stays conventional");
+    assert.match(prompt, /after each `mark_task_done`/i, "the commit lands right after each mark");
   });
 
-  it("buildTddPrompt(task, false) contains no commit instruction", async () => {
+  it("never instructs commit_changes or blanket staging", async () => {
     const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
-    const prompt = await buildTddPrompt(finalizingState().task!, false);
-    assert.doesNotMatch(prompt, /commit_changes/);
+    const prompt = await buildTddPrompt(finalizingState().task!);
+    assert.doesNotMatch(prompt, /commit_changes/, "no commit_changes instruction anywhere");
+    assert.doesNotMatch(prompt, /git add --all/, "no blanket add --all instruction");
+    assert.doesNotMatch(prompt, /git add -A/, "no blanket add -A instruction");
   });
 
-  it("runImplement injects the instruction when commit_changes is registered", async () => {
-    const pi = mockPi(["read", "commit_changes"]);
-    const ctx = ctxWithState(finalizingState());
-
-    await runImplement("--solo", pi, ctx);
-
-    const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
-    assert.match(text, /commit_changes/);
+  it("keeps the subject rules: no behavior id, subject ≤75 chars", async () => {
+    const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
+    const prompt = await buildTddPrompt(finalizingState().task!);
+    assert.match(prompt, /≤75 chars/, "the subject length cap is retained");
+    assert.match(prompt, /Do NOT include the behavior id/i, "the behavior id stays out of the subject");
   });
 
-  it("runImplement omits the instruction when commit_changes is absent", async () => {
-    const pi = mockPi(["read", "bash"]);
-    const ctx = ctxWithState(finalizingState());
+  it("retains the pre-existing tdd-prompt.md wording", async () => {
+    const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
+    const prompt = await buildTddPrompt(finalizingState().task!);
+    assert.match(prompt, /run_precommit_check/, "hook-verification direction retained");
+    assert.match(prompt, /authoritative/i, "contract-authoritative clause retained");
+    assert.match(prompt, /mark_task_done/);
+    assert.match(prompt, /immediately/i, "mark-immediately clause retained");
+    assert.match(prompt, /prompt discipline/i, "solo prompt-only guard wording retained");
+    assert.doesNotMatch(prompt, /run_tests/, "no reference to the deleted run_tests tool");
+    assert.doesNotMatch(prompt, /back_to_finalize/, "no back_to_finalize reference");
+  });
 
-    await runImplement("--solo", pi, ctx);
+  it("runImplement steers the path-scoped instruction regardless of commit_changes registration", async () => {
+    for (const tools of [["read", "commit_changes"], ["read", "bash"]]) {
+      const pi = mockPi(tools);
+      const ctx = ctxWithState(finalizingState());
 
-    const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
-    assert.doesNotMatch(text, /commit_changes/);
+      await runImplement("--solo", pi, ctx);
+
+      const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
+      assert.match(text, /git add --/, `staging instruction present for tools: ${tools.join(",")}`);
+      assert.doesNotMatch(text, /commit_changes/, `no commit_changes instruction for tools: ${tools.join(",")}`);
+    }
   });
 });
 
