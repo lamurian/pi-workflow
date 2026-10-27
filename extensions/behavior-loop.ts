@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError } from "./unit-progress.ts";
-import { buildCrossOwnershipHaltText } from "./halt-diagnosis.ts";
+import { crossOwnershipHalt } from "./cross-ownership.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
@@ -272,8 +272,8 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms (PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the project's pre-commit hooks.`);
     }
 
-    if (commit.outcome.kind === "hook-rejected") { // T4: the hook names another task's path — the unit cannot fix a file it does not own: halt now, no fix-forward round, no retry charge.
-      const crossBlock = buildCrossOwnershipHaltText(commit.outcome.investigation + "\n" + commit.outcome.hookOutput, state.contractV2, behavior.id);
+    if (commit.outcome.kind === "hook-rejected") { // T1: scan only the raw hook evidence (never the investigation), verify named foreign paths against the true index — a staged foreign path halts now, no fix-forward round, no retry charge.
+      const crossBlock = await crossOwnershipHalt(pi, cwd, commit.outcome.hookOutput, state.contractV2, behavior.id);
       if (crossBlock) return haltWithChild(behavior.id, crossBlock);
     }
 

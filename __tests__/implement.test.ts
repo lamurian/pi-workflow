@@ -3811,6 +3811,12 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     "extensions/other.ts:12:5: undefined: Probe\n" +
     "exit status 1";
 
+  /** Hook output naming a foreign task's path that is NOT in the true index (phantom). */
+  const PHANTOM_FOREIGN_HOOK =
+    "golangci-lint run failed\n" +
+    "extensions/other.ts:12:5: undefined: Probe\n" +
+    "exit status 1";
+
   /** Hook output naming only the unit's own path plus an undeclared path. */
   const OWN_ONLY_HOOK =
     "golangci-lint run failed\n" +
@@ -3856,19 +3862,25 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
   /**
    * Exec mock: a dirty tree whose baseline name-status lists only the unit's
    * own path; the pre-commit hook always rejects with `hookStderr` (HEAD never
-   * moves), so every commit attempt classifies as hook-rejected.
+   * moves), so every commit attempt classifies as hook-rejected. The staged
+   * index (`git diff --cached --name-only HEAD`) answers `stagedPaths`.
    *
    * @param hookStderr - Raw hook output of the failing git commit.
+   * @param stagedPaths - True-index paths (git diff --cached --name-only HEAD).
    * @returns The mock ExtensionAPI.
    */
-  function piWithHook(hookStderr: string) {
+  function piWithHook(hookStderr: string, stagedPaths = "src/a.ts\n") {
     const pi = mockPi();
     pi.exec = (async (cmd: string, args: string[]) => {
       const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
       if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
       if (cmd === "git" && args[0] === "status") return ok(" M src/a.ts\n");
+      if (cmd === "git" && args[0] === "add") return ok();
       if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
         return ok("M\tsrc/a.ts\n");
+      }
+      if (cmd === "git" && args[0] === "diff" && args.includes("--name-only")) {
+        return ok(stagedPaths);
       }
       if (cmd === "git" && args[0] === "commit") {
         return { stdout: "", stderr: hookStderr, code: 1, killed: false };
@@ -3878,8 +3890,8 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     return pi;
   }
 
-  it("crossOwnershipHaltsImmediately: a hook-rejected commit naming another task's path halts with no fix-forward round and no retry charge", async () => {
-    const pi = piWithHook(CROSS_OWNED_HOOK);
+  it("crossOwnershipHaltsImmediately: a hook-rejected commit naming another task's staged path halts with no fix-forward round and no retry charge", async () => {
+    const pi = piWithHook(CROSS_OWNED_HOOK, "src/a.ts\nextensions/other.ts\n");
     const state = ownershipState();
     const ctx = ctxWithState(state);
     const statuses: Array<[string, string | undefined]> = [];
@@ -3903,7 +3915,7 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
   });
 
   it("crossOwnershipHaltNamesPathOwnersFallback: the halt error names the blocking path, its owning task ids, and the manual fallback", async () => {
-    const pi = piWithHook(CROSS_OWNED_HOOK);
+    const pi = piWithHook(CROSS_OWNED_HOOK, "src/a.ts\nextensions/other.ts\n");
     const state = ownershipState();
     const ctx = ctxWithState(state);
 
@@ -3923,6 +3935,94 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
       "fallback: unstage/keep the path out of this unit's commit",
     );
     assert.match(state.lastHalt?.error ?? "", /extensions\/other\.ts/, "lastHalt persists the same error");
+  });
+
+  it("phantomForeignPathFallsThrough: a hook-named foreign path absent from the true index halts no cross-ownership — the ordinary hook-rejected halt carries its own diagnostics", async () => {
+    // extensions/other.ts is foreign-owned but NOT staged: the halt must fall
+    // through to the ordinary hook-rejected path with its investigation.
+    const pi = piWithHook(PHANTOM_FOREIGN_HOOK, "src/a.ts\n");
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 6, "initial + 5 budgeted retries — the phantom never blocks");
+    assert.equal(result.complete, false);
+    assert.match(
+      result.error ?? "",
+      /pre-commit hook rejected the commit for T1 after 5 retries/,
+      "the ordinary hook-rejected halt",
+    );
+    assert.match(result.error ?? "", /golangci-lint run failed/, "the halt carries the hook diagnostics");
+    assert.doesNotMatch(result.error ?? "", /Cross-ownership/, "a phantom foreign path raises no cross-ownership halt");
+  });
+
+  it("investigationOnlyForeignPathKeepsFixForward: a foreign path in the investigation text (not the hook output) raises no cross-ownership halt", async () => {
+    // The hook output names no foreign path; the investigation text embeds
+    // git status / diff --stat which may mention foreign paths — scanning only
+    // the raw hook evidence means the ordinary fix-forward path proceeds.
+    const INNOCENT_HOOK = "golangci-lint run failed\nundefined: Probe\nexit status 1";
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
+      // The tree state/diff --stat embed the foreign path in the investigation text.
+      if (cmd === "git" && args[0] === "status") return ok(" M src/a.ts\n M extensions/other.ts\n");
+      if (cmd === "git" && args[0] === "add") return ok();
+      if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
+        return ok("M\tsrc/a.ts\n");
+      }
+      if (cmd === "git" && args[0] === "diff" && args.includes("--name-only")) {
+        return ok("src/a.ts\nextensions/other.ts\n");
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        return { stdout: "", stderr: INNOCENT_HOOK, code: 1, killed: false };
+      }
+      return ok();
+    }) as ExtensionAPI["exec"];
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `attempt ${spawns.length}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(spawns.length, 6, "initial + 5 budgeted fix rounds — ordinary fix-forward path");
+    assert.match(
+      result.error ?? "",
+      /pre-commit hook rejected the commit for T1 after 5 retries/,
+      "the ordinary budget-exhaustion halt",
+    );
+    assert.doesNotMatch(result.error ?? "", /Cross-ownership/, "investigation-only foreign paths never block");
+  });
+
+  it("haltAdvisesLocalHookWhenNamedPathCommittedOrClean: the halt text advises running the hook locally for a named declared path absent from the index", async () => {
+    // The hook names the staged foreign path (blocking) AND a declared path
+    // that is already committed/clean — the halt then advises a local hook run.
+    const HOOK_WITH_CLEAN_PATH =
+      "golangci-lint run failed\n" +
+      "extensions/other.ts:12:5: undefined: Probe\n" +
+      "__tests__/a.test.ts:3:1: formatting\n" +
+      "exit status 1";
+    const pi = piWithHook(HOOK_WITH_CLEAN_PATH, "src/a.ts\nextensions/other.ts\n");
+    const state = ownershipState();
+    const ctx = ctxWithState(state);
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async () => ({
+      summary: "implemented T1",
+      suggestedCommit: "feat(core): add first behavior",
+    }));
+
+    const error = result.error ?? "";
+    assert.match(error, /extensions\/other\.ts/, "the blocking path is named");
+    assert.match(error, /__tests__\/a\.test\.ts/, "the committed/clean named path is named");
+    assert.match(error, /run the hook locally/i, "advises running the hook locally");
   });
 
   it("ownOrUndeclaredHookPathsKeepFixForward: a hook rejection naming only the unit's own or undeclared paths takes the normal fix-forward path", async () => {
@@ -3951,9 +4051,9 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     assert.equal(state.task!.behaviors[0]!.status, "active");
   });
 
-  it("diagnosisHelperIsPure: extractRepoPaths + findCrossOwnershipBlock match the contract ownership refs without I/O", async () => {
+  it("crossOwnershipHelpersArePure: extractRepoPaths + findCrossOwnershipBlock verify hook evidence against the true index without I/O", async () => {
     const { extractRepoPaths, findCrossOwnershipBlock, buildCrossOwnershipHaltText } = await import(
-      "../extensions/halt-diagnosis.ts"
+      "../extensions/cross-ownership.ts"
     );
     const contract = ownershipState().contractV2!;
 
@@ -3965,27 +4065,36 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     assert.ok(paths.includes("pkg/x/y.go"), "a ./-prefixed path is normalized");
     assert.ok(paths.includes("some/undeclared/file.go"), "an undeclared path is still extracted");
 
+    const staged = ["src/a.ts", "extensions/other.ts"];
     const block = findCrossOwnershipBlock(
       "lint failed:\nextensions/other.ts:12:5: undefined: Probe",
       contract,
       "T1",
+      staged,
     );
-    assert.deepEqual(block, { path: "extensions/other.ts", owners: ["T7", "T2"] }, "cross-owned path blocks with its owners");
+    assert.deepEqual(block, { path: "extensions/other.ts", owners: ["T7", "T2"] }, "staged cross-owned path blocks with its owners");
     assert.equal(
-      findCrossOwnershipBlock("lint failed: src/a.ts:10", contract, "T1"),
+      findCrossOwnershipBlock("lint failed: src/a.ts:10", contract, "T1", staged),
       undefined,
       "the unit's own path never blocks",
     );
     assert.equal(
-      findCrossOwnershipBlock("lint failed: some/undeclared/file.go", contract, "T1"),
+      findCrossOwnershipBlock("lint failed: some/undeclared/file.go", contract, "T1", staged),
       undefined,
       "an undeclared path never blocks",
     );
-    assert.equal(findCrossOwnershipBlock("x extensions/other.ts", undefined, "T1"), undefined, "v1 sessions (no contract) never block");
+    assert.equal(
+      findCrossOwnershipBlock("lint failed: extensions/other.ts:12", contract, "T1", ["src/a.ts"]),
+      undefined,
+      "a foreign path absent from the true index (phantom) never blocks",
+    );
+    assert.equal(findCrossOwnershipBlock("x extensions/other.ts", undefined, "T1", staged), undefined, "v1 sessions (no contract) never block");
 
-    const text = buildCrossOwnershipHaltText("extensions/other.ts:12:5: bad", contract, "T1");
+    const text = buildCrossOwnershipHaltText("extensions/other.ts:12:5: bad", contract, "T1", staged);
     assert.match(text ?? "", /extensions\/other\.ts/, "the built error names the path");
     assert.match(text ?? "", /T7, T2/, "the built error names every owning task id");
-    assert.equal(buildCrossOwnershipHaltText("src/a.ts:10:1: bad", contract, "T1"), undefined, "no block → no error");
+    assert.match(text ?? "", /fix the file for the owning task/i, "fallback: fix for the owning task");
+    assert.match(text ?? "", /unstage\/keep it out of this unit's commit/i, "fallback: unstage/keep out of this commit");
+    assert.equal(buildCrossOwnershipHaltText("src/a.ts:10:1: bad", contract, "T1", staged), undefined, "no block → no error");
   });
 });
