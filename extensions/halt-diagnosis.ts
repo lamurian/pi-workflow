@@ -11,7 +11,8 @@ import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "
  *
  * Precedence starts with the undelivered-steer marker (T3): a fix round the
  * kept-alive child never picked up is a "transport" outcome ahead of every
- * other check. Then it matches the loop's partial path: timeout, then
+ * other check. The model-error outcome (B2, a provider-rejected model) is
+ * classified next, then the loop's partial path: timeout, then
  * missing-report, unit error, and a "partial" report status; a usable
  * report that reaches the commit gate is "ok" until its verdict seals it.
  *
@@ -20,6 +21,7 @@ import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "
  */
 export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
   if (attempt.undeliveredSteer) return "transport";
+  if (attempt.modelError) return "model-error";
   if (attempt.timedOut) return "timeout";
   if (attempt.missingReport) return "missing-report";
   if (attempt.error) return "unit-error";

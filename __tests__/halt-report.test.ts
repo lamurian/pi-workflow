@@ -222,6 +222,37 @@ describe("halt-report: pure rendering", () => {
   });
 });
 
+// ═══ T3: model-error outcome for provider-rejected runs ═══
+describe("halt-report: model-error outcomes (T3)", () => {
+  it("classifyAttemptOutcome returns model-error after transport and before timeout and unit-error", () => {
+    assert.equal(classifyAttemptOutcome({ modelError: true }), "model-error");
+    assert.equal(
+      classifyAttemptOutcome({ modelError: true, undeliveredSteer: true, error: "boom" }),
+      "transport",
+      "the transport marker still outranks the model error",
+    );
+    assert.equal(
+      classifyAttemptOutcome({ modelError: true, timedOut: true }),
+      "model-error",
+      "model-error is classified before the timeout check",
+    );
+    assert.equal(
+      classifyAttemptOutcome({ modelError: true, error: "boom" }),
+      "model-error",
+      "model-error is classified before the unit-error check",
+    );
+    assert.equal(
+      classifyAttemptOutcome({ modelError: true, missingReport: true }),
+      "model-error",
+      "model-error is classified before the missing-report check",
+    );
+    // Marker-free attempts keep their previous outcomes byte-for-byte.
+    assert.equal(classifyAttemptOutcome({ timedOut: true }), "timeout");
+    assert.equal(classifyAttemptOutcome({ error: "boom" }), "unit-error");
+    assert.equal(classifyAttemptOutcome({ status: "complete" }), "ok");
+  });
+});
+
 // ─── composeHaltReport wrapper ────────────────────────────────────────────────
 
 describe("halt-report: composeHaltReport wrapper", () => {

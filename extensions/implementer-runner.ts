@@ -1,5 +1,5 @@
 import { getImplementerTimeoutMs } from "./process-utils.ts";
-import { lastAssistantText, parseImplementerReport, type ImplementerReport } from "./implementer-report.ts";
+import { lastAssistantText, parseImplementerReport, shouldAbortDeadRun, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
@@ -101,7 +101,7 @@ export function hasParseableReport(text: string): boolean {
  * @param modelRef     - Optional canonical `provider/id` model reference passed
  *                       to the child as `--model <ref>`; omitted when absent.
  * @returns Parsed report, plus `client` when kept alive and
- *          `error`/`timedOut`/`missingReport` on failure.
+ *          `error`/`timedOut`/`missingReport`/`modelError` on failure.
  */
 export async function runImplementerUnit(
   systemPrompt: string,
@@ -113,7 +113,7 @@ export async function runImplementerUnit(
   keepAlive = false,
   env?: Record<string, string>,
   modelRef?: string,
-): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
   const client = spawnRpcUnitClient({
@@ -146,18 +146,22 @@ export async function runImplementerUnit(
  * @param taskText - The behavior slice for this unit.
  * @param options  - Timeout, abort signal, event sink, keep-alive flag.
  * @returns Parsed report, plus `client` when kept alive and
- *          `error`/`timedOut`/`missingReport` on failure.
+ *          `error`/`timedOut`/`missingReport`/`modelError` on failure.
  */
 export async function runImplementerUnitWithClient(
   client: RpcUnitClient,
   taskText: string,
   options: UnitRunnerOptions = {},
-): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
   const { timeoutMs = getImplementerTimeoutMs(), signal, onEvent, keepAlive = false } = options;
 
   let timedOut = false;
   let reportSeen = false;
   let exitCode = 0;
+  // T3: activity flags for the fail-fast dead-run decision (B2).
+  let toolActivitySeen = false;
+  let assistantText = "";
+  let deadRun: { message?: string } | undefined; // fail-fast abort; provider message when known
 
   let settleWait: () => void = () => {};
   const waitDone = new Promise<void>((resolve) => {
@@ -174,6 +178,25 @@ export async function runImplementerUnitWithClient(
   const unsubEvents = client.onEvent((event) => {
     onEvent?.(event);
     checkReport();
+    // T3: track this attempt's work, then let the pure helper decide the abort.
+    if (String(event.type).startsWith("tool_")) toolActivitySeen = true;
+    if (event.type === "message_end") {
+      const message = event.message as
+        | { role?: string; content?: Array<{ type?: string; text?: unknown }> }
+        | undefined;
+      if (message?.role === "assistant" && Array.isArray(message.content)) {
+        if (message.content.some((block) => block.type === "toolCall")) toolActivitySeen = true;
+        const parts = message.content
+          .map((block) => block.text)
+          .filter((text): text is string => typeof text === "string" && text.trim() !== "");
+        if (parts.length > 0) assistantText = parts.join("\n").trim();
+      }
+    }
+    const decision = shouldAbortDeadRun(event, { reportSeen, toolActivitySeen, assistantText });
+    if (decision.abort) {
+      deadRun = { message: decision.providerMessage };
+      settleWait();
+    }
   });
   const unsubExit = client.onExit((info) => {
     exitCode = info.code;
@@ -224,6 +247,14 @@ export async function runImplementerUnitWithClient(
   const stdout = client.rawStdout();
   const stderr = client.stderrText();
   const report = parseImplementerReport(stdout);
+  // T3/B2: fail fast — the provider rejected the model; the wall clock would only burn the budget.
+  if (deadRun) {
+    await releaseIfKept();
+    const detail = deadRun.message
+      ? `unit produced no report and no tool activity — the provider rejected the model:\n${deadRun.message}`
+      : "unit ended at agent_end (willRetry=false) having produced no report, no tool activity and no assistant output";
+    return { ...report, error: detail, modelError: true };
+  }
   if (timedOut) {
     await releaseIfKept();
     const assistant = lastAssistantText(stdout);

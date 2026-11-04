@@ -161,6 +161,47 @@ export function lastAssistantText(stdout: string): string {
   return last;
 }
 
+/** Provider-error markers: the provider rejected the requested model (B2/B3). */
+export const PROVIDER_ERROR_RE = /deprecated|ModelDeprecated|HTTP\s*410/i;
+
+/**
+ * Decide whether a settled `agent_end` event must abort the attempt (B2): a
+ * run that ends with `willRetry: false` having produced no report, no tool
+ * activity and no usable assistant text is a dead run — the provider
+ * rejected the model, so waiting out the wall clock only burns the budget.
+ * Runs with tool activity, a report, or plain non-marker prose never abort —
+ * the wrap-up steer keeps recovering those.
+ *
+ * @param event    - The stdout event; only `agent_end` with `willRetry: false` decides.
+ * @param activity - Per-attempt flags: report seen, tool activity seen, assistant text.
+ * @returns `abort` plus the provider message extracted from the event messages.
+ */
+export function shouldAbortDeadRun(
+  event: Record<string, unknown>,
+  activity: { reportSeen: boolean; toolActivitySeen: boolean; assistantText: string },
+): { abort: boolean; providerMessage?: string } {
+  if (event.type !== "agent_end" || event.willRetry !== false) return { abort: false };
+  if (activity.reportSeen || activity.toolActivitySeen) return { abort: false };
+  const text = agentEndText(event) || activity.assistantText.trim();
+  if (!text) return { abort: true };
+  if (!PROVIDER_ERROR_RE.test(text)) return { abort: false };
+  return { abort: true, providerMessage: text };
+}
+
+/** Text blocks of the last message carrying text in an `agent_end` event. */
+function agentEndText(event: Record<string, unknown>): string {
+  const messages = Array.isArray(event.messages) ? event.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const content = (messages[i] as { content?: unknown } | null)?.content;
+    if (!Array.isArray(content)) continue;
+    const parts = content
+      .map((block) => (block as { text?: unknown }).text)
+      .filter((text): text is string => typeof text === "string" && text.trim() !== "");
+    if (parts.length > 0) return parts.join("\n").trim();
+  }
+  return "";
+}
+
 /**
  * Validate a raw `blockedCommands` value into BlockedCommand entries.
  *

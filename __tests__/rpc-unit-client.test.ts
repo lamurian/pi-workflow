@@ -356,12 +356,21 @@ function stubClient() {
     isAlive: () => alive,
     /** Emit a final assistant message containing `text` (e.g. a report block). */
     emitAssistant(text: string) {
-      raw +=
-        JSON.stringify({
-          type: "message_end",
-          message: { role: "assistant", content: [{ type: "text", text }] },
-        }) + "\n";
-      for (const listener of eventListeners) listener({ type: "message_end" });
+      const message = { role: "assistant", content: [{ type: "text", text }] };
+      raw += JSON.stringify({ type: "message_end", message }) + "\n";
+      for (const listener of eventListeners) listener({ type: "message_end", message });
+    },
+    /** Emit a settled `agent_end` event; `messages` ride the event payload. */
+    emitAgentEnd(willRetry: boolean, messages: unknown[] = []) {
+      const event = { type: "agent_end", willRetry, messages };
+      raw += JSON.stringify(event) + "\n";
+      for (const listener of eventListeners) listener(event);
+    },
+    /** Emit a tool-activity event (counts as work done by the run). */
+    emitTool() {
+      const event = { type: "tool_execution_start" };
+      raw += JSON.stringify(event) + "\n";
+      for (const listener of eventListeners) listener(event);
     },
   };
 }
@@ -416,6 +425,126 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     assert.equal(res.timedOut, true, "an abort takes the kill path");
     await vi.advanceTimersByTimeAsync(2_000);
     assert.equal(client.steers.length, 0, "the soft timer must not steer after abort");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T3 — fail fast when a settled run produced nothing (provider model rejection)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runImplementerUnit fail-fast on a dead run (T3)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  const PROVIDER_MESSAGE =
+    "Model mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead.";
+  const REPORT = 'done.\n```json\n{"summary": "ok"}\n```';
+
+  it("aborts promptly on agent_end(willRetry:false) with no report, tools or assistant text", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAgentEnd(false, [
+      { role: "assistant", content: [{ type: "text", text: PROVIDER_MESSAGE }] },
+    ]);
+
+    // Green: the run settles on the event and the wall clock is cleared, so
+    // advancing the full budget changes nothing. Red: only the hard kill settles it.
+    const settled = promise.then((r) => r);
+    await vi.advanceTimersByTimeAsync(900_000);
+    const res = await settled;
+
+    assert.equal(res.modelError, true, "the attempt must carry the modelError flag");
+    assert.match(
+      res.error ?? "",
+      /has been deprecated\. Use mimo-v2\.6-flash instead\./,
+      "the error carries the provider message extracted from the agent_end messages",
+    );
+    assert.equal(res.timedOut, undefined, "a fail-fast abort is not a timeout");
+    assert.equal(res.missingReport, undefined, "a fail-fast abort is not a missing report");
+    assert.equal(client.steers.length, 0, "no wrap-up steer before the abort");
+  });
+
+  it("aborts when the run produced only assistant text matching the provider-error markers", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAssistant(PROVIDER_MESSAGE);
+    client.emitAgentEnd(false, []);
+
+    const settled = promise.then((r) => r);
+    await vi.advanceTimersByTimeAsync(900_000);
+    const res = await settled;
+
+    assert.equal(res.modelError, true, "marker-only assistant text must abort");
+    assert.match(res.error ?? "", /has been deprecated/);
+    assert.equal(res.timedOut, undefined, "not a timeout");
+    assert.equal(res.missingReport, undefined, "not a missing report");
+  });
+
+  it("does not abort after tool activity — the wrap-up steer recovery keeps working", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    let res: Awaited<ReturnType<typeof runImplementerUnitWithClient>> | undefined;
+    void runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 }).then((r) => {
+      res = r;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitTool();
+    client.emitAgentEnd(false, []);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(res, undefined, "tool activity keeps the attempt alive");
+
+    client.emitAssistant(REPORT);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.ok(res, "the run must still settle on its report");
+    assert.equal(res.modelError, undefined, "a working run is never flagged modelError");
+    assert.equal(res.summary, "ok");
+  });
+
+  it("does not abort after a parsed report", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAssistant(REPORT);
+    client.emitAgentEnd(false, []);
+
+    const res = await promise;
+    assert.equal(res.modelError, undefined, "a report-seen run is never a model error");
+    assert.equal(res.summary, "ok");
+    assert.equal(res.timedOut, undefined);
+  });
+
+  it("does not abort on plain non-marker prose", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    let res: Awaited<ReturnType<typeof runImplementerUnitWithClient>> | undefined;
+    void runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 }).then((r) => {
+      res = r;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAssistant("I will read the module before changing anything.");
+    client.emitAgentEnd(false, []);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.equal(res, undefined, "plain prose must not abort the attempt");
+
+    client.emitAssistant(REPORT);
+    await vi.advanceTimersByTimeAsync(0);
+    assert.ok(res, "the run must still settle on its report");
+    assert.equal(res.modelError, undefined, "prose runs are never model errors");
+    assert.equal(res.summary, "ok");
   });
 });
 

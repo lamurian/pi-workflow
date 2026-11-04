@@ -28,6 +28,7 @@ export type AttemptOutcome =
   | "partial"
   | "missing-report"
   | "unit-error"
+  | "model-error"
   | "transport"
   | "hook-rejected"
   | "no-changes"
@@ -64,6 +65,8 @@ export interface AttemptLike {
   error?: string;
   /** True when a warm fix round was never picked up by the kept-alive child (T3). */
   undeliveredSteer?: boolean;
+  /** True when the attempt was aborted because the provider rejected the model (B2). */
+  modelError?: boolean;
 }
 
 /** Diagnosis plus recommended next action for a halted orchestration. */
