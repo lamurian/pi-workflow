@@ -72,6 +72,35 @@ export async function readTreeState(
 }
 
 /**
+ * Read the changed paths with untracked files expanded individually.
+ *
+ * Runs `git status --short --untracked-files=all` so a file inside a
+ * brand-new directory appears as its own path — plain `git status --short`
+ * collapses such a directory to a single `dir/` entry, which never matches
+ * a declared file path (the empty-index commit bug). Best-effort: returns
+ * [] when git fails.
+ *
+ * @param pi  - ExtensionAPI reference.
+ * @param cwd - Working directory.
+ * @returns Changed paths (one per status line, 2-char status stripped).
+ */
+export async function readChangedPaths(
+  pi: ExtensionAPI,
+  cwd: string,
+): Promise<string[]> {
+  try {
+    const res = await pi.exec("git", ["status", "--short", "--untracked-files=all"], { cwd });
+    if (res.code !== 0) return [];
+    return (res.stdout ?? "")
+      .split("\n")
+      .map((l) => l.slice(2).trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Read the working-tree fingerprint used for partial-attempt progress
  * detection (T6): `git status --short` + `git diff --stat`, joined by
  * computeTreeFingerprint. Best-effort: failed commands contribute empty

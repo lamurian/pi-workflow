@@ -8,7 +8,9 @@ import {
   filterOrchestratorOwned, ownerlessHalt, readGuardNameStatus,
   runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
-import { getCommitTimeoutMs, readDiffStat, readGitHead, readTreeState } from "./git-ops.ts";
+import {
+  getCommitTimeoutMs, readChangedPaths, readDiffStat, readGitHead, readTreeState,
+} from "./git-ops.ts";
 import type { SlopGateRunner } from "./slop-gate.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
@@ -125,10 +127,10 @@ export async function commitAndGate(
       });
       if (allowlist.violations.length > 0) return guardHalt(allowlist);
       // T3 A1: stage only owned paths (sources then tests) via `git add -- <paths>`;
-      // `git add --all` never runs in v2. Status keeps the add atomic (skip empty).
-      const changed = new Set(
-        (await readTreeState(pi, cwd)).split("\n").map((l) => l.slice(2).trim()).filter(Boolean),
-      );
+      // `git add --all` never runs in v2. The changed set comes from
+      // `git status --short --untracked-files=all` so files inside a brand-new
+      // directory match their declared paths (plain --short collapses the dir).
+      const changed = new Set(await readChangedPaths(pi, cwd));
       const ownedPaths = declared
         .filter((e) => e.refs?.includes(behavior.id))
         .map((e) => e.path)
