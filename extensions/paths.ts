@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import type { SlopConfig } from "./slop-config.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -99,6 +100,12 @@ export interface ImplementConfig {
    * @example [["npm", "run", "test:ci"]]
    */
   testCommands?: string[][];
+  /**
+   * Slop gate configuration.
+   * Partial values are accepted; missing or invalid fields fall back to
+   * defaults via `resolveSlopConfig`.
+   */
+  slop?: Partial<SlopConfig>;
 }
 
 /** Top-level workflow configuration from workflow.json. */
