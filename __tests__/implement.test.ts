@@ -22,7 +22,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, chmodSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -2285,6 +2285,105 @@ describe("T5: staged-diff guard halts the loop before commit", () => {
     const commitIdx = gitCommands.indexOf("commit");
     assert.ok(addIdx !== -1 && diffIdx !== -1 && commitIdx !== -1, "add, diff, commit all run");
     assert.ok(addIdx < diffIdx && diffIdx < commitIdx, "staged diff inspected between add and commit");
+  });
+});
+
+// ═══ T1: the default unit runner threads the session model into the child argv ═══
+describe("T1: session model reaches the spawned implementer unit", () => {
+  it("runOrchestratedImplement without an injected runner spawns the unit with --model <provider>/<id>", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-model-ref-"));
+    const argvFile = join(dir, "argv.txt");
+    const reportFile = join(dir, "report.jsonl");
+    const fake = join(dir, "fake-pi.sh");
+    const reportText =
+      'done.\n```json\n{"summary": "implemented", "suggestedCommit": "feat(x): done"}\n```';
+    writeFileSync(
+      reportFile,
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: reportText }] },
+      }) + "\n",
+    );
+    // Fake pi: record the argv it received, answer prompts with the report,
+    // exit on the graceful abort the runner sends after the report.
+    writeFileSync(
+      fake,
+      "#!/bin/sh\n" +
+        'printf "%s\\n" "$@" > "$PI_ARGV_FILE"\n' +
+        "while IFS= read -r line; do\n" +
+        "  case \"$line\" in\n" +
+        "    *'\"type\":\"prompt\"'*) cat \"$PI_REPORT_FILE\" ;;\n" +
+        "    *'\"type\":\"abort\"'*) exit 0 ;;\n" +
+        "  esac\n" +
+        "done\nexit 0\n",
+    );
+    chmodSync(fake, 0o755);
+
+    const state: WorkflowState = {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Model Ref Task",
+        instruction: "thread the session model",
+        files: [{ path: "src/a.ts", status: "M" }],
+        done: "all green",
+        behaviors: [
+          {
+            id: "T1",
+            description: "spawn with the session model",
+            expectedOutput: "e1",
+            kind: "test",
+            status: "active",
+          },
+        ],
+      },
+    };
+    const ctx = {
+      ...ctxWithState(state),
+      cwd: dir,
+      model: { provider: "opencode-go", id: "mimo-v2.6-flash" },
+    } as unknown as ExtensionContext;
+
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+
+    const prev = {
+      PI_BIN: process.env.PI_BIN,
+      PI_ARGV_FILE: process.env.PI_ARGV_FILE,
+      PI_REPORT_FILE: process.env.PI_REPORT_FILE,
+    };
+    process.env.PI_BIN = fake;
+    process.env.PI_ARGV_FILE = argvFile;
+    process.env.PI_REPORT_FILE = reportFile;
+    try {
+      const result = await runOrchestratedImplement(pi, ctx, state, state.task!);
+      assert.equal(result.complete, true, `default-runner run must complete (error: ${result.error})`);
+    } finally {
+      for (const key of ["PI_BIN", "PI_ARGV_FILE", "PI_REPORT_FILE"] as const) {
+        if (prev[key] === undefined) delete process.env[key];
+        else process.env[key] = prev[key];
+      }
+    }
+
+    const argv = readFileSync(argvFile, "utf8").split("\n");
+    const idx = argv.indexOf("--model");
+    assert.notEqual(idx, -1, "the spawned unit must receive --model");
+    assert.equal(
+      argv[idx + 1],
+      "opencode-go/mimo-v2.6-flash",
+      "the ref is the session model as provider/id",
+    );
+    assert.ok(!argv.includes("--provider"), "a single provider/id reference suffices");
   });
 });
 

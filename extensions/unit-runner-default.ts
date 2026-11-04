@@ -21,15 +21,18 @@ import { loadUnitPrompt } from "./unit-task-text.ts";
  * (`unit { id, sources, tests, packages, testSuites }`); v1 sessions keep
  * the plain `files` payload.
  *
- * @param pi    - ExtensionAPI (used for the baseline `git ls-tree` query).
- * @param state - Current workflow state (supplies baselineHead, contractV2).
- * @param task  - The task contract (supplies the declared files).
+ * @param pi      - ExtensionAPI (used for the baseline `git ls-tree` query).
+ * @param state   - Current workflow state (supplies baselineHead, contractV2).
+ * @param task    - The task contract (supplies the declared files).
+ * @param modelRef - Optional canonical `provider/id` session-model reference
+ *                  passed to the child as `--model <ref>` (formatModelRef).
  * @returns A UnitRunner that writes the payload file, then spawns the unit.
  */
 export function createDefaultUnitRunner(
   pi: ExtensionAPI,
   state: WorkflowState,
   task: TaskContract,
+  modelRef?: string,
 ): UnitRunner {
   return async (unit, cwd, signal, onEvent) => {
     // T5: v2 sessions write the derived allowlist + the unit's slice; the
@@ -54,6 +57,7 @@ export function createDefaultUnitRunner(
         // Legacy read-fallback for one release (T5).
         PI_CONTRACT_GUARD_FILE: guardPath,
       },
+      modelRef,
     );
   };
 }

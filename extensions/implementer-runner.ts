@@ -98,6 +98,8 @@ export function hasParseableReport(text: string): boolean {
  *                       failures always shut the child down.
  * @param env          - Extra environment for the child (e.g.
  *                       PI_CONTRACT_GUARD_FILE), merged over process.env.
+ * @param modelRef     - Optional canonical `provider/id` model reference passed
+ *                       to the child as `--model <ref>`; omitted when absent.
  * @returns Parsed report, plus `client` when kept alive and
  *          `error`/`timedOut`/`missingReport` on failure.
  */
@@ -110,6 +112,7 @@ export async function runImplementerUnit(
   onEvent?: (event: Record<string, unknown>) => void,
   keepAlive = false,
   env?: Record<string, string>,
+  modelRef?: string,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; client?: RpcUnitClient }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
@@ -118,6 +121,7 @@ export async function runImplementerUnit(
     cwd,
     env,
     testExtPath: resolveTestExtensionPath(cwd),
+    modelRef,
   });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });

@@ -159,6 +159,53 @@ describe("spawnRpcUnitClient", () => {
     });
   });
 
+  it("starts the child with --model <provider>/<id> when a model ref is given", async () => {
+    // Fake prints each received argv token on its own line, then blocks on stdin.
+    const fake = fakePi(
+      'printf "ARG:%s\\n" "$@" >&2\nwhile IFS= read -r line; do :; done\n',
+    );
+    const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
+    await withPiBin(fake, async () => {
+      const client = spawnRpcUnitClient({
+        systemPrompt: "sys",
+        cwd: "/tmp",
+        modelRef: "opencode-go/mimo-v2.6-flash",
+      });
+      try {
+        assert.ok(
+          await waitFor(() => /ARG:--model/.test(client.stderrText())),
+          "the child must receive --model",
+        );
+        assert.match(
+          client.stderrText(),
+          /ARG:--model\nARG:opencode-go\/mimo-v2\.6-flash/,
+          "--model is immediately followed by the provider/id ref",
+        );
+      } finally {
+        await client.shutdown(200);
+      }
+    });
+  });
+
+  it("omits --model from the child argv when no model ref is given", async () => {
+    const fake = fakePi(
+      'printf "ARG:%s\\n" "$@" >&2\nwhile IFS= read -r line; do :; done\n',
+    );
+    const { spawnRpcUnitClient } = await import("../extensions/rpc-unit-client.ts");
+    await withPiBin(fake, async () => {
+      const client = spawnRpcUnitClient({ systemPrompt: "sys", cwd: "/tmp" });
+      try {
+        assert.ok(
+          await waitFor(() => /ARG:--no-session/.test(client.stderrText())),
+          "the child must receive the lean flag set",
+        );
+        assert.doesNotMatch(client.stderrText(), /ARG:--model/, "no --model without a model ref");
+      } finally {
+        await client.shutdown(200);
+      }
+    });
+  });
+
   it("shutdown falls back to SIGKILL when the child ignores abort", async () => {
     // Ignores abort, exits its read loop at EOF, then lingers in exec'd sleep.
     const fake = fakePi(

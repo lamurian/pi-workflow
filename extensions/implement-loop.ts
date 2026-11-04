@@ -13,6 +13,7 @@ import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
 import { buildEngineerNoteSection } from "./unit-task-text.ts";
 import { createDefaultUnitRunner } from "./unit-runner-default.ts";
+import { formatModelRef } from "./process-utils.ts";
 import { createHalt } from "./orchestrator-halt.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
 
@@ -83,7 +84,8 @@ export interface OrchestratorResult {
  * @param state        - Current workflow state (mutated in place).
  * @param task         - The task contract.
  * @param runUnit      - Injectable unit runner (defaults to createDefaultUnitRunner:
- *                       write the payload file, then spawn with PI_UNIT_FILE).
+ *                       write the payload file, then spawn with PI_UNIT_FILE and
+ *                       the session model as `--model <provider>/<id>`).
  * @param engineerNote - Optional engineer's note forwarded from /implement.
  * @returns Loop outcome including landed commits and halt details.
  */
@@ -92,7 +94,7 @@ export async function runOrchestratedImplement(
   ctx: ExtensionContext,
   state: WorkflowState,
   task: TaskContract,
-  runUnit: UnitRunner = createDefaultUnitRunner(pi, state, task),
+  runUnit: UnitRunner = createDefaultUnitRunner(pi, state, task, formatModelRef(ctx.model)),
   engineerNote?: string,
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;

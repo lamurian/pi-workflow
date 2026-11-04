@@ -47,6 +47,26 @@ export function createTimeoutSignal(
   return { signal: controller.signal, clear };
 }
 
+// ─── Model reference ───────────────────────────────────────────────────────────
+
+/**
+ * Format a session model as a canonical `provider/id` CLI reference.
+ *
+ * Spawned children (implementer units, scouts) receive this as `--model`
+ * so they run on the session's model instead of the settings default;
+ * pi resolves a canonical `provider/id` reference exactly, so no
+ * `--provider` flag is needed.
+ *
+ * @param model - The session model (provider + id), or absent.
+ * @returns `provider/id`, or undefined when no model is available.
+ */
+export function formatModelRef(
+  model: { provider: string; id: string } | null | undefined,
+): string | undefined {
+  if (!model?.provider || !model.id) return undefined;
+  return `${model.provider}/${model.id}`;
+}
+
 // ─── Subprocess invocation ────────────────────────────────────────────────────
 
 /**

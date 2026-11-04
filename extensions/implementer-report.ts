@@ -76,7 +76,9 @@ export function getImplementerTools(
  * Units are bash-free: the tools are restricted to the implementer
  * allowlist (default `read,write,edit,grep,find,ls,delete_file`) — no
  * shell, no commit, no workflow state; the orchestrator owns all three.
- * Does NOT pass --model so the subprocess uses the user's default model.
+ * A canonical `provider/id` model ref (formatModelRef) rides `--model` so
+ * the child runs on the session's model; without one no --model flag
+ * appears and the child uses the settings default model.
  *
  * @param systemPrompt - Literal unit prompt text (from content/unit-prompt.md).
  * @param testExtPath  - Optional absolute path of the generated test extension
@@ -85,11 +87,14 @@ export function getImplementerTools(
  *                       default tools (a `PI_IMPLEMENTER_TOOLS` override that
  *                       already lists `test` is not duplicated). Without it,
  *                       neither the flag nor the tool appears.
+ * @param modelRef     - Optional canonical `provider/id` model reference passed
+ *                       as `--model <ref>`; omitted when absent.
  * @returns Array of CLI arguments for the implementer subprocess.
  */
 export function buildImplementerArgs(
   systemPrompt: string,
   testExtPath?: string,
+  modelRef?: string,
 ): string[] {
   const tools = getImplementerTools();
   const granted =
@@ -111,6 +116,10 @@ export function buildImplementerArgs(
     "--thinking", "minimal",
     "--tools", granted,
   );
+  // Session model: one canonical provider/id reference resolves exactly.
+  if (modelRef) {
+    args.push("--model", modelRef);
+  }
   if (systemPrompt.trim()) {
     args.push("--append-system-prompt", systemPrompt);
   }

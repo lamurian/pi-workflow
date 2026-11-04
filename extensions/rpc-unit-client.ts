@@ -39,6 +39,9 @@ export interface RpcUnitClientOptions {
   /** Absolute path of the generated test extension, when present in the
    * project (resolved per spawn via resolveTestExtensionPath(cwd)). */
   testExtPath?: string;
+  /** Canonical `provider/id` model reference for the child (`--model <ref>`);
+   * omitted when absent so the child uses the settings default model. */
+  modelRef?: string;
 }
 
 /**
@@ -89,11 +92,12 @@ let commandSeq = 0;
  * incrementally as strict JSONL (LF-delimited). Never throws — spawn
  * failures surface through the exit event with the error in stderr text.
  *
- * @param options - System prompt, cwd, optional extra env for the child.
+ * @param options - System prompt, cwd, optional extra env for the child,
+ *                  optional model reference for `--model`.
  * @returns A live client handle for the child process.
  */
 export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient {
-  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath);
+  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath, options.modelRef);
   const invocation = getPiInvocation(args);
   const proc: ChildProcess = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,

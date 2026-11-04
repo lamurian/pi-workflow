@@ -353,6 +353,44 @@ describe("runScoutSubprocess integration (real pi)", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// T1 — session model threading: formatModelRef + implementer argv
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("formatModelRef", () => {
+  it("formats a session model as the canonical provider/id reference", async () => {
+    const { formatModelRef } = await import("../extensions/process-utils.ts");
+    assert.equal(
+      formatModelRef({ provider: "opencode-go", id: "mimo-v2.6-flash" }),
+      "opencode-go/mimo-v2.6-flash",
+    );
+  });
+
+  it("returns undefined for an absent model (callers then pass no --model)", async () => {
+    const { formatModelRef } = await import("../extensions/process-utils.ts");
+    assert.equal(formatModelRef(undefined), undefined);
+    assert.equal(formatModelRef(null), undefined);
+  });
+});
+
+describe("buildImplementerArgs model threading (T1)", () => {
+  const SYSTEM = "You are an implementation unit.";
+
+  it("passes --model immediately followed by the provider/id ref when a model ref is given", async () => {
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+    const args = buildImplementerArgs(SYSTEM, undefined, "opencode-go/mimo-v2.6-flash");
+    const idx = args.indexOf("--model");
+    assert.notEqual(idx, -1, "--model must be present when a model ref is given");
+    assert.equal(args[idx + 1], "opencode-go/mimo-v2.6-flash", "the ref follows the flag");
+  });
+
+  it("contains no --model token when no model ref is given", async () => {
+    const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+    const args = buildImplementerArgs(SYSTEM);
+    assert.ok(!args.includes("--model"), "an absent model must not add --model");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // T5 — implementer subprocess argv builder and report parser
 // ═══════════════════════════════════════════════════════════════════════════════
 
