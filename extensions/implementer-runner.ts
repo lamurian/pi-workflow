@@ -1,5 +1,5 @@
 import { getImplementerTimeoutMs } from "./process-utils.ts";
-import { lastAssistantText, parseImplementerReport, shouldAbortDeadRun, type ImplementerReport } from "./implementer-report.ts";
+import { lastAssistantText, parseImplementerReport, shouldAbortDeadRun, buildDeadRunError, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
@@ -252,10 +252,7 @@ export async function runImplementerUnitWithClient(
   // T3/B2: fail fast — the provider rejected the model; the wall clock would only burn the budget.
   if (deadRun) {
     await releaseIfKept();
-    const detail = deadRun.message
-      ? `unit produced no report and no tool activity — the provider rejected the model:\n${deadRun.message}`
-      : "unit ended at agent_end (willRetry=false) having produced no report, no tool activity and no assistant output";
-    return { ...report, error: detail, modelError: true };
+    return { ...report, error: buildDeadRunError(deadRun.message, stderr, stdout), modelError: true };
   }
   if (timedOut) {
     await releaseIfKept();

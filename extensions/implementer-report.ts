@@ -94,9 +94,49 @@ export function shouldAbortDeadRun(
   if (event.type !== "agent_end" || event.willRetry !== false) return { abort: false };
   if (activity.reportSeen || activity.toolActivitySeen) return { abort: false };
   const text = agentEndText(event) || activity.assistantText.trim();
-  if (!text) return { abort: true };
-  if (!PROVIDER_ERROR_RE.test(text)) return { abort: false };
-  return { abort: true, providerMessage: text };
+  // The decision stays content-only (B3): plain prose never aborts, empty content does.
+  if (text && !PROVIDER_ERROR_RE.test(text)) return { abort: false };
+  // Evidence rides the error, not the decision: pi's failure shape puts the
+  // provider error in errorMessage with content: [], which the scan above never sees.
+  return { abort: true, providerMessage: agentEndErrorMessage(event) || text || undefined };
+}
+
+/** The last `errorMessage` carried by an `agent_end` message (pi's failure shape). */
+function agentEndErrorMessage(event: Record<string, unknown>): string | undefined {
+  const messages = Array.isArray(event.messages) ? event.messages : [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const error = (messages[i] as { errorMessage?: unknown } | null)?.errorMessage;
+    if (typeof error === "string" && error.trim()) return error.trim();
+  }
+  return undefined;
+}
+
+/**
+ * Assemble the dead-run error payload: the provider message first (the
+ * errorMessage when present, else the content text), then child stderr when
+ * non-empty, then a raw stdout tail capped at the same 400-character budget
+ * as the timeout path.
+ *
+ * @param providerMessage - errorMessage or content text from the settled run, if any.
+ * @param stderr          - Captured child stderr.
+ * @param stdout          - Raw JSONL stdout captured from the child.
+ * @returns The joined error detail for the attempt.
+ */
+export function buildDeadRunError(
+  providerMessage: string | undefined,
+  stderr: string,
+  stdout: string,
+): string {
+  const head = providerMessage
+    ? `unit produced no report and no tool activity — the provider rejected the model:\n${providerMessage}`
+    : "unit ended at agent_end (willRetry=false) having produced no report, no tool activity and no assistant output";
+  return [
+    head,
+    stderr.trim() ? `--- child stderr ---\n${stderr.trim()}` : "",
+    stdout.trim() ? `--- raw stdout tail ---\n${stdout.trim().slice(-400)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /** Text blocks of the last message carrying text in an `agent_end` event. */

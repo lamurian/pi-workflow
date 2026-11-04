@@ -316,7 +316,7 @@ describe("runImplementerUnit over the rpc transport", () => {
  * In-memory RpcUnitClient double for fake-timer tests: records steer
  * messages and lets the test emit assistant output on demand.
  */
-function stubClient() {
+function stubClient(stderr = "") {
   const eventListeners = new Set<(event: Record<string, unknown>) => void>();
   const exitListeners = new Set<(info: { code: number }) => void>();
   const steers: string[] = [];
@@ -352,7 +352,7 @@ function stubClient() {
       return () => exitListeners.delete(listener);
     },
     rawStdout: () => raw,
-    stderrText: () => "",
+    stderrText: () => stderr,
     isAlive: () => alive,
     /** Emit a final assistant message containing `text` (e.g. a report block). */
     emitAssistant(text: string) {
@@ -545,6 +545,99 @@ describe("runImplementerUnit fail-fast on a dead run (T3)", () => {
     assert.ok(res, "the run must still settle on its report");
     assert.equal(res.modelError, undefined, "prose runs are never model errors");
     assert.equal(res.summary, "ok");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// B3 — dead-run errors carry failure evidence (errorMessage, stderr, stdout tail)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runImplementerUnit dead-run error evidence (B3)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  // pi's failure shape: an assistant message with stopReason "error",
+  // empty content, and the provider error in errorMessage. Non-marker:
+  // PROVIDER_ERROR_RE (deprecated/ModelDeprecated/HTTP 410) does not match.
+  const UPSTREAM_ERROR =
+    '400: {"error":{"type":"server_error","message":"Upstream request failed: Upstream response was not valid JSON"}}';
+  const errorMessageMessages = (errorMessage: string) => [
+    { role: "assistant", content: [], stopReason: "error", errorMessage },
+  ];
+
+  it("the returned error contains the errorMessage from an empty-content agent_end message", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAgentEnd(false, errorMessageMessages(UPSTREAM_ERROR));
+    const res = await promise;
+
+    assert.equal(res.modelError, true, "the empty-content run still aborts");
+    assert.match(
+      res.error ?? "",
+      /Upstream request failed: Upstream response was not valid JSON/,
+      "the error carries the provider errorMessage verbatim",
+    );
+  });
+
+  it("the returned error includes the child's stderr when stderr is non-empty", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient("child stderr: gateway exploded");
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAgentEnd(false, errorMessageMessages(UPSTREAM_ERROR));
+    const res = await promise;
+
+    const error = res.error ?? "";
+    assert.match(error, /--- child stderr ---\nchild stderr: gateway exploded/);
+    assert.ok(
+      error.indexOf("Upstream request failed") < error.indexOf("child stderr: gateway exploded"),
+      "the provider message comes first, then child stderr",
+    );
+  });
+
+  it("the returned error appends a raw stdout tail capped at the timeout path's 400-character budget", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    const longError = "400: " + "y".repeat(600);
+    client.emitAgentEnd(false, errorMessageMessages(longError));
+    const res = await promise;
+
+    const marker = "--- raw stdout tail ---\n";
+    assert.ok((res.error ?? "").includes(marker), "the error carries a raw stdout tail section");
+    const tail = (res.error ?? "").split(marker)[1]!;
+    assert.ok(tail.length <= 400, `stdout tail is ${tail.length} chars (cap 400, same as the timeout path)`);
+    assert.ok(!tail.includes(longError), "the tail is a slice, not the full payload");
+  });
+
+  it("a non-marker errorMessage with no content, report or tools still aborts promptly with modelError", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 900_000 });
+    await vi.advanceTimersByTimeAsync(0);
+
+    client.emitAgentEnd(false, errorMessageMessages(UPSTREAM_ERROR));
+
+    // The abort decision stays content-only: empty content aborts even when
+    // the errorMessage carries no provider marker. If the run did not settle,
+    // advancing the full budget would kill it (timedOut: true).
+    const settled = promise.then((r) => r);
+    await vi.advanceTimersByTimeAsync(900_000);
+    const res = await settled;
+
+    assert.equal(res.modelError, true, "the run aborts without waiting for the wall clock");
+    assert.match(res.error ?? "", /Upstream request failed/, "the errorMessage rides the error");
+    assert.equal(res.timedOut, undefined, "the wall clock never fires");
+    assert.equal(res.missingReport, undefined, "not a missing report");
   });
 });
 
