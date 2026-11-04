@@ -45,15 +45,25 @@ const STAGE_PATTERNS: Array<{ stage: string; pattern: RegExp }> = [
   { stage: "test", pattern: /\b(go test|npm test|vitest|jest|pytest|cargo test|FAIL)\b/i },
 ];
 
+/** Commit output lines from git saying the index was empty (nothing staged). */
+const NOTHING_TO_COMMIT = /nothing added to commit|no changes added to commit|nothing to commit/i;
+
 /**
  * Attribute hook output to a failing stage (lint/format/test), best-effort.
+ * Lines containing `(skip)` are ignored — a skipped job never failed, and
+ * lefthook prints the job name in those lines (e.g. `gofmt (skip)`), which
+ * would otherwise misattribute the output to format.
  *
  * @param output - Captured commit/hook output.
  * @returns The matched stage name, or "unknown" when nothing matches.
  */
 export function detectFailingStage(output: string): string {
+  const active = output
+    .split("\n")
+    .filter((line) => !line.includes("(skip)"))
+    .join("\n");
   for (const { stage, pattern } of STAGE_PATTERNS) {
-    if (pattern.test(output)) return stage;
+    if (pattern.test(active)) return stage;
   }
   return "unknown";
 }
@@ -109,6 +119,19 @@ export function classifyCommit(behavior: Behavior, input: GateInput): GateOutcom
   }
   const dirty = input.statusAfter.trim().length > 0;
   if (dirty) {
+    // Empty-index failure: git itself refused because nothing was staged —
+    // no hook ever rejected the commit (untracked files make the tree look
+    // dirty, which used to misclassify this as hook-rejected and burn retries).
+    if (NOTHING_TO_COMMIT.test(input.commitOutput)) {
+      return {
+        kind: "no-changes",
+        investigation:
+          `No changes detected for ${behavior.id}: git found nothing to commit — ` +
+          "nothing was staged (empty index), so no hook ever ran against the change. " +
+          "git status shows only untracked or unstaged work on disk; stage the " +
+          "behavior's owned files (git add -- <path>) so they enter the index.",
+      };
+    }
     return {
       kind: "hook-rejected",
       investigation: buildInvestigation(behavior, input),
