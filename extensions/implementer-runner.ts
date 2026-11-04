@@ -15,6 +15,7 @@ export interface UnitTask {
   taskText: string;
   /** Behavior kind; manual units keep their child alive for the HITL pause. */
   kind?: "test" | "manual";
+  thinking?: string; // escalation floor for this spawn's --thinking; omitted on the first attempt
 }
 
 // ─── Unit runner ───────────────────────────────────────────────────────────────
@@ -98,8 +99,8 @@ export function hasParseableReport(text: string): boolean {
  *                       failures always shut the child down.
  * @param env          - Extra environment for the child (e.g.
  *                       PI_CONTRACT_GUARD_FILE), merged over process.env.
- * @param modelRef     - Optional canonical `provider/id` model reference passed
- *                       to the child as `--model <ref>`; omitted when absent.
+ * @param modelRef     - Optional canonical `provider/id` reference passed as `--model <ref>`.
+ * @param thinkingFloor - Optional `--thinking` escalation floor (max'd with the env base).
  * @returns Parsed report, plus `client` when kept alive and
  *          `error`/`timedOut`/`missingReport`/`modelError` on failure.
  */
@@ -113,6 +114,7 @@ export async function runImplementerUnit(
   keepAlive = false,
   env?: Record<string, string>,
   modelRef?: string,
+  thinkingFloor?: string,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
@@ -121,7 +123,7 @@ export async function runImplementerUnit(
     cwd,
     env,
     testExtPath: resolveTestExtensionPath(cwd),
-    modelRef,
+    modelRef, thinkingFloor,
   });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });

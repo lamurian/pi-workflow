@@ -428,6 +428,17 @@ describe("resolveChildThinking", () => {
       "low",
     );
   });
+
+  it("floors upward without downgrading the env base (T2)", async () => {
+    const { resolveChildThinking } = await import("../extensions/process-utils.ts");
+    assert.equal(resolveChildThinking("implementer", "medium", {}), "medium");
+    assert.equal(
+      resolveChildThinking("implementer", "medium", { PI_IMPLEMENTER_THINKING: "high" }),
+      "high",
+      "an env base above the floor must never be downgraded",
+    );
+    assert.equal(resolveChildThinking("implementer", undefined, {}), "low");
+  });
 });
 
 describe("buildImplementerArgs model threading (T1)", () => {
@@ -470,6 +481,17 @@ describe("buildImplementerArgs (rpc transport)", () => {
     const t = args.indexOf("--thinking");
     assert.notEqual(t, -1);
     assert.equal(args[t + 1], "low", "default implementer thinking level supersedes the old minimal pin");
+  });
+
+  it("emits an escalation floor as --thinking (T2)", async () => {
+    delete process.env.PI_IMPLEMENTER_THINKING;
+    const { buildImplementerArgs } = await import("../extensions/implementer-args.ts");
+    const medium = buildImplementerArgs(SYSTEM, undefined, undefined, "medium");
+    const mIdx = medium.indexOf("--thinking");
+    assert.equal(medium[mIdx + 1], "medium", "a medium floor emits --thinking medium");
+    const high = buildImplementerArgs(SYSTEM, undefined, undefined, "high");
+    const hIdx = high.indexOf("--thinking");
+    assert.equal(high[hIdx + 1], "high", "a high floor emits --thinking high");
   });
 
   it("honors PI_IMPLEMENTER_THINKING as the implementer thinking level", async () => {

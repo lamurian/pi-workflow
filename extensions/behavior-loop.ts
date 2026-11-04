@@ -90,14 +90,16 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   let retry = 1;
   let noProgressStreak = 0; // T7: consecutive timed-out/partial attempts that neither moved the tree fingerprint nor added findings; two in a row halt the behavior early.
 
-  /** Run one fresh follow-up attempt (continuation or retry) with the given task text. */
-  const runFollowUp = async (taskText: string) => {
+  /** Run one fresh follow-up attempt (continuation or retry) with the given task text.
+   * `thinking` is the retry escalation floor (medium/high); continuations pass none. */
+  const runFollowUp = async (taskText: string, thinking?: string) => {
     await shutdownWarmChild(liveChild); liveChild = undefined; // never leak a stale kept-alive child across fresh spawns
-    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind });
+    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind, ...(thinking ? { thinking } : {}) });
     liveChild = attempt.client; adoptRound(); result.unitsRun++;
   };
   const runRetry = async (taskText: string) => {
-    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText); retry++;
+    // T2: escalate thinking across retry spawns (fresh spawns only).
+    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText, retry === 1 ? "medium" : "high"); retry++;
   };
   /**
    * One fix-forward round: warm-steer the live test-kind child below the cap, else fresh-spawn.

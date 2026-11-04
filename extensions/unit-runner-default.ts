@@ -58,6 +58,7 @@ export function createDefaultUnitRunner(
         PI_CONTRACT_GUARD_FILE: guardPath,
       },
       modelRef,
+      unit.thinking,
     );
   };
 }

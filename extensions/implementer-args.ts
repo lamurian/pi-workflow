@@ -65,12 +65,15 @@ export function getImplementerTools(
  *                       neither the flag nor the tool appears.
  * @param modelRef     - Optional canonical `provider/id` model reference passed
  *                       as `--model <ref>`; omitted when absent.
+ * @param thinkingFloor - Optional escalation floor for `--thinking`; the
+ *                       effective level is max(env base, floor).
  * @returns Array of CLI arguments for the implementer subprocess.
  */
 export function buildImplementerArgs(
   systemPrompt: string,
   testExtPath?: string,
   modelRef?: string,
+  thinkingFloor?: string,
 ): string[] {
   const tools = getImplementerTools();
   const granted =
@@ -89,7 +92,7 @@ export function buildImplementerArgs(
   args.push(
     "--no-skills",
     "--offline",
-    "--thinking", resolveChildThinking("implementer"),
+    "--thinking", resolveChildThinking("implementer", thinkingFloor),
     "--tools", granted,
   );
   // Session model: one canonical provider/id reference resolves exactly.

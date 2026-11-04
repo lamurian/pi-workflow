@@ -42,6 +42,8 @@ export interface RpcUnitClientOptions {
   /** Canonical `provider/id` model reference for the child (`--model <ref>`);
    * omitted when absent so the child uses the settings default model. */
   modelRef?: string;
+  /** Escalation floor for the child's `--thinking` (max'd with the env base); omitted when absent. */
+  thinkingFloor?: string;
 }
 
 /**
@@ -97,7 +99,7 @@ let commandSeq = 0;
  * @returns A live client handle for the child process.
  */
 export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient {
-  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath, options.modelRef);
+  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath, options.modelRef, options.thinkingFloor);
   const invocation = getPiInvocation(args);
   const proc: ChildProcess = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,
