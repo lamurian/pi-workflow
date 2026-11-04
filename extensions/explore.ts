@@ -6,6 +6,7 @@ import {
   createLoader,
 } from "./explore-core.ts";
 import { synthesizeResults } from "./explore-synthesis.ts";
+import { formatModelRef } from "./process-utils.ts";
 
 // ─── /explore command registration ────────────────────────────────────────────
 
@@ -58,6 +59,7 @@ export function registerExploreCommand(pi: ExtensionAPI): void {
           setStatus(`✦ ${msg}`);
           loader.update(msg);
         },
+        formatModelRef(ctx.model),
       );
 
       const successCount = results.filter((r) => r.exitCode === 0).length;
@@ -130,6 +132,7 @@ export function registerExploreTool(pi: ExtensionAPI): void {
           const done = partial.filter((r) => r.exitCode >= 0).length;
           sendProgress(`✦ Scout progress: ${done}/${partial.length} complete`);
         },
+        formatModelRef(ctx.model),
       );
 
       // Phase 3: Synthesize

@@ -1,16 +1,67 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   parseFrontmatter,
   type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-// ── Test utilities ───────────────────────────────────────────────────────────
+// ── Test utilities ───────────────────────────────────────────────────────────────
 
 /** Resolve the package root from the test file location. */
 const PACKAGE_ROOT = resolve(import.meta.dirname!, "..");
+
+/**
+ * Write an executable fake pi that records the `--model` ref it received
+ * (one `MODEL=` line per spawn) and exits 0 without emitting messages.
+ *
+ * @param file - Path of the record file the fake appends to.
+ * @returns Absolute path of the fake pi script.
+ */
+function fakePiModelRecorder(file: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-scout-fake-"));
+  const fake = join(dir, "fake-pi.sh");
+  writeFileSync(
+    fake,
+    "#!/bin/sh\n" +
+      'prev=""\nmodel="none"\n' +
+      'for a in "$@"; do\n' +
+      '  if [ "$prev" = "--model" ]; then model="$a"; fi\n' +
+      '  prev="$a"\n' +
+      "done\n" +
+      'printf "MODEL=%s\\n" "$model" >> "$PI_ARGV_FILE"\n' +
+      "exit 0\n",
+  );
+  chmodSync(fake, 0o755);
+  return fake;
+}
+
+/**
+ * Run `fn` with PI_BIN pinned to the argv-recording fake and PI_ARGV_FILE
+ * set to `file` (truncated first); restores both env vars afterwards.
+ *
+ * @param file - Record file the fake appends one MODEL= line per spawn to.
+ * @param fn   - Work to run under the pinned env.
+ * @returns Whatever `fn` resolves to.
+ */
+async function withModelRecorder<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prevBin = process.env.PI_BIN;
+  const prevFile = process.env.PI_ARGV_FILE;
+  process.env.PI_BIN = fakePiModelRecorder(file);
+  process.env.PI_ARGV_FILE = file;
+  writeFileSync(file, "");
+  try {
+    return await fn();
+  } finally {
+    if (prevBin === undefined) delete process.env.PI_BIN;
+    else process.env.PI_BIN = prevBin;
+    if (prevFile === undefined) delete process.env.PI_ARGV_FILE;
+    else process.env.PI_ARGV_FILE = prevFile;
+  }
+}
 
 /** Create a mock ExtensionContext with configurable model availability. */
 function mockCtx(
@@ -185,6 +236,85 @@ describe("mapWithConcurrencyLimit", () => {
     const { mapWithConcurrencyLimit } = await import("../extensions/process-utils.ts");
     const results = await mapWithConcurrencyLimit([1, 2], 10, async (n) => n);
     assert.deepEqual(results, [1, 2]);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T2 — session model threading into scout spawns
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runScoutSubprocess model threading (T2)", () => {
+  it("starts the scout child with --model <provider>/<id> when a model ref is given", async () => {
+    const { runScoutSubprocess, discoverEmbeddedAgents } = await import(
+      "../extensions/scout-runner.ts"
+    );
+    const scout = discoverEmbeddedAgents(PACKAGE_ROOT).find((a) => a.name === "scout")!;
+    assert.ok(scout, "scout agent must be discovered");
+    const file = join(mkdtempSync(join(tmpdir(), "pi-model-ref-")), "argv.txt");
+
+    await withModelRecorder(file, async () => {
+      await runScoutSubprocess(
+        scout,
+        "find auth code",
+        "/tmp",
+        undefined,
+        undefined,
+        "anthropic/claude-sonnet-4-5",
+      );
+    });
+
+    assert.equal(
+      readFileSync(file, "utf8").trim(),
+      "MODEL=anthropic/claude-sonnet-4-5",
+      "the scout child must receive --model <provider>/<id>",
+    );
+  });
+
+  it("records no --model in the scout argv when no model ref is given", async () => {
+    const { runScoutSubprocess, discoverEmbeddedAgents } = await import(
+      "../extensions/scout-runner.ts"
+    );
+    const scout = discoverEmbeddedAgents(PACKAGE_ROOT).find((a) => a.name === "scout")!;
+    const file = join(mkdtempSync(join(tmpdir(), "pi-model-ref-")), "argv.txt");
+
+    await withModelRecorder(file, async () => {
+      await runScoutSubprocess(scout, "find auth code", "/tmp");
+    });
+
+    assert.equal(readFileSync(file, "utf8").trim(), "MODEL=none", "no --model without a model ref");
+  });
+});
+
+describe("runParallelExploration model threading (T2)", () => {
+  it("forwards the model ref so every spawned scout child carries --model in its argv", async () => {
+    const { runParallelExploration } = await import("../extensions/explore-core.ts");
+    const file = join(mkdtempSync(join(tmpdir(), "pi-model-ref-")), "argv.txt");
+
+    await withModelRecorder(file, async () => {
+      const results = await runParallelExploration(
+        [
+          { agent: "scout", task: "list files" },
+          { agent: "scout", task: "find config" },
+        ],
+        "/tmp",
+        undefined,
+        undefined,
+        "anthropic/claude-sonnet-4-5",
+      );
+      assert.equal(results.length, 2, "both tasks must return results");
+      assert.ok(
+        results.every((r) => r.exitCode === 0),
+        `both scouts must spawn successfully: ${JSON.stringify(results.map((r) => r.errorMessage))}`,
+      );
+    });
+
+    const lines = readFileSync(file, "utf8").trim().split("\n").filter(Boolean);
+    assert.equal(lines.length, 2, "both scout children must spawn");
+    assert.deepEqual(
+      lines,
+      ["MODEL=anthropic/claude-sonnet-4-5", "MODEL=anthropic/claude-sonnet-4-5"],
+      "every spawned scout carries the session model ref",
+    );
   });
 });
 

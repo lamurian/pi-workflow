@@ -91,13 +91,16 @@ export function discoverEmbeddedAgents(packageRoot: string): AgentConfig[] {
  * Build the argv array for the scout subprocess.
  *
  * Uses lean flags to skip extension/skill/context loading for fast startup.
- * Does NOT pass --model so the subprocess uses the user's default model.
+ * A canonical `provider/id` model ref (formatModelRef) rides `--model` so the
+ * scout runs on the session's model; without one no --model flag appears and
+ * the child uses the settings default.
  *
- * @param agent - Agent configuration (determines tools and system prompt).
- * @param task  - The exploration task to execute.
+ * @param agent    - Agent configuration (determines tools and system prompt).
+ * @param task     - The exploration task to execute.
+ * @param modelRef - Optional canonical `provider/id` reference for `--model <ref>`.
  * @returns Array of CLI arguments for the scout subprocess.
  */
-export function buildScoutArgs(agent: AgentConfig, task: string): string[] {
+export function buildScoutArgs(agent: AgentConfig, task: string, modelRef?: string): string[] {
   const args: string[] = [
     "--mode", "json", "-p", "--no-session",
     "--no-extensions", "--no-skills", "--no-context-files", "--offline",
@@ -106,8 +109,11 @@ export function buildScoutArgs(agent: AgentConfig, task: string): string[] {
     "--thinking", "minimal",
   ];
 
-  // Intentionally omit --model: use user's default model for speed and simplicity
-  // agent.model is ignored
+  // Session model: one canonical provider/id reference resolves exactly;
+  // agent.model (frontmatter) stays ignored.
+  if (modelRef) {
+    args.push("--model", modelRef);
+  }
 
   if (agent.tools && agent.tools.length > 0) {
     args.push("--tools", agent.tools.join(","));
@@ -163,6 +169,7 @@ export function getScoutTimeoutMs(
  * @param cwd      - Working directory for the subprocess.
  * @param signal   - Optional abort signal to kill the subprocess.
  * @param timeoutMs- Per-process timeout in ms. 0 = no timeout.
+ * @param modelRef - Optional canonical `provider/id` reference for `--model <ref>`.
  * @returns The final text output from the scout.
  */
 export async function runScoutSubprocess(
@@ -171,8 +178,9 @@ export async function runScoutSubprocess(
   cwd: string,
   signal?: AbortSignal,
   timeoutMs: number = getScoutTimeoutMs(),
+  modelRef?: string,
 ): Promise<string> {
-  const args: string[] = buildScoutArgs(agent, task);
+  const args: string[] = buildScoutArgs(agent, task, modelRef);
   let timeoutClear: (() => void) | null = null;
 
   try {

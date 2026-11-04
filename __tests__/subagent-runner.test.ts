@@ -80,7 +80,7 @@ describe("buildScoutArgs", () => {
     assert.ok(args.includes("--offline"), "should skip network ops");
   });
 
-  it("does NOT pass --model flag (uses user default)", async () => {
+  it("passes --model <provider>/<id> when a model ref is given, and no --model without one", async () => {
     const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
@@ -92,9 +92,17 @@ describe("buildScoutArgs", () => {
       filePath: "/fake/path.md",
     };
 
-    const args = buildScoutArgs(agent, "find auth code");
+    const withModel = buildScoutArgs(agent, "find auth code", "anthropic/claude-sonnet-4-5");
+    const idx = withModel.indexOf("--model");
+    assert.notEqual(idx, -1, "--model must be present when a model ref is given");
+    assert.equal(
+      withModel[idx + 1],
+      "anthropic/claude-sonnet-4-5",
+      "the session model ref follows the flag",
+    );
 
-    assert.ok(!args.includes("--model"), "should not force a model — use user default");
+    const withoutModel = buildScoutArgs(agent, "find auth code");
+    assert.ok(!withoutModel.includes("--model"), "an absent model must not add --model");
   });
 
   it("includes --thinking minimal to cap scout latency", async () => {

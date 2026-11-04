@@ -107,6 +107,8 @@ export async function decomposeInstruction(
  * @param _cwd      - Working directory for scout processes.
  * @param _signal   - Optional abort signal.
  * @param _onUpdate - Optional callback for streaming progress.
+ * @param modelRef  - Optional canonical `provider/id` session-model reference
+ *                    forwarded to every scout spawn as `--model <ref>`.
  * @returns Array of scout results.
  */
 export async function runParallelExploration(
@@ -114,6 +116,7 @@ export async function runParallelExploration(
   _cwd: string,
   _signal?: AbortSignal,
   _onUpdate?: (partial: ScoutResult[]) => void,
+  modelRef?: string,
 ): Promise<ScoutResult[]> {
   if (tasks.length === 0) return [];
 
@@ -142,7 +145,7 @@ export async function runParallelExploration(
 
   const results = await mapWithConcurrencyLimit(tasks, MAX_CONCURRENCY, async (task, index) => {
     try {
-      const output = await runScoutSubprocess(scout, task.task, _cwd, _signal);
+      const output = await runScoutSubprocess(scout, task.task, _cwd, _signal, undefined, modelRef);
       const result: ScoutResult = {
         agent: task.agent,
         task: task.task,

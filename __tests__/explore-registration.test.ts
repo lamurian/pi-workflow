@@ -1,5 +1,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 // ── Mock factories ───────────────────────────────────────────────────────────
@@ -331,5 +334,121 @@ describe("index.ts module exports", () => {
       // Should not throw during parsing
     }
     assert.ok(loaded, "index.ts should load without errors");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T2 — both /explore entry points thread ctx.model into the scout spawn
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Write an executable fake pi that records the `--model` ref it received
+ * (one `MODEL=` line per spawn) and exits 0 without emitting messages.
+ *
+ * @param file - Path of the record file the fake appends to.
+ * @returns Absolute path of the fake pi script.
+ */
+function fakePiModelRecorder(file: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-scout-fake-"));
+  const fake = join(dir, "fake-pi.sh");
+  writeFileSync(
+    fake,
+    "#!/bin/sh\n" +
+      'prev=""\nmodel="none"\n' +
+      'for a in "$@"; do\n' +
+      '  if [ "$prev" = "--model" ]; then model="$a"; fi\n' +
+      '  prev="$a"\n' +
+      "done\n" +
+      'printf "MODEL=%s\\n" "$model" >> "$PI_ARGV_FILE"\n' +
+      "exit 0\n",
+  );
+  chmodSync(fake, 0o755);
+  return fake;
+}
+
+/**
+ * Run `fn` with PI_BIN pinned to the argv-recording fake and PI_ARGV_FILE
+ * set to `file` (truncated first); restores both env vars afterwards.
+ *
+ * @param file - Record file the fake appends one MODEL= line per spawn to.
+ * @param fn   - Work to run under the pinned env.
+ * @returns Whatever `fn` resolves to.
+ */
+async function withModelRecorder<T>(file: string, fn: () => Promise<T>): Promise<T> {
+  const prevBin = process.env.PI_BIN;
+  const prevFile = process.env.PI_ARGV_FILE;
+  process.env.PI_BIN = fakePiModelRecorder(file);
+  process.env.PI_ARGV_FILE = file;
+  writeFileSync(file, "");
+  try {
+    return await fn();
+  } finally {
+    if (prevBin === undefined) delete process.env.PI_BIN;
+    else process.env.PI_BIN = prevBin;
+    if (prevFile === undefined) delete process.env.PI_ARGV_FILE;
+    else process.env.PI_ARGV_FILE = prevFile;
+  }
+}
+
+/** Pin the ctx's model registry to an auth failure so no network call runs. */
+function failAuth(ctx: ExtensionContext): void {
+  ctx.modelRegistry = {
+    getApiKeyAndHeaders: async () => ({ ok: false }),
+  } as unknown as ExtensionContext["modelRegistry"];
+}
+
+describe("T2: /explore entry points pass ctx.model to scout spawns", () => {
+  it("the /explore command starts the scout child with --model anthropic/claude-sonnet-4-5", async () => {
+    const { registerExploreCommand } = await import("../extensions/explore.ts");
+    const pi = mockPi();
+    const ctx = mockCtx("/tmp/test");
+    failAuth(ctx);
+
+    registerExploreCommand(pi);
+    const cmdCalls = pi.calls["registerCommand"] ?? [];
+    const exploreCmd = cmdCalls.find(
+      ([name]: [string]) => name === "explore",
+    ) as [string, { handler: Function }];
+
+    const file = join(mkdtempSync(join(tmpdir(), "pi-model-ref-")), "argv.txt");
+    await withModelRecorder(file, async () => {
+      await exploreCmd[1].handler("find config", ctx);
+    });
+
+    assert.equal(
+      readFileSync(file, "utf8").trim(),
+      "MODEL=anthropic/claude-sonnet-4-5",
+      "the command must spawn the scout with the session model ref",
+    );
+  });
+
+  it("the explore tool starts the scout child with --model anthropic/claude-sonnet-4-5", async () => {
+    const { registerExploreTool } = await import("../extensions/explore.ts");
+    const pi = mockPi();
+    const ctx = mockCtx("/tmp/test");
+    failAuth(ctx);
+
+    registerExploreTool(pi);
+    const toolCalls = pi.calls["registerTool"] ?? [];
+    const exploreTool = toolCalls.find(
+      ([def]: [{ name: string }]) => def.name === "explore",
+    ) as [{ execute: Function }];
+
+    const file = join(mkdtempSync(join(tmpdir(), "pi-model-ref-")), "argv.txt");
+    await withModelRecorder(file, async () => {
+      await exploreTool[0].execute(
+        "call-model-ref",
+        { instruction: "find auth code" },
+        undefined,
+        undefined,
+        ctx,
+      );
+    });
+
+    assert.equal(
+      readFileSync(file, "utf8").trim(),
+      "MODEL=anthropic/claude-sonnet-4-5",
+      "the tool must spawn the scout with the session model ref",
+    );
   });
 });
