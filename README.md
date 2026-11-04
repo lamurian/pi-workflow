@@ -4,7 +4,7 @@ A pi extension for a lean **discuss → finalize → implement** workflow. Discu
 
 Committing is the orchestrator's job, and the project's own pre-commit hooks are the verification gate. The orchestrator commits with plain `git commit` (never `--no-verify`), so hooks — lint, format, tests — fire naturally and own pass/fail. The orchestrator never invents test commands: verification comes from the project's hooks plus the orchestrator's own test gates over the detected suites (see [Test gates](#test-gates-orchestrator-run)). At `/finalize` the extension detects the project's test suites and generates a `test` tool the implementer units run in-turn (see [Test-tool detection, generation, and lifecycle](#test-tool-detection-generation-and-lifecycle)). In solo mode, the agent calls `commit_changes`, which also fires hooks.
 
-Two deterministic gates protect the atomic green-commit invariant: a **test scan** at finalize time (advisory contract evidence) and a **staged-diff tamper guard** at commit time (hard, orchestrator-only).
+Two deterministic gates protect the atomic green-commit invariant: a **test scan** at finalize time (advisory contract evidence) and a **staged-diff tamper guard** at commit time (hard, orchestrator-only). An optional third gate, the [slop gate](#slop-gate), scans the staged diff for AI-slop before the commit when enabled.
 
 ## Commands
 
@@ -54,7 +54,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
    Removed tasks are skipped.
 4. **Implement (`--solo`)** — `/implement --solo` steers the in-session agent with a TDD prompt instead: write a failing test → implement → self-check (the `test` tool when present, else its own sandboxed commands) → `mark_task_done` → (when available) `commit_changes`, which fires the same hooks. When `commit_changes` is registered, the prompt instructs a conventional commit after each behavior; the instruction is omitted entirely when the tool is absent. `mark_task_done` soft-warns if HEAD has not advanced since the previous behavior — it never blocks.
 
-   **Solo asymmetry:** solo mode has no extension-level staged-diff inspection. The tamper rule is **prompt-only** (prompt discipline): the TDD prompt instructs the agent to never delete, skip, or weaken a test to land a commit, and to report instead. The orchestrator's hard guard does not apply on this path — only the project's commit hooks gate.
+   **Solo asymmetry:** solo mode has no extension-level staged-diff inspection, and no slop gate runs on this path either — the scan resolves only inside the orchestrator loop. The tamper rule is **prompt-only** (prompt discipline): the TDD prompt instructs the agent to never delete, skip, or weaken a test to land a commit, and to report instead. The orchestrator's hard guard does not apply on this path — only the project's commit hooks gate.
 5. **Complete** — the orchestrator returns the workflow to idle on its own once every task is done (each `done` backed by a landed commit whose hooks passed and, for tasks with tests, a green scope gate; tasks reported `alreadySatisfied` on a clean tree with unchanged HEAD are flagged in the completion report). In solo mode the agent calls `complete_implementation`, which refuses while tasks are active and runs the full gate — every suite unfiltered — blocking completion on red. Completed manual tasks are listed in the final report under **Manual verification required**.
 6. **Resume** — after a halt, re-run `/implement`. Done behaviors are skipped and the loop continues from the first active one; when the working tree is dirty, the resumed unit receives the `git status --short` output as context. The original baseline HEAD is kept. The persisted `lastHalt` is rendered as a `## Previous run halted` section (diagnosis, recommended next action, attempt table) and prepended to the **first unit of the halted behavior only** — retries, continuations and other behaviors never inherit it.
 7. **Commit & push** — push and open a PR with your own git workflow.
@@ -66,6 +66,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
 | `PI_COMMIT_TIMEOUT_MS` | `300000` | Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
 | `PI_IMPLEMENT_TIMEOUT_MS` | `900000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 75% of this budget the unit gets its single wrap-up steer. |
 | `PI_IMPLEMENTER_TOOLS` | `read,write,edit,grep,find,ls,delete_file` | Full override of the tool allowlist granted to implementer subprocesses. Units never receive a shell through this override — the child contract-guard blocks it either way. |
+| `PI_SLOP_GATE` | (unset) | Overrides `implement.slop.mode` for the run when it holds a valid mode (`off`, `advisory`, `baseline`, `hard`); any other value is ignored and the configured mode stands. Read fresh when each behavior's gate resolves, so `PI_SLOP_GATE=off` disables the slop gate for a run (see [Slop gate](#slop-gate)). |
 | `PI_UNIT_FILE` | `.git/pi-workflow/contract-guard.json` | Internal: path of the per-spawn payload the orchestrator writes before each unit spawn — `repoRoot`, `baselineHead`, the derived allowlist and the unit's slice `unit { id, sources, tests, packages, testSuites }`. Read by the child contract-guard (per-task ownership) and by the generated `test` tool (default scope). Not meant to be set by hand. |
 | `PI_CONTRACT_GUARD_FILE` | `.git/pi-workflow/contract-guard.json` | Legacy read-fallback for `PI_UNIT_FILE`, kept for one release: the guard reads it when `PI_UNIT_FILE` is absent. Not meant to be set by hand. |
 
@@ -108,9 +109,35 @@ The gates run the suites recorded at `/finalize` (`state.testTool`) through the 
 
 Filtered in-turn runs by a unit are iteration only: the generated `test` tool headers them `filtered run — n/m suites — does not satisfy the done criteria` and reports skipped non-filterable suites as `filtered iteration run, not verification`. Verification is the orchestrator's gates plus the project's hooks — never the unit's own run.
 
+### Slop gate
+
+The orchestrator optionally scans the **staged diff** for AI-slop before every commit: code paths are scored with `aislop scan --staged --json`, prose paths (`.md`/`.mdx`/`.txt`) with one `zero-slop score <path>` each — and only when such paths are actually staged. Configuration lives under `implement.slop` in workflow.json (defaults ← global ← project-local); keys are validated independently, so a partial or malformed block keeps the missing defaults:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `mode` | `advisory` | Gate behavior: `off`, `advisory`, `baseline` or `hard`. |
+| `fetchFallback` | `true` | Allow the `npx --yes <pkg>@latest` network fallback when a scanner is not installed locally. |
+| `codeFailBelow` | `80` | A code score below this breaches the gate. |
+| `proseGate` | `25` | A prose score above this breaches the gate. |
+
+**Modes and manual promotion** — the four modes increase in strictness and promotion is **manual**: nothing escalates on its own. Promote or relax the gate by editing `implement.slop.mode` in workflow.json, or override it for a run with `PI_SLOP_GATE` (see the environment-variable table above):
+
+- `off` — the gate does not run; no scanner is resolved.
+- `advisory` (default) — never blocks. Each breach becomes a `slop advisory:` note (e.g. `slop advisory: code score 42 is below codeFailBelow 80`) that rides the landed commit into the shared findings ledger.
+- `baseline` — blocks only slop the change itself introduced (next paragraph).
+- `hard` — blocks on any breach: a code score below `codeFailBelow` (listing every staged diagnostic) or a prose score above `proseGate`.
+
+**Baseline-as-HEAD semantics** — `baseline` measures the staged state against HEAD instead of raw thresholds alone. A code diagnostic counts as a violation only when its line was **added by the staged diff** (from `git diff --cached -U0` added-line facts; the raw code score is ignored). A prose file breaches only when its staged score exceeds **both** `proseGate` and the file's HEAD score: the HEAD version is extracted with `git show HEAD:<path>` into a temp file and scored alongside the staged one; a path absent at HEAD has no HEAD score and is judged against `proseGate` alone.
+
+**Fetch fallback** — each scanner resolves through a ladder: `<cwd>/node_modules/.bin/<tool>` first, then `which <tool>` on PATH, then — when `fetchFallback` is `true` — `npx --yes <pkg>@latest` (`zero-slop` additionally requires `python3` on PATH, checked first). An unresolvable scanner or unparseable output never blocks: it degrades to a never-blocking `slop gate unavailable:` note.
+
+**Fix rounds (`slop-guard`)** — the gate runs after the staged-diff tamper guard and **before `git commit`**. A `block` verdict never invokes `git commit`: the attempt is classified `slop-guard` and a fix round is spawned with the investigation and the violation list. The fix instruction requires rewriting or deleting the flagged content — adding `aislop-ignore` directives, suppression comments or config exclusions to silence the gate is explicitly forbidden. A `slop-guard` spends the shared 5-retry budget like any other failed attempt; past it the run halts with `slop gate blocked the commit for <id> after 5 retries`, and the halt diagnosis recommends reviewing the findings or setting `implement.slop.mode` to `advisory` before re-running `/implement`. Advisory notes never block: they only ever ride a commit that lands.
+
+**Solo asymmetry** — none of this runs in `--solo` mode: the gate resolves only inside the orchestrator loop, so the agent's own `git commit` path is scanned by nothing — only the project's pre-commit hooks gate, consistent with the prompt-only tamper rule described in the workflow above.
+
 ### Diagnosing a halt
 
-The last `workflow-state` session entry carries `lastHalt`: the behavior that failed, the error (unit failure, hook investigation with raw hook output, staged-diff guard investigation with name-status lines, or timeout note), `git status --short` at halt time, the commits landed since `/implement` started, the attempt records (outcome, duration, progress, truncated last text), and the derived diagnosis with recommended next action. The same content is returned to the main process as the halt report, which relays it to you. A `test-guard` halt means the staged diff touched undeclared tests — re-declare via `/discuss → /finalize`, then re-run `/implement` to resume. A red-baseline signature (see above) means fix the suite before resuming.
+The last `workflow-state` session entry carries `lastHalt`: the behavior that failed, the error (unit failure, hook investigation with raw hook output, staged-diff guard investigation with name-status lines, or timeout note), `git status --short` at halt time, the commits landed since `/implement` started, the attempt records (outcome, duration, progress, truncated last text), and the derived diagnosis with recommended next action. The same content is returned to the main process as the halt report, which relays it to you. A `test-guard` halt means the staged diff touched undeclared tests — re-declare via `/discuss → /finalize`, then re-run `/implement` to resume. A `slop-guard` halt means the gate flagged the staged diff — remove the flagged content (or relax `implement.slop.mode`), then re-run `/implement`. A red-baseline signature (see above) means fix the suite before resuming.
 
 ### Re-finalizing preserves done behaviors
 
