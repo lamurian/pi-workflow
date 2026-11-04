@@ -9,6 +9,7 @@ import {
   runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
 import { getCommitTimeoutMs, readDiffStat, readGitHead, readTreeState } from "./git-ops.ts";
+import type { SlopGateRunner } from "./slop-gate.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
 
@@ -19,21 +20,18 @@ export interface CommitAttempt {
   outcome: Exclude<GateOutcome, { kind: "landed" }> | null;
   /** Best-effort subject when the commit landed. */
   subject?: string;
-  /**
-   * Remediation note (T6): one line per auto-unstaged cross-task-contaminated
-   * path, naming the path, its owning task(s) and the exact
-   * `git restore --staged -- <path>` command — the work stays on disk for
-   * its owning task. Absent when nothing was unstaged.
-   */
+  /** Remediation note (T6): one line per auto-unstaged cross-task-contaminated path, naming
+   *  the path, its owning task(s) and the `git restore --staged -- <path>` command — the work
+   *  stays on disk. Absent when nothing was unstaged. */
   remediation?: string[];
+  /** Slop-gate advisory notes (T5) from a landed commit, appended to the findings ledger. */
+  slopNotes?: string[];
 }
 
 /**
- * Pick the conventional commit subject: the subagent's suggestion, or a
- * generic subject so a missing suggestion never blocks the commit step.
- *
- * @param report   - The unit's parsed report.
- * @param behavior - The behavior the unit implemented.
+ * Pick the conventional commit subject: the subagent's suggestion, or a generic
+ * subject so a missing suggestion never blocks the commit step.
+ * @param report - parsed report; @param behavior - the behavior being committed.
  * @returns A conventional commit subject line (no behavior id).
  */
 export function pickCommitSubject(
@@ -51,13 +49,10 @@ function guardHalt(result: ReturnType<typeof classifyBaselineDiff>): CommitAttem
 }
 
 /**
- * Read the WORKTREE name-status vs the baseline (the T3 allowlist teeth) with
- * a chore-only change to the orchestrator-owned test extension filtered (bug
- * 1) via a WORKTREE-vs-HEAD query: a post-baseline chore commit drops the
- * line, a unit edit keeps it. Best-effort: "" when git fails.
- *
- * @param pi - ExtensionAPI. @param cwd - Working directory.
- * @param ref - Baseline ref (baselineHead or "HEAD").
+ * Read the WORKTREE name-status vs the baseline (T3 allowlist teeth), filtering a
+ * chore-only change to the orchestrator-owned test extension via a WORKTREE-vs-HEAD
+ * query (bug 1): a post-baseline chore commit drops the line, a unit edit keeps it.
+ * @param pi - ExtensionAPI. @param cwd - working directory. @param ref - baseline ref.
  * @returns Raw worktree name-status output, or "" when git fails.
  */
 async function readTeethNameStatus(pi: ExtensionAPI, cwd: string, ref: string): Promise<string> {
@@ -76,30 +71,24 @@ async function readTeethNameStatus(pi: ExtensionAPI, cwd: string, ref: string): 
 }
 
 /**
- * Stage the unit's scope and commit with the given subject; classify via the
- * HEAD gate. Never passes --no-verify: the project's pre-commit hooks are the
- * gate; the staged diff is inspected against the tamper guard (undeclared test
- * deletions, sourceFile deletions and retry-touching of undeclared tests block
- * the commit without invoking it).
+ * Stage the unit's scope and commit with the subject; classify via the HEAD gate.
+ * Never passes --no-verify — the pre-commit hooks are the gate; the staged diff is
+ * inspected first (undeclared or skip-touching test changes block without invoking
+ * the hook). v2 sessions stage only owned paths (`git add -- <paths>`, never
+ * `--all`), gate the allowlist on the WORKTREE teeth, and return no-changes without
+ * committing when the owned staged set is empty on a dirty tree; v1 keeps stage-all.
  *
- * v2 sessions (T3): stage only the unit's owned paths (`git add -- <paths>` —
- * `git add --all` never runs), gate the allowlist on the WORKTREE teeth so a
- * never-staged edit outside the allowlist still halts, and return an explicit
- * no-changes outcome without invoking git commit when the owned staged set is
- * empty on a dirty tree. v1 sessions keep the plain stage-all path.
- *
- * @param pi / cwd - ExtensionAPI reference and working directory.
- * @param subject   - Conventional commit subject line.
- * @param behavior  - The behavior being committed (for investigations).
- * @param task      - The task contract (declared files + test-kind sourceFiles).
- * @param attempt   - 1 = first commit attempt; >= 2 = fix retry (stricter guard).
- * @param baselineHead - HEAD recorded when /implement started; the staged diff
- *                       is measured against it (falls back to HEAD).
- * @param contract  - The v2 contract: per-task ownership (path-scoped staging,
- *                    contamination auto-unstaged before gating, `remediation`);
- *                    absent = v1 session, plain files list gates unchanged.
- * @returns The classified commit attempt (with the remediation note when
- *          cross-task contamination was unstaged).
+ * @param pi / cwd - ExtensionAPI and working directory. @param subject - commit subject.
+ * @param behavior - the behavior being committed (for investigations).
+ * @param task - contract (declared files + test-kind sourceFiles).
+ * @param attempt - 1 = first attempt; >= 2 = fix retry (stricter guard).
+ * @param baselineHead - HEAD at /implement start; staged diff measured against it.
+ * @param contract - v2 per-task ownership (path-scoped staging, auto-unstaged
+ *   contamination with `remediation`); absent = v1 session, plain files list.
+ * @param slopRunner - optional slop gate (T5), run after the staged-diff guard and
+ *   before `git commit`: a block returns slop-guard without committing; notes ride
+ *   back as `slopNotes` when the commit lands. Absent = gate off for this session.
+ * @returns The classified commit attempt (plus remediation/slopNotes when present).
  */
 export async function commitAndGate(
   pi: ExtensionAPI,
@@ -110,6 +99,7 @@ export async function commitAndGate(
   attempt: number,
   baselineHead?: string,
   contract?: ContractV2,
+  slopRunner?: SlopGateRunner,
 ): Promise<CommitAttempt> {
   const timeoutMs = getCommitTimeoutMs();
   const headBefore = await readGitHead(pi, cwd);
@@ -118,6 +108,8 @@ export async function commitAndGate(
   let timedOut = false;
   /** Remediation-note lines for cross-task contamination unstaged at commit (T6). */
   let remediation: string[] = [];
+  /** Slop-gate advisory notes from an annotate verdict, carried to the findings ledger (T5). */
+  let slopNotes: string[] = [];
   try {
     const baselineRef = baselineHead ?? "HEAD";
     const declared: readonly DeclaredFile[] = contract
@@ -125,19 +117,15 @@ export async function commitAndGate(
       : task.files;
     let nameStatusRes: string;
     if (contract) {
-      // T3 A3: the allowlist guard reads the WORKTREE against the baseline (the
-      // teeth) — an owned path edited outside its allowlist halts even when the
-      // edit is never staged. Bug 1: a chore-only change to the orchestrator-
-      // owned test extension is filtered inside readTeethNameStatus.
+      // T3 A3: allowlist gates the WORKTREE teeth vs the baseline — a never-staged
+      // edit outside the allowlist halts (bug 1 filtered in readTeethNameStatus).
       const teeth = await readTeethNameStatus(pi, cwd, baselineRef);
       const allowlist = classifyBaselineDiff({
         nameStatus: teeth, files: declared, baselineRef, taskId: behavior.id,
       });
       if (allowlist.violations.length > 0) return guardHalt(allowlist);
-      // T3 A1: stage only the unit's owned scope (sources then tests) via
-      // `git add -- <paths>`; `git add --all` never runs in a v2 session. The
-      // status read keeps the add atomic: a declared path with no worktree
-      // entry is skipped (empty ⇒ no add).
+      // T3 A1: stage only owned paths (sources then tests) via `git add -- <paths>`;
+      // `git add --all` never runs in v2. Status keeps the add atomic (skip empty).
       const changed = new Set(
         (await readTreeState(pi, cwd)).split("\n").map((l) => l.slice(2).trim()).filter(Boolean),
       );
@@ -148,26 +136,18 @@ export async function commitAndGate(
       if (ownedPaths.length > 0) await pi.exec("git", ["add", "--", ...ownedPaths], { cwd });
       // Staged set vs the baseline: feeds the A5 narrow and the test guard.
       nameStatusRes = await readGuardNameStatus(pi, cwd, baselineRef);
-      // T3 A5: an empty staged set with non-empty worktree teeth (dirty tree)
-      // returns an explicit no-changes outcome without invoking git commit; a
-      // fully clean tree falls through so classifyCommit issues the same verdict.
+      // T3 A5: empty staged set + dirty teeth ⇒ no-changes without invoking git
+      // commit; a fully clean tree falls through to classifyCommit's verdict.
       if (nameStatusRes.trim() === "" && teeth.trim() !== "") {
-        return {
-          outcome: {
-            kind: "no-changes",
-            investigation:
-              `No changes detected for ${behavior.id}: the unit's owned staged set is empty — git commit was never invoked. ` +
-              "Land actual file changes in the unit's owned paths; git status shows only foreign or undeclared work.",
-          },
-        };
+        return { outcome: { kind: "no-changes", investigation:
+          `No changes detected for ${behavior.id}: the unit's owned staged set is empty — git commit was never invoked. ` +
+          "Land actual file changes in the unit's owned paths; git status shows only foreign or undeclared work." } };
       }
-      // T6/T2: auto-unstage cross-task contamination BEFORE gating. The staged
-      // set is measured against HEAD — only a path in `git diff --cached
-      // --name-status HEAD` is genuinely staged, so a file committed since the
-      // baseline is never contamination. Staged paths declared but owned by
-      // OTHER tasks leave the index via `git restore --staged -- <path>` (the
-      // work stays on disk for the owning task); undeclared or ownerless
-      // staged paths halt — they are never unstaged.
+      // T6/T2: auto-unstage cross-task contamination BEFORE gating — only a path in
+      // `git diff --cached --name-status HEAD` is genuinely staged, so a file committed
+      // since the baseline is never contamination. Paths declared but owned by OTHER
+      // tasks leave the index via `git restore --staged -- <path>` (work stays on disk);
+      // undeclared or ownerless staged paths halt and are never unstaged.
       const headNameStatus = await runHeadStagedNameStatus(pi, cwd);
       const plan = planUnstage(declared, headNameStatus, behavior.id);
       if (plan.undeclared.length > 0) {
@@ -201,13 +181,27 @@ export async function commitAndGate(
     });
     if (staged.kind === "test-guard") {
       return {
-        outcome: {
-          kind: "test-guard",
-          investigation: withRemediation(staged.investigation, remediation),
-          violations: staged.violations,
-        },
+        outcome: { kind: "test-guard", investigation: withRemediation(staged.investigation, remediation),
+          violations: staged.violations },
         ...(remediation.length > 0 ? { remediation } : {}),
       };
+    }
+    // T5: the slop gate runs after the staged-diff guard (a test-guard verdict never
+    // reaches it) and before git commit: a block never invokes git commit; notes
+    // ride back as slopNotes when the commit lands.
+    if (slopRunner) {
+      const verdict = await slopRunner.run(pi);
+      if (verdict.kind === "block") {
+        return {
+          outcome: {
+            kind: "slop-guard",
+            investigation: withRemediation(verdict.investigation, remediation),
+            violations: verdict.violations,
+          },
+          ...(remediation.length > 0 ? { remediation } : {}),
+        };
+      }
+      slopNotes = verdict.notes;
     }
     const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
     commitExitCode = res.code;
@@ -219,7 +213,10 @@ export async function commitAndGate(
     commitExitCode = 1;
   }
   const headAfter = await readGitHead(pi, cwd);
-  const carried = remediation.length > 0 ? { remediation } : {};
+  const carried = {
+    ...(remediation.length > 0 ? { remediation } : {}),
+    ...(slopNotes.length > 0 ? { slopNotes } : {}),
+  };
   if (!timedOut && headBefore !== null && headAfter !== null && headAfter !== headBefore) {
     return { outcome: null, subject, ...carried };
   }
@@ -237,11 +234,5 @@ export async function commitAndGate(
     timeoutMs,
   });
   if (outcome.kind === "landed") return { outcome: null, subject, ...carried };
-  return {
-    outcome: {
-      ...outcome,
-      investigation: withRemediation(outcome.investigation, remediation),
-    },
-    ...carried,
-  };
+  return { outcome: { ...outcome, investigation: withRemediation(outcome.investigation, remediation) }, ...carried };
 }

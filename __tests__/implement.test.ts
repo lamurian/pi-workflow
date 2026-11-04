@@ -4309,3 +4309,151 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     assert.equal(buildCrossOwnershipHaltText("src/a.ts:10:1: bad", contract, "T1", staged), undefined, "no block → no error");
   });
 });
+
+// ═══ T5: the slop gate in the orchestrator commit path ═══
+describe("T5: slop gate wiring in the orchestrator loop", () => {
+  /** One exec call recorded by piWithSlopGate. */
+  interface SlopExecEntry { cmd: string; args: string[] }
+
+  /** aislop JSON: a hard-mode block (score 12 < codeFailBelow 80). */
+  const HARD_BLOCK_SCAN = JSON.stringify({
+    score: 12,
+    diagnostics: [
+      { filePath: "src/a.ts", line: 3, rule: "no-todo", severity: "warn", message: "leftover TODO" },
+    ],
+  });
+  /** aislop JSON: a clean scan (score 95 ≥ codeFailBelow 80). */
+  const CLEAN_SCAN = JSON.stringify({ score: 95, diagnostics: [] });
+  /** aislop JSON: an advisory breach (score 42 < codeFailBelow 80). */
+  const ADVISORY_SCAN = JSON.stringify({ score: 42, diagnostics: [] });
+
+  /**
+   * Exec mock for the loop-level slop-gate runs: git plumbing answers the
+   * gate's reads (HEAD advances only on commit), `which aislop` resolves the
+   * scanner, and each aislop invocation answers with the next scripted JSON
+   * report (clamped to the last answer when exhausted).
+   *
+   * @param scanAnswers - Raw JSON stdout returned by successive aislop runs.
+   * @returns The mock ExtensionAPI plus the recorded exec log.
+   */
+  function piWithSlopGate(scanAnswers: string[]): {
+    pi: ExtensionAPI & { calls: Record<string, unknown[]> };
+    execLog: SlopExecEntry[];
+  } {
+    const pi = mockPi();
+    const execLog: SlopExecEntry[] = [];
+    let headCounter = 0;
+    let scanIdx = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "rev-parse") return ok(`head${headCounter}\n`);
+      if (cmd === "git" && args[0] === "status") return ok(" M src/a.ts\n");
+      if (cmd === "git" && args[0] === "add") return ok();
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return ok("[main abc] committed");
+      }
+      if (cmd === "git" && args[0] === "diff") {
+        if (args.includes("--name-status")) return ok("M\tsrc/a.ts\n");
+        if (args.includes("--name-only")) return ok("src/a.ts\n");
+        if (args.includes("--stat")) return ok(" src/a.ts | 2 +-");
+        return ok("--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-a\n+b\n");
+      }
+      if (cmd === "which") return ok(); // code 0: aislop resolves on PATH
+      if (cmd === "aislop" || cmd.endsWith("/aislop")) {
+        const answer = scanAnswers[Math.min(scanIdx, scanAnswers.length - 1)] ?? "{}";
+        scanIdx++;
+        return ok(answer);
+      }
+      return ok();
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  it("hardRunBlocksFirstCommitSpawnsFixRoundAndLandsNextAttempt: the first attempt is slop-guard-blocked, a fix round follows, and the next clean attempt lands", async () => {
+    process.env.PI_SLOP_GATE = "hard";
+    try {
+      const { pi, execLog } = piWithSlopGate([HARD_BLOCK_SCAN, CLEAN_SCAN]);
+      const state = finalizingState();
+      const ctx = ctxWithState(state);
+      const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+      const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => {
+        spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: "feat(core): add first behavior",
+        };
+      });
+
+      assert.equal(
+        result.complete,
+        true,
+        `the second (clean) attempt must land, got: ${result.error ?? ""}`,
+      );
+      assert.equal(spawns.length, 2, "initial unit + exactly one slop-guard fix round");
+      const commits = execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit");
+      assert.equal(commits.length, 1, "only the clean second attempt invokes git commit");
+      assert.match(spawns[1]!.taskText, /slop/, "the fix round text names the slop gate");
+      assert.match(
+        spawns[1]!.taskText,
+        /Previous attempt failed \(retry 1\/5\)/,
+        "the slop-guard fix round is a budgeted retry",
+      );
+      assert.equal(state.task!.behaviors[0]!.status, "done", "the behavior lands on the clean attempt");
+    } finally {
+      process.env.PI_SLOP_GATE = "off";
+    }
+  });
+
+  it("advisoryRunLandsFirstAttemptAndRecordsNote: the commit lands immediately and the advisory note joins the shared findings ledger", async () => {
+    process.env.PI_SLOP_GATE = "advisory";
+    try {
+      const { pi, execLog } = piWithSlopGate([ADVISORY_SCAN]);
+      // Snapshot every persisted workflow-state entry: the loop mutates the
+      // live state object and completion clears state.findings, so the
+      // advisory note must be asserted against clones taken at persist time.
+      const realAppend = pi.appendEntry;
+      pi.appendEntry = ((type: string, data: unknown) =>
+        realAppend(type, type === "workflow-state" ? structuredClone(data) : data)) as ExtensionAPI["appendEntry"];
+      const state = finalizingState();
+      const ctx = ctxWithState(state);
+      const spawns: Array<{ behaviorId: string; taskText: string }> = [];
+
+      const result = await runOrchestratedImplement(pi, ctx, state, state.task!, async (unit) => {
+        spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: "feat(core): add first behavior",
+        };
+      });
+
+      assert.equal(result.complete, true, `an advisory note never blocks, got: ${result.error ?? ""}`);
+      assert.equal(spawns.length, 1, "no fix round — the first attempt lands");
+      const commits = execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit");
+      assert.equal(commits.length, 1, "the first attempt invokes git commit exactly once");
+      const NOTE = "slop advisory: code score 42 is below codeFailBelow 80";
+      const snapshots = (pi.calls["appendEntry"] ?? []) as Array<[string, WorkflowState]>;
+      const withNote = snapshots.filter(
+        ([type, saved]) =>
+          type === "workflow-state" &&
+          (saved.findings ?? []).some((f) => f.behaviorId === "T1" && f.text === NOTE),
+      );
+      assert.ok(
+        withNote.length >= 1,
+        "a persisted snapshot carries the advisory note in the findings ledger",
+      );
+    } finally {
+      process.env.PI_SLOP_GATE = "off";
+    }
+  });
+
+  it("vitestEnvPinsSlopGateOff: the vitest environment sets PI_SLOP_GATE to off", () => {
+    assert.equal(
+      process.env.PI_SLOP_GATE,
+      "off",
+      "vitest.config.ts test.env pins PI_SLOP_GATE=off",
+    );
+  });
+});

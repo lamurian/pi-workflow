@@ -711,3 +711,18 @@ describe("halt-report: transport outcomes (T3)", () => {
     assert.match(result.diagnosis ?? "", /infrastructure/, "the halt diagnosis names the infrastructure failure");
   });
 });
+
+// ═══ T5: slop-guard diagnosis ═══
+describe("halt-report: slop-guard diagnosis (T5)", () => {
+  it("names the slop gate and recommends reviewing the findings or setting implement.slop.mode to advisory", () => {
+    const history: AttemptRecord[] = [
+      { attempt: 1, outcome: "ok", durationSec: 30, progress: true, lastText: "implemented T1" },
+      { attempt: 2, outcome: "slop-guard", durationSec: 5, progress: false, lastText: "slop gate blocked the staged diff" },
+    ];
+    const derived = deriveDiagnosis(history, "slop gate blocked the commit for T1 after 5 retries");
+    assert.match(derived.diagnosis, /slop gate/i, "the diagnosis names the slop gate");
+    assert.match(derived.recommendation, /findings/i, "the recommendation points at the findings ledger");
+    assert.match(derived.recommendation, /implement\.slop\.mode/, "the recommendation names the config key");
+    assert.match(derived.recommendation, /advisory/i, "the recommendation offers the advisory mode");
+  });
+});

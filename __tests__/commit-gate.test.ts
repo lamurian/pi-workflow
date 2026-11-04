@@ -17,11 +17,14 @@ import {
   buildInvestigation,
   classifyCommit,
   detectFailingStage,
+  retryExhaustedDetail,
   type GateInput,
 } from "../extensions/commit-gate.ts";
 import { classifyStagedDiff } from "../extensions/staged-diff-guard.ts";
 import { commitAndGate } from "../extensions/git-commit-gate.ts";
 import { filterOrchestratorOwned } from "../extensions/git-guard-diff.ts";
+import type { SlopGateRunner } from "../extensions/slop-gate.ts";
+import type { SlopVerdict } from "../extensions/slop-scan.ts";
 import type { Behavior, ContractV2, TaskContract } from "../extensions/state.ts";
 
 const BEHAVIOR: Behavior = {
@@ -871,5 +874,139 @@ describe("emptyOwnedStagedSetIsNoChanges (T3 A5)", () => {
       "the foreign dirty file is never staged",
     );
     assert.equal(attempt.remediation, undefined, "no remediation note without an unstage");
+  });
+});
+
+// ═══ T5: the slop gate in the commit path ═══
+
+/** Blocking verdict a fake slop runner returns (mode hard). */
+const BLOCK_VERDICT: SlopVerdict = {
+  kind: "block",
+  notes: [],
+  violations: ["src/a.ts:3 slop-noise — flagged content"],
+  investigation: "slop gate blocked: mode=hard, codeFailBelow=80, proseGate=25",
+};
+
+/**
+ * Build a fake slop-gate runner that counts its invocations and returns the
+ * fixed verdict on every run.
+ *
+ * @param verdict - The verdict returned by every run call.
+ * @returns The runner (9th commitAndGate param) plus a live run counter.
+ */
+function fakeSlopRunner(verdict: SlopVerdict): { runner: SlopGateRunner; runs: () => number } {
+  let count = 0;
+  return {
+    runner: {
+      mode: verdict.kind === "block" ? "hard" : "advisory",
+      run: async () => {
+        count++;
+        return verdict;
+      },
+    },
+    runs: () => count,
+  };
+}
+
+describe("commitAndGate slop gate (T5)", () => {
+  it("a blocking slop verdict returns slop-guard with investigation and violations and never invokes git commit", async () => {
+    const { pi, calls } = piT6("M\tsrc/a.ts\n");
+    const { runner, runs } = fakeSlopRunner(BLOCK_VERDICT);
+
+    const attempt = await commitAndGate(
+      pi, "/tmp/test", "feat(core): land T1", BEHAVIOR, TASK, 1, "base123", undefined, runner,
+    );
+
+    const outcome = attempt.outcome;
+    if (outcome?.kind !== "slop-guard") {
+      assert.fail(`expected slop-guard, got ${JSON.stringify(attempt.outcome)}`);
+    }
+    assert.match(outcome.investigation, /slop gate blocked/, "the investigation rides the outcome");
+    assert.ok(
+      outcome.violations.some((v) => v.includes("src/a.ts")),
+      `violations carry the flagged content, got ${JSON.stringify(outcome.violations)}`,
+    );
+    assert.equal(runs(), 1, "the slop runner runs exactly once");
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit is never invoked on a blocking slop verdict",
+    );
+  });
+
+  it("an annotate slop verdict reaches git commit and returns the notes as slopNotes", async () => {
+    const { pi, calls } = piT6("M\tsrc/a.ts\n");
+    const notes = ["slop advisory: code score 42 is below codeFailBelow 80"];
+    const { runner, runs } = fakeSlopRunner({ kind: "annotate", notes, violations: [], investigation: "" });
+
+    const attempt = await commitAndGate(
+      pi, "/tmp/test", "feat(core): land T1", BEHAVIOR, TASK, 1, "base123", undefined, runner,
+    );
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    assert.equal(runs(), 1, "the slop runner runs once, before the commit");
+    assert.ok(calls.some((c) => c.args[0] === "commit"), "git commit still runs for advisory notes");
+    assert.deepEqual(attempt.slopNotes, notes, "the notes ride back as slopNotes");
+  });
+
+  it("the slop runner is not invoked when the staged-diff guard returns test-guard", async () => {
+    // D of a declared test-kind sourceFile trips the staged-diff guard on any
+    // attempt — the gate short-circuits before the slop runner and before git commit.
+    const guardBehavior: Behavior = { ...BEHAVIOR, sourceFile: "tests/a.test.ts" };
+    const guardTask: TaskContract = {
+      title: "Guard Task",
+      instruction: "delete a declared test",
+      files: [{ path: "tests/a.test.ts", status: "D" }],
+      done: "green",
+      behaviors: [guardBehavior],
+    };
+    const { pi, calls } = piT6("D\ttests/a.test.ts\n");
+    const { runner, runs } = fakeSlopRunner(BLOCK_VERDICT);
+
+    const attempt = await commitAndGate(
+      pi, "/tmp/test", "feat(core): land T1", guardBehavior, guardTask, 1, "base123", undefined, runner,
+    );
+
+    assert.equal(attempt.outcome?.kind, "test-guard", JSON.stringify(attempt.outcome));
+    assert.equal(runs(), 0, "the staged-diff guard short-circuits before the slop runner");
+    assert.ok(!calls.some((c) => c.args[0] === "commit"), "git commit is never invoked");
+  });
+});
+
+describe("buildFixTask slop-guard (T5)", () => {
+  it("includes the investigation, instructs removing the flagged slop, and forbids aislop-ignore directives", () => {
+    const investigation =
+      `${BLOCK_VERDICT.investigation}\nviolations=${BLOCK_VERDICT.violations.length}\n` +
+      BLOCK_VERDICT.violations.join("\n");
+    const outcome = {
+      kind: "slop-guard" as const,
+      investigation,
+      violations: BLOCK_VERDICT.violations,
+    };
+    const original = "Implement ONE behavior: T1.\nDescription: first behavior";
+
+    const taskText = buildFixTask(BEHAVIOR, TASK, original, outcome, 1);
+
+    assert.ok(taskText.includes(investigation), "the outcome's investigation is carried verbatim");
+    assert.match(taskText, /remove the flagged slop/i, "the fix instructs removing the flagged slop");
+    assert.match(taskText, /aislop-ignore/, "the fix forbids adding aislop-ignore directives");
+    assert.match(taskText, /Previous attempt failed \(retry 1\/5\)/, "budgeted retry header kept");
+    assert.match(taskText, /Original task/, "the original task still rides the fix text");
+  });
+});
+
+describe("retryExhaustedDetail (T5)", () => {
+  it("returns the slop-guard text and keeps the hook-rejected and no-changes texts", () => {
+    assert.equal(
+      retryExhaustedDetail("slop-guard", "T1"),
+      "slop gate blocked the commit for T1 after 5 retries",
+    );
+    assert.equal(
+      retryExhaustedDetail("hook-rejected", "T1"),
+      "pre-commit hook rejected the commit for T1 after 5 retries",
+    );
+    assert.equal(
+      retryExhaustedDetail("no-changes", "T1"),
+      "no changes detected for T1 after 5 retries",
+    );
   });
 });

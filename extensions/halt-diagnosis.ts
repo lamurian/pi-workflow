@@ -45,7 +45,8 @@ export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
  * diagnosis. Then
  * the priority is: repeated no-progress timeouts/partials ("exploration
  * not converging", also detected via the early-halt error text; transport
- * attempts never count toward the pair), then test-guard, hook-rejected,
+ * attempts never count toward the pair), then test-guard, slop-guard,
+ * hook-rejected,
  * no-changes, blocked, commit-timeout, and finally a generic per-last-outcome
  * fallback.
  *
@@ -140,6 +141,14 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
       recommendation:
         "Re-declare the affected test paths via /discuss -> /finalize (list them in files), " +
         "then run /implement again.",
+    };
+  }
+  if (outcomes.includes("slop-guard")) {
+    return {
+      diagnosis: "the slop gate blocked the commit — flagged slop in the staged diff",
+      recommendation:
+        "Review the findings above and remove the flagged slop, or set implement.slop.mode " +
+        "to advisory in workflow.json, then run /implement again.",
     };
   }
   if (outcomes.includes("hook-rejected")) {

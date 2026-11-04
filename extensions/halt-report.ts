@@ -33,6 +33,7 @@ export type AttemptOutcome =
   | "hook-rejected"
   | "no-changes"
   | "test-guard"
+  | "slop-guard"
   | "contract-guard"
   | "blocked"
   | "commit-timeout"

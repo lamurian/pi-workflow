@@ -17,7 +17,9 @@ export type GateOutcome =
   /** The staged diff deletes, skips, or retries-touches undeclared tests. */
   | { kind: "test-guard"; investigation: string; violations: string[] }
   /** The staged diff against the baseline violates the contract's file allowlist. */
-  | { kind: "contract-guard"; investigation: string; violations: string[] };
+  | { kind: "contract-guard"; investigation: string; violations: string[] }
+  /** The slop gate blocked the commit before `git commit` ran. */
+  | { kind: "slop-guard"; investigation: string; violations: string[] };
 
 /** Everything the gate needs to classify one commit attempt. */
 export interface GateInput {
@@ -173,6 +175,13 @@ export function buildFixTask(
       `orchestrator before every commit: every staged path must be declared with ` +
       `exactly its staged status. Fix the change to match the declarations, or ` +
       `re-declare the paths via /discuss -> /finalize, then /implement resumes.`;
+  } else if (outcome.kind === "slop-guard") {
+    body =
+      `${outcome.investigation}\n\n` +
+      `The slop gate is ENFORCED before the commit hook: remove the flagged slop ` +
+      `from the staged diff — rewrite or delete the offending content named in the ` +
+      `violations. Do NOT add aislop-ignore directives, suppress comments, or config ` +
+      `exclusions to silence the gate; fix the content itself.`;
   } else if (outcome.kind === "hook-rejected") {
     body =
       `${outcome.investigation}\n\n## Raw hook output\n\n${outcome.hookOutput || "(empty)"}`;
@@ -180,4 +189,21 @@ export function buildFixTask(
     body = outcome.investigation;
   }
   return [header, body, "", "## Original task", original].join("\n");
+}
+
+/**
+ * Build the one-line halt detail for an exhausted retry budget.
+ *
+ * @param outcomeKind - The gate outcome kind that exhausted the budget.
+ * @param behaviorId  - The behavior whose retry budget ran out.
+ * @returns The detail text: slop-guard, hook-rejected, or no-changes wording.
+ */
+export function retryExhaustedDetail(outcomeKind: GateOutcome["kind"], behaviorId: string): string {
+  if (outcomeKind === "slop-guard") {
+    return `slop gate blocked the commit for ${behaviorId} after ${RETRY_BUDGET} retries`;
+  }
+  if (outcomeKind === "hook-rejected") {
+    return `pre-commit hook rejected the commit for ${behaviorId} after ${RETRY_BUDGET} retries`;
+  }
+  return `no changes detected for ${behaviorId} after ${RETRY_BUDGET} retries`;
 }

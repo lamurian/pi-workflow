@@ -4,12 +4,13 @@ import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPa
 import { crossOwnershipHalt } from "./cross-ownership.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
-import { RETRY_BUDGET, buildFixTask } from "./commit-gate.ts";
+import { RETRY_BUDGET, buildFixTask, retryExhaustedDetail } from "./commit-gate.ts";
 import { relayImplementerEvent } from "./implementer-activity.ts";
 import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { getCommitTimeoutMs, isOutOfRepoBehavior, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
+import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
 import { commitScopeGate } from "./test-gate-run.ts";
 import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
@@ -51,6 +52,7 @@ export interface BehaviorLoopDeps {
 export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, totalUnits: number, deps: BehaviorLoopDeps): Promise<OrchestratorResult | undefined> {
   const { pi, ctx, state, task, runUnit, result, landedCommits, attemptHistory, findingsSection, recordFindings, noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt } = deps;
   const cwd = ctx.cwd;
+  const slopRunner = await resolveSlopGate(cwd); // T5: once per behavior; undefined when mode is off (e.g. PI_SLOP_GATE=off); gates every commit below.
   // T8: attempt history is per behavior — a landed behavior's history is irrelevant to a later behavior's halt report.
   attemptHistory.length = 0;
   // Progress visibility: announce start and landing so a minutes-long captured-stdio run never looks frozen.
@@ -211,11 +213,12 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
 
     const subject = pickCommitSubject(attempt, behavior);
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
-    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead, state.contractV2);
+    const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead, state.contractV2, slopRunner);
     // T8: the commit-gate verdict seals the last attempt's outcome in the halt report's attempt table (landed attempts reset with the next behavior's history).
     if (commit.outcome !== null) recorder.sealLast(commit.outcome.kind);
     // T6: cross-task contamination auto-unstaged at commit — the remediation note (path + owning task) joins the attempt report via the shared findings ledger.
     if (commit.remediation?.length) recordFindings(behavior.id, commit.remediation);
+    if (commit.slopNotes?.length) recordFindings(behavior.id, commit.slopNotes); // T5: advisory slop notes join the shared findings ledger
 
     if (commit.outcome === null) {
       // T8: per-task SCOPE GATE — the orchestrator itself runs every filterable suite with the
@@ -280,10 +283,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     }
 
     if (retry > RETRY_BUDGET) {
-      const detail =
-        commit.outcome.kind === "hook-rejected"
-          ? `pre-commit hook rejected the commit for ${behavior.id} after ${RETRY_BUDGET} retries`
-          : `no changes detected for ${behavior.id} after ${RETRY_BUDGET} retries`;
+      const detail = retryExhaustedDetail(commit.outcome.kind, behavior.id);
       return haltWithChild(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
     }
 
