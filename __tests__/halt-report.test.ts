@@ -284,9 +284,55 @@ describe("halt-report: provider-rejected model diagnosis (T4)", () => {
       "child model rejected by provider — check default model",
       "markers in the halt error outrank the two-timeout early halt",
     );
+    assert.match(
+      fromError.recommendation,
+      /settings\.json defaultModel/,
+      "markers keep the settings.json defaultModel recommendation",
+    );
   });
 
-  it("a model-error outcome yields the provider diagnosis even without marker text", () => {
+  it("provider-failure evidence without markers names a provider request failure (B4 tier 2)", () => {
+    const evidence =
+      '400: {"error":{"type":"server_error","message":"Upstream request failed"}}';
+    const history: AttemptRecord[] = [
+      { attempt: 1, outcome: "model-error", durationSec: 2, progress: false, lastText: evidence },
+    ];
+    const derived = deriveDiagnosis(history, `Unit T1 failed after 5 retries: ${evidence}`);
+    assert.equal(
+      derived.diagnosis,
+      "child model call failed at the provider — the model reference is correct",
+      "400/server_error evidence without markers names a provider request failure",
+    );
+    assert.match(derived.recommendation, /provider/i, "the recommendation names the provider status");
+    assert.ok(
+      !derived.recommendation.includes("defaultModel"),
+      "never suggests changing the model",
+    );
+    assert.ok(
+      !derived.recommendation.includes("/discuss -> /finalize"),
+      "never suggests splitting the contract",
+    );
+
+    const upstreamOnly = deriveDiagnosis(
+      [
+        {
+          attempt: 1,
+          outcome: "model-error",
+          durationSec: 2,
+          progress: false,
+          lastText: "Upstream request failed",
+        },
+      ],
+      "",
+    );
+    assert.equal(
+      upstreamOnly.diagnosis,
+      "child model call failed at the provider — the model reference is correct",
+      "'Upstream request failed' is failure evidence too",
+    );
+  });
+
+  it("a model-error attempt with no evidence gets the neutral no-output diagnosis (B4 tier 3)", () => {
     const history: AttemptRecord[] = [
       {
         attempt: 1,
@@ -297,12 +343,23 @@ describe("halt-report: provider-rejected model diagnosis (T4)", () => {
       },
     ];
     const derived = deriveDiagnosis(history, "Unit T1 failed after 5 retries: dead run");
-    assert.equal(derived.diagnosis, "child model rejected by provider — check default model");
-    assert.match(derived.recommendation, /settings\.json defaultModel/);
-    assert.match(derived.recommendation, /\/implement/);
+    assert.equal(derived.diagnosis, "the unit run ended without producing any output");
+    assert.match(
+      derived.recommendation,
+      /attempt error/,
+      "the recommendation points at the attempt error",
+    );
+    assert.ok(
+      !/rejected/i.test(derived.diagnosis) && !/rejected/i.test(derived.recommendation),
+      "no provider-rejection claim without evidence",
+    );
+    assert.ok(
+      !derived.recommendation.includes("settings.json defaultModel"),
+      "no model change suggested",
+    );
     assert.ok(
       !derived.recommendation.includes("/discuss -> /finalize"),
-      "a rejected model is not fixed by splitting the contract",
+      "no contract split suggested",
     );
   });
 

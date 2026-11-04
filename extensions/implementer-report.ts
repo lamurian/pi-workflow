@@ -76,6 +76,13 @@ export function lastAssistantText(stdout: string): string {
 export const PROVIDER_ERROR_RE = /deprecated|ModelDeprecated|HTTP\s*410/i;
 
 /**
+ * Provider-failure evidence (B4): the child's model call failed at the
+ * provider — a 400/5xx colon form, an upstream error, or a server_error
+ * payload — without the rejection markers above.
+ */
+export const PROVIDER_FAILURE_RE = /\b[45]\d{2}\s*:|upstream|server_error/i;
+
+/**
  * Decide whether a settled `agent_end` event must abort the attempt (B2): a
  * run that ends with `willRetry: false` having produced no report, no tool
  * activity and no usable assistant text is a dead run — the provider
