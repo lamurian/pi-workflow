@@ -253,6 +253,87 @@ describe("halt-report: model-error outcomes (T3)", () => {
   });
 });
 
+// ═══ T4: provider-rejected model diagnosis (B3) ═══
+describe("halt-report: provider-rejected model diagnosis (T4)", () => {
+  const PROVIDER_TEXT =
+    "Model mimo-v2.5 has been deprecated. Use mimo-v2.6-flash instead. " +
+    "The provider answered HTTP 410 ModelDeprecated.";
+
+  /** Two no-progress timeouts — the pre-T4 history diagnosed as non-converging. */
+  function stalledTimeouts(lastText: string): AttemptRecord[] {
+    return [
+      { attempt: 1, outcome: "timeout", durationSec: 900, progress: false, lastText },
+      { attempt: 2, outcome: "timeout", durationSec: 900, progress: false, lastText: "b" },
+    ];
+  }
+
+  it("marker text in the attempts or the halt error outranks exploration not converging", () => {
+    const fromAttempts = deriveDiagnosis(stalledTimeouts(PROVIDER_TEXT), "");
+    assert.equal(
+      fromAttempts.diagnosis,
+      "child model rejected by provider — check default model",
+      "markers in an attempt's last text name the provider rejection",
+    );
+
+    const fromError = deriveDiagnosis(
+      stalledTimeouts("a"),
+      `Unit T1 failed after 5 retries: ${PROVIDER_TEXT}`,
+    );
+    assert.equal(
+      fromError.diagnosis,
+      "child model rejected by provider — check default model",
+      "markers in the halt error outrank the two-timeout early halt",
+    );
+  });
+
+  it("a model-error outcome yields the provider diagnosis even without marker text", () => {
+    const history: AttemptRecord[] = [
+      {
+        attempt: 1,
+        outcome: "model-error",
+        durationSec: 2,
+        progress: false,
+        lastText: "unit produced no report and no tool activity",
+      },
+    ];
+    const derived = deriveDiagnosis(history, "Unit T1 failed after 5 retries: dead run");
+    assert.equal(derived.diagnosis, "child model rejected by provider — check default model");
+    assert.match(derived.recommendation, /settings\.json defaultModel/);
+    assert.match(derived.recommendation, /\/implement/);
+    assert.ok(
+      !derived.recommendation.includes("/discuss -> /finalize"),
+      "a rejected model is not fixed by splitting the contract",
+    );
+  });
+
+  it("the transport branch still outranks the provider diagnosis", () => {
+    const transport: AttemptRecord = {
+      attempt: 2,
+      outcome: "transport",
+      durationSec: 3,
+      progress: false,
+      lastText: UNDELIVERED_STEER_ERROR,
+    };
+    const derived = deriveDiagnosis(
+      [stalledTimeouts(PROVIDER_TEXT)[0]!, transport],
+      `steer not delivered. ${PROVIDER_TEXT}`,
+    );
+    assert.match(derived.diagnosis, /infrastructure/, "transport keeps its infrastructure diagnosis");
+    assert.notEqual(derived.diagnosis, "child model rejected by provider — check default model");
+  });
+
+  it("a marker-free two-timeout history still diagnoses exploration not converging", () => {
+    const control = deriveDiagnosis(stalledTimeouts("explored the parser"), "");
+    assert.equal(control.diagnosis, "exploration not converging");
+    assert.match(control.recommendation, /\/discuss -> \/finalize/);
+    assert.match(control.recommendation, /PI_IMPLEMENT_TIMEOUT_MS/);
+    assert.ok(
+      !control.recommendation.includes("settings.json defaultModel"),
+      "marker-free histories keep their previous recommendation",
+    );
+  });
+});
+
 // ─── composeHaltReport wrapper ────────────────────────────────────────────────
 
 describe("halt-report: composeHaltReport wrapper", () => {

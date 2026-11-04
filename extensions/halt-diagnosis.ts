@@ -4,6 +4,7 @@
 // attempts, tree state and findings; this module classifies and diagnoses.
 
 import { EARLY_HALT_DIAGNOSIS } from "./unit-progress.ts";
+import { PROVIDER_ERROR_RE } from "./implementer-report.ts";
 import type { AttemptLike, AttemptOutcome, AttemptRecord, HaltDiagnosis } from "./halt-report.ts";
 
 /**
@@ -36,12 +37,14 @@ export function classifyAttemptOutcome(attempt: AttemptLike): AttemptOutcome {
  * (a failed start-time chore commit, a refused completion gate) — that
  * gets the pre-unit diagnosis first (T9). A history whose last attempt is
  * a transport outcome (an undelivered steer, T3) gets the infrastructure
- * transport diagnosis next: the orchestrator never delivered its steer, so
- * no unit-side fix applies. Otherwise the priority is: repeated no-progress
- * timeouts/partials ("exploration not converging", also detected via the
- * early-halt error text; transport attempts never count toward the pair),
- * then test-guard, hook-rejected, no-changes, blocked, commit-timeout, and
- * finally a generic per-last-outcome fallback.
+ * transport diagnosis next. A provider-rejected model (B3) follows: the
+ * halt error or an attempt's last text carries the provider's
+ * deprecation/410 markers, or an attempt aborted as a model error. Then
+ * the priority is: repeated no-progress timeouts/partials ("exploration
+ * not converging", also detected via the early-halt error text; transport
+ * attempts never count toward the pair), then test-guard, hook-rejected,
+ * no-changes, blocked, commit-timeout, and finally a generic per-last-outcome
+ * fallback.
  *
  * @param attempts - The halted behavior's attempt history.
  * @param error    - The halt error text.
@@ -66,6 +69,23 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
       recommendation:
         "Re-run /implement to resume with a fresh child; no unit-side fix is needed — " +
         "the unit never received the instruction.",
+    };
+  }
+  // B3: the provider rejected the child's model — the raw attempt text (or the
+  // halt error) carries the deprecation/410 markers, or an attempt aborted as
+  // a model error. It outranks the non-converging diagnosis below: more time
+  // never fixes a rejected model.
+  const providerRejected =
+    PROVIDER_ERROR_RE.test(error) ||
+    attempts.some(
+      (a) => a.outcome === "model-error" || PROVIDER_ERROR_RE.test(a.lastText),
+    );
+  if (providerRejected) {
+    return {
+      diagnosis: "child model rejected by provider — check default model",
+      recommendation:
+        "Point the spawned children at a working model (settings.json defaultModel), " +
+        "then run /implement again — the contract needs no change.",
     };
   }
   const lastTwo = attempts.slice(-2);
