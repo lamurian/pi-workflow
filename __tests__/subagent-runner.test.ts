@@ -105,7 +105,8 @@ describe("buildScoutArgs", () => {
     assert.ok(!withoutModel.includes("--model"), "an absent model must not add --model");
   });
 
-  it("includes --thinking minimal to cap scout latency", async () => {
+  it("includes --thinking low by default (supersedes the --thinking minimal pin)", async () => {
+    delete process.env.PI_SCOUT_THINKING;
     const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
 
     const agent: AgentConfig = {
@@ -121,7 +122,27 @@ describe("buildScoutArgs", () => {
 
     const thinkingIdx = args.indexOf("--thinking");
     assert.notEqual(thinkingIdx, -1, "--thinking should be present");
-    assert.equal(args[thinkingIdx + 1], "minimal", "scouts inherit the user's high thinking level — pin it low");
+    assert.equal(args[thinkingIdx + 1], "low", "default scout thinking level is low, not minimal");
+  });
+
+  it("honors PI_SCOUT_THINKING for the scout thinking level", async () => {
+    process.env.PI_SCOUT_THINKING = "high";
+    try {
+      const { buildScoutArgs } = await import("../extensions/scout-runner.ts");
+      const agent: AgentConfig = {
+        name: "test-agent",
+        description: "Test",
+        tools: [],
+        systemPrompt: "",
+        source: "embedded",
+        filePath: "/fake/path.md",
+      };
+      const args = buildScoutArgs(agent, "find auth code");
+      const idx = args.indexOf("--thinking");
+      assert.equal(args[idx + 1], "high");
+    } finally {
+      delete process.env.PI_SCOUT_THINKING;
+    }
   });
 
   it("preserves required flags: --mode json -p --no-session", async () => {
@@ -380,6 +401,35 @@ describe("formatModelRef", () => {
   });
 });
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// resolveChildThinking — configurable child thinking level (B1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("resolveChildThinking", () => {
+  it("returns 'low' for both kinds when the env carries no thinking override", async () => {
+    const { resolveChildThinking } = await import("../extensions/process-utils.ts");
+    assert.equal(resolveChildThinking("implementer", undefined, {}), "low");
+    assert.equal(resolveChildThinking("scout", undefined, {}), "low");
+  });
+
+  it("returns a valid env level per kind", async () => {
+    const { resolveChildThinking } = await import("../extensions/process-utils.ts");
+    assert.equal(
+      resolveChildThinking("implementer", undefined, { PI_IMPLEMENTER_THINKING: "high" }),
+      "high",
+    );
+    assert.equal(resolveChildThinking("scout", undefined, { PI_SCOUT_THINKING: "medium" }), "medium");
+  });
+
+  it("returns 'low' when the env level is invalid", async () => {
+    const { resolveChildThinking } = await import("../extensions/process-utils.ts");
+    assert.equal(
+      resolveChildThinking("implementer", undefined, { PI_IMPLEMENTER_THINKING: "banana" }),
+      "low",
+    );
+  });
+});
+
 describe("buildImplementerArgs model threading (T1)", () => {
   const SYSTEM = "You are an implementation unit.";
 
@@ -407,6 +457,7 @@ describe("buildImplementerArgs (rpc transport)", () => {
   const TASK = "Implement behavior T3: add retry backoff.";
 
   it("includes the lean flag set in rpc mode", async () => {
+    delete process.env.PI_IMPLEMENTER_THINKING;
     const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
     const args = buildImplementerArgs(SYSTEM);
 
@@ -418,7 +469,31 @@ describe("buildImplementerArgs (rpc transport)", () => {
     assert.ok(args.includes("--offline"));
     const t = args.indexOf("--thinking");
     assert.notEqual(t, -1);
-    assert.equal(args[t + 1], "minimal");
+    assert.equal(args[t + 1], "low", "default implementer thinking level supersedes the old minimal pin");
+  });
+
+  it("honors PI_IMPLEMENTER_THINKING as the implementer thinking level", async () => {
+    process.env.PI_IMPLEMENTER_THINKING = "high";
+    try {
+      const { buildImplementerArgs } = await import("../extensions/implementer-report.ts");
+      const args = buildImplementerArgs(SYSTEM);
+      const t = args.indexOf("--thinking");
+      assert.equal(args[t + 1], "high");
+    } finally {
+      delete process.env.PI_IMPLEMENTER_THINKING;
+    }
+  });
+
+  it("keeps buildImplementerArgs and contractGuardExtensionPath importable from implementer-report (re-export)", async () => {
+    const mod = await import("../extensions/implementer-report.ts");
+    assert.equal(typeof mod.buildImplementerArgs, "function");
+    assert.equal(typeof mod.contractGuardExtensionPath, "function");
+    const args = mod.buildImplementerArgs(SYSTEM);
+    assert.ok(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "rpc");
+    assert.ok(args.includes("--offline"));
+    const guardIdx = args.indexOf("-e");
+    assert.notEqual(guardIdx, -1, "the contract-guard extension must load via -e");
+    assert.equal(args[guardIdx + 1], mod.contractGuardExtensionPath());
   });
 
   it("restricts --tools to the bash-free coder set (T3)", async () => {

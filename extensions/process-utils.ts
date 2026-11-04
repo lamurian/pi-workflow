@@ -124,6 +124,42 @@ export function getImplementerTimeoutMs(
   return DEFAULT_IMPLEMENT_TIMEOUT_MS;
 }
 
+// ─── Child thinking level ──────────────────────────────────────────────────────
+
+/** Ordered thinking levels; escalation floors only ever move up this ladder. */
+const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
+
+/** Default thinking level for spawned children (supersedes the old `minimal` pins). */
+const DEFAULT_THINKING = "low";
+
+/**
+ * Resolve the thinking level for a spawned child (implementer or scout).
+ *
+ * Reads `PI_IMPLEMENTER_THINKING` / `PI_SCOUT_THINKING` as the env base;
+ * missing or invalid values fall back to `low`. When an escalation floor
+ * is given (retry ladder), the result is the HIGHER of base and floor over
+ * minimal &lt; low &lt; medium &lt; high &lt; xhigh — an escalation never
+ * downgrades an explicitly pinned higher base.
+ *
+ * @param kind  - Which child: "implementer" or "scout".
+ * @param floor - Optional escalation floor (e.g. "medium" on a retry spawn).
+ * @param env   - Environment map (defaults to `process.env`); injectable for tests.
+ * @returns One of minimal|low|medium|high|xhigh.
+ */
+export function resolveChildThinking(
+  kind: "implementer" | "scout",
+  floor?: string,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const key = kind === "implementer" ? "PI_IMPLEMENTER_THINKING" : "PI_SCOUT_THINKING";
+  const raw = env[key]?.trim();
+  const base = raw && THINKING_LEVELS.includes(raw) ? raw : DEFAULT_THINKING;
+  if (!floor) return base;
+  const floorIdx = THINKING_LEVELS.indexOf(floor);
+  if (floorIdx === -1) return base;
+  return floorIdx > THINKING_LEVELS.indexOf(base) ? floor : base;
+}
+
 // ─── Concurrency limiter ───────────────────────────────────────────────────────
 
 /**

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { createTimeoutSignal, getPiInvocation } from "./process-utils.ts";
+import { createTimeoutSignal, getPiInvocation, resolveChildThinking } from "./process-utils.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -104,9 +104,9 @@ export function buildScoutArgs(agent: AgentConfig, task: string, modelRef?: stri
   const args: string[] = [
     "--mode", "json", "-p", "--no-session",
     "--no-extensions", "--no-skills", "--no-context-files", "--offline",
-    // Pin thinking low: the subprocess inherits the user's default thinking
-    // level (often "high"), which is the dominant scout latency driver.
-    "--thinking", "minimal",
+    // Cap scout thinking (default low): the subprocess would otherwise
+    // inherit the user's default level — the dominant latency driver.
+    "--thinking", resolveChildThinking("scout"),
   ];
 
   // Session model: one canonical provider/id reference resolves exactly;
