@@ -4,6 +4,7 @@
   "private": false,
   "type": "module",
   "scripts": {
+    "pretest": "npm run typecheck",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
