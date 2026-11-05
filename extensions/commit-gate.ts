@@ -1,5 +1,4 @@
 import type { Behavior, TaskContract } from "./state.ts";
-import type { ImplementerReport } from "./implementer-report.ts";
 import type { StagedDiffResult } from "./staged-diff-guard.ts";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────

@@ -25,7 +25,12 @@ import {
 export async function registerImplementerActivityRenderer(pi: ExtensionAPI): Promise<boolean> {
   try {
     if (typeof pi.registerEntryRenderer !== "function") return false;
-    const piTui = (await import("@earendil-works/pi-tui")) as {
+    // Non-literal specifier: keeps `tsc --noEmit` green when the optional
+    // pi-tui devDependency is not materialized in node_modules (npm install
+    // has not run). Runtime resolution, the structural cast, and the
+    // try/catch degradation below are unchanged.
+    const tuiSpecifier: string = "@earendil-works/pi-tui";
+    const piTui = (await import(tuiSpecifier)) as {
       Box: new (
         w: number,
         h: number,

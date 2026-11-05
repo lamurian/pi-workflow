@@ -114,7 +114,7 @@ export function registerExploreTool(pi: ExtensionAPI): void {
       const sendProgress = (text: string) => {
         onUpdate?.({
           content: [{ type: "text" as const, text }],
-          details: undefined as any,
+          details: {},
         });
       };
 

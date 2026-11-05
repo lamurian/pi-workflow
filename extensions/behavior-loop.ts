@@ -14,7 +14,7 @@ import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
 import { commitScopeGate } from "./test-gate-run.ts";
 import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
-import type { UnitAttempt, UnitRunner, OrchestratorResult } from "./implement-loop.ts";
+import type { UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause, buildUndeliveredHaltText, UNDELIVERED_HALT_THRESHOLD } from "./warm-unit.ts";
 
