@@ -21,6 +21,13 @@ export interface RpcResponse {
   data?: unknown;
 }
 
+/** Type guard for a correlated RPC response (`type: "response"` with a string id). */
+function isRpcResponse(value: unknown): value is RpcResponse & { id: string } {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return record.type === "response" && typeof record.id === "string";
+}
+
 /** Exit info surfaced exactly once per child. */
 export interface RpcExitInfo {
   /** Process exit code; 1 when killed by signal or spawn failure. */
@@ -140,11 +147,11 @@ export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient
     }
     if (typeof event === "object" && event !== null) {
       const record = event as Record<string, unknown>;
-      if (record.type === "response" && typeof record.id === "string") {
+      if (isRpcResponse(record)) {
         const resolver = pending.get(record.id);
         if (resolver) {
           pending.delete(record.id);
-          resolver(record as unknown as RpcResponse);
+          resolver(record);
         }
       }
       for (const listener of eventListeners) listener(record);

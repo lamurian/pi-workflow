@@ -180,7 +180,7 @@ export async function commitScopeGate(
     behaviorId,
   );
   if (result) {
-    state.gateResults = { ...(state.gateResults ?? {}), [behaviorId]: result };
+    state.gateResults = { ...state.gateResults, [behaviorId]: result };
     saveState(pi, state);
   }
   return result;
