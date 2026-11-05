@@ -207,6 +207,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
           content: [
             { type: "text", text: "save_task requires the discussing or finalizing phase." },
           ],
+          details: {},
           isError: true,
         };
       }
@@ -226,6 +227,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
                 "(see content/finalize-prompt.md).",
             },
           ],
+          details: {},
           isError: true,
         };
       }
@@ -233,6 +235,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       if (!result.ok) {
         return {
           content: [{ type: "text", text: `save_task rejected: ${result.reason}` }],
+          details: {},
           isError: true,
         };
       }
@@ -289,6 +292,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       }
       return {
         content: [{ type: "text", text }],
+        details: {},
       };
     },
   });

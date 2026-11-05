@@ -112,8 +112,7 @@ export async function runImplement(
     transitionTo(pi, state, "implementing");
   }
   // Resume keeps the original baseline so the soft-warn spans the whole run.
-  state.baselineHead =
-    state.baselineHead ?? ((await readGitHead(pi, ctx.cwd)) ?? undefined);
+  state.baselineHead = state.baselineHead ?? ((await readGitHead(pi, ctx.cwd)) ?? undefined);
   saveState(pi, state);
   updateUi(state, ctx);
   const { solo, note } = parseImplementArgs(args);
@@ -242,6 +241,7 @@ async function runOrchestratedImplementSafely(
       complete: false,
       unitsRun: 0,
       landedCommits: [],
+      satisfiedWithoutCommit: [],
       haltedOn: lastHalt.behaviorId,
       error: lastHalt.error,
     };

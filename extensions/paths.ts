@@ -132,7 +132,7 @@ const DEFAULT_WORKFLOW: WorkflowConfig = {
  * Each level deep-merges its values, so a project can override a
  * single field (e.g. `adr.path`) without repeating the rest.
  */
-function deepMerge<T extends Record<string, unknown>>(
+function deepMerge<T extends object>(
   ...sources: Partial<T>[]
 ): T {
   const result = {} as T;

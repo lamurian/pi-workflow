@@ -222,11 +222,12 @@ const deleteFileTool = {
   ) {
     try {
       unlinkSync(resolve(ctx.cwd, params.path));
-      return { content: [{ type: "text" as const, text: `Deleted ${params.path}` }] };
+      return { content: [{ type: "text" as const, text: `Deleted ${params.path}` }], details: {} };
     } catch (err) {
       const detail = String((err as Error)?.message ?? err);
       return {
         content: [{ type: "text" as const, text: `delete_file failed: ${detail}` }],
+        details: {},
         isError: true,
       };
     }

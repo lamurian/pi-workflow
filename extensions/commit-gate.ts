@@ -168,8 +168,8 @@ export const RETRY_BUDGET = 5;
  * @returns Rendered retry task text.
  */
 export function buildFixTask(
-  behavior: Behavior,
-  task: TaskContract,
+  _behavior: Behavior,
+  _task: TaskContract,
   original: string,
   outcome: Exclude<GateOutcome, { kind: "landed" }> | StagedDiffResult,
   attempt: number,

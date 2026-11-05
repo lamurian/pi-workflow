@@ -79,6 +79,7 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
       if (!state || state.phase !== "implementing") {
         return {
           content: [{ type: "text", text: "mark_task_done requires the implementing phase." }],
+          details: {},
           isError: true,
         };
       }
@@ -89,11 +90,12 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
           content: [
             { type: "text", text: `mark_task_done rejected: behavior not in contract (${params.behaviorId}).` },
           ],
+          details: {},
           isError: true,
         };
       }
       if (behavior.status === "removed") {
-        return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], isError: true };
+        return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], details: {}, isError: true };
       }
       behavior.status = "done";
       // T8: gate-backed evidence — for a task with tests refs the evidence
@@ -126,6 +128,7 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
             text: `${params.behaviorId} marked done. Evidence: ${params.evidence}${gateLine}${warning}`,
           },
         ],
+        details: {},
       };
     },
   });
@@ -157,6 +160,7 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
       if (!state || state.phase !== "implementing") {
         return {
           content: [{ type: "text", text: "Not in implementing phase. Nothing to finalize." }],
+          details: {},
           isError: true,
         };
       }
@@ -164,6 +168,7 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
       if (refusal) {
         return {
           content: [{ type: "text", text: `Cannot complete: ${refusal}.` }],
+          details: {},
           isError: true,
         };
       }
@@ -188,6 +193,7 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
                   `Fix the failing suite and re-run complete_implementation.`,
               },
             ],
+            details: {},
             isError: true,
           };
         }
@@ -196,6 +202,7 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
       updateUi(null, ctx);
       return {
         content: [{ type: "text", text: "## Implementation Complete\n\nThe workflow has returned to idle." }],
+        details: {},
       };
     },
   });

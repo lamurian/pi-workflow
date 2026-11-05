@@ -98,6 +98,7 @@ export function registerExploreTool(pi: ExtensionAPI): void {
       if (!instruction) {
         return {
           content: [{ type: "text", text: "No instruction provided." }],
+          details: {},
           isError: true,
         };
       }
@@ -130,6 +131,7 @@ export function registerExploreTool(pi: ExtensionAPI): void {
 
       return {
         content: [{ type: "text", text: summary }],
+        details: {},
       };
     },
   });

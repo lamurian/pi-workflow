@@ -144,12 +144,14 @@ export function registerPrecommitCheckTool(pi: ExtensionAPI): void {
           content: [
             { type: "text", text: "run_precommit_check requires the implementing phase." },
           ],
+          details: {},
           isError: true,
         };
       }
       const result = await runPrecommitCheck(pi, ctx.cwd);
       return {
         content: [{ type: "text", text: formatPrecommitResult(result) }],
+        details: {},
       };
     },
   });

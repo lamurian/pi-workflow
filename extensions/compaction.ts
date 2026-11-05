@@ -1,8 +1,16 @@
 import type {
   ExtensionContext,
+  FileOperations,
   SessionBeforeCompactEvent,
   SessionCompactEvent,
 } from "@earendil-works/pi-coding-agent";
+// pi 1.5.0 does not re-export computeFileLists from the package root (the
+// package exports map only exposes "." and "./rpc-entry"), so the helper is
+// imported from the compaction utils module that exports it.
+import {
+  computeFileLists,
+  createFileOps,
+} from "../node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/utils.js";
 import { loadState } from "./state.ts";
 import { formatTask } from "./task-contract.ts";
 
@@ -48,6 +56,12 @@ export async function handlePreCompact(
   const customSummary =
     `Workflow phase: ${state.phase}.${specSection}${taskSection}${nextSteps}`;
 
+  // fileOps is typed non-optional, but custom/prepared events may omit it —
+  // fall back to empty operations (the tests build minimal events).
+  const fileOps =
+    (preparation as { fileOps?: FileOperations }).fileOps ?? createFileOps();
+  const { readFiles, modifiedFiles } = computeFileLists(fileOps);
+
   return {
     compaction: {
       summary: customSummary,
@@ -55,8 +69,8 @@ export async function handlePreCompact(
       tokensBefore: preparation.tokensBefore,
       details: {
         workflowPhase: state.phase,
-        readFiles: preparation.fileOps?.readFiles ?? [],
-        modifiedFiles: preparation.fileOps?.modifiedFiles ?? [],
+        readFiles,
+        modifiedFiles,
       },
     },
   };
