@@ -726,3 +726,101 @@ describe("halt-report: slop-guard diagnosis (T5)", () => {
     assert.match(derived.recommendation, /advisory/i, "the recommendation offers the advisory mode");
   });
 });
+
+// ═══ T5: deriveDiagnosis outcome rule table ═══
+describe("halt-diagnosis: ordered outcome rule table (T5)", () => {
+  const attempt = (outcome: AttemptRecord["outcome"], n = 1): AttemptRecord => ({
+    attempt: n,
+    outcome,
+    durationSec: 5,
+    progress: true,
+    lastText: "summary",
+  });
+
+  it("returns the contract-guard diagnosis for a history containing a contract-guard attempt", () => {
+    const derived = deriveDiagnosis([attempt("ok"), attempt("contract-guard", 2)], "");
+    assert.equal(derived.diagnosis, "staged diff violates the declared file allowlist");
+    assert.match(derived.recommendation, /\/discuss -> \/finalize/, "keeps the re-declare recommendation");
+    assert.match(derived.recommendation, /A\/M\/D status/, "wording is unchanged");
+  });
+
+  it("returns the hook-rejected diagnosis for a history containing a hook-rejected attempt", () => {
+    const derived = deriveDiagnosis([attempt("ok"), attempt("hook-rejected", 2)], "");
+    assert.equal(derived.diagnosis, "pre-commit hooks rejected the unit's commits");
+    assert.match(derived.recommendation, /failing hook locally/, "wording is unchanged");
+  });
+
+  it("returns the no-changes diagnosis for a history containing a no-changes attempt", () => {
+    const derived = deriveDiagnosis([attempt("ok"), attempt("no-changes", 2)], "");
+    assert.equal(derived.diagnosis, "units finished without producing committed changes");
+    assert.match(derived.recommendation, /Inspect the working tree/, "wording is unchanged");
+  });
+
+  it("returns the blocked diagnosis for a history containing a blocked attempt", () => {
+    const derived = deriveDiagnosis([attempt("ok"), attempt("blocked", 2)], "");
+    assert.equal(derived.diagnosis, "a sandbox-blocked command must run outside the sandbox");
+    assert.match(derived.recommendation, /Action required/, "wording is unchanged");
+  });
+
+  it("returns the commit-timeout diagnosis for a history containing a commit-timeout attempt", () => {
+    const derived = deriveDiagnosis([attempt("ok"), attempt("commit-timeout", 2)], "");
+    assert.equal(derived.diagnosis, "the commit process exceeded its infrastructure budget");
+    assert.match(derived.recommendation, /PI_COMMIT_TIMEOUT_MS/, "wording is unchanged");
+  });
+
+  it("returns the missing-report diagnosis when the last attempt is missing-report", () => {
+    const derived = deriveDiagnosis(
+      [attempt("unit-error"), attempt("missing-report", 2)],
+      "",
+    );
+    assert.equal(derived.diagnosis, "the unit ended without its required JSON report");
+    assert.match(derived.recommendation, /unit-prompt\.md/, "wording is unchanged");
+
+    const notLast = deriveDiagnosis(
+      [attempt("missing-report"), attempt("unit-error", 2)],
+      "",
+    );
+    assert.equal(
+      notLast.diagnosis,
+      "unit attempts failed without converging",
+      "missing-report only diagnoses when it is the last attempt",
+    );
+  });
+
+  it("returns the generic non-converging fallback for a history with only failed outcomes", () => {
+    const derived = deriveDiagnosis(
+      [attempt("unit-error"), attempt("unit-error", 2), attempt("unit-error", 3)],
+      "always-fails",
+    );
+    assert.equal(derived.diagnosis, "unit attempts failed without converging");
+    assert.match(derived.recommendation, /Review the error and attempt history/, "wording is unchanged");
+    assert.match(derived.recommendation, /\/discuss -> \/finalize/, "the fallback keeps the split hint");
+  });
+
+  it("contract-guard outranks test-guard when both appear in the history", () => {
+    const both = deriveDiagnosis(
+      [attempt("test-guard"), attempt("contract-guard", 2)],
+      "",
+    );
+    assert.equal(both.diagnosis, "staged diff violates the declared file allowlist");
+    const testGuardOnly = deriveDiagnosis([attempt("test-guard")], "");
+    assert.equal(testGuardOnly.diagnosis, "staged-diff guard blocked edits to undeclared test files");
+  });
+
+  it("the outcome branches come from an ordered rule table and the function body stays under 80 lines", () => {
+    const full = fileURLToPath(new URL("../extensions/halt-diagnosis.ts", import.meta.url));
+    const src = readFileSync(full, "utf8");
+    assert.match(src, /const DIAGNOSIS_RULES/, "a module-level rule table exists");
+    assert.match(src, /DIAGNOSIS_RULES\.find/, "deriveDiagnosis selects the first matching rule");
+    assert.ok(!/if \(outcomes\.includes\(/.test(src), "no inline outcome branches remain in the source");
+
+    const start = src.indexOf("export function deriveDiagnosis");
+    assert.ok(start >= 0, "deriveDiagnosis is present");
+    const bodyStart = src.indexOf("{", start);
+    const rest = src.slice(bodyStart + 1);
+    const end = rest.indexOf("\n}");
+    assert.ok(end >= 0, "the function's column-0 closing brace is found");
+    const bodyLines = rest.slice(0, end).split("\n").length;
+    assert.ok(bodyLines < 80, `deriveDiagnosis body has ${bodyLines} lines (budget 80)`);
+  });
+});
