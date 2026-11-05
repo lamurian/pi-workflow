@@ -147,12 +147,15 @@ export async function readDiffStat(pi: ExtensionAPI, cwd: string): Promise<strin
  * list cumulative commits across ALL runs of the task, not just the
  * current one. Best-effort: returns null when no baseline was recorded
  * (older sessions, git unavailable, or a failed log) so callers fall
- * back to the per-run landedCommits.
+ * back to the per-run landedCommits. A baselineHead starting with `-`
+ * is rejected before any exec (option-injection guard): git would parse
+ * it as a flag rather than a revision.
  *
  * @param pi          - ExtensionAPI reference.
  * @param cwd         - Working directory.
  * @param baselineHead - HEAD recorded when /implement started (optional).
- * @returns Commit subjects since the baseline, or null when unavailable.
+ * @returns Commit subjects since the baseline, or null when unavailable
+ *          (including a `-`-prefixed baselineHead, which never runs git).
  */
 export async function readCommitsSinceBaseline(
   pi: ExtensionAPI,
@@ -160,6 +163,7 @@ export async function readCommitsSinceBaseline(
   baselineHead: string | undefined,
 ): Promise<string[] | null> {
   if (!baselineHead) return null;
+  if (baselineHead.startsWith("-")) return null;
   try {
     const res = await pi.exec("git", ["log", `${baselineHead}..HEAD`, "--pretty=%s"], { cwd });
     if (res.code !== 0) return null;
