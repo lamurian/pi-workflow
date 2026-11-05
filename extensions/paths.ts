@@ -101,6 +101,14 @@ export interface ImplementConfig {
    */
   testCommands?: string[][];
   /**
+   * Suite config: scoped entries are argv or {argv, scope?, cwd?}; full
+   * entries are argv or {argv, cwd?}. cwd is repo-relative.
+   */
+  tests?: {
+    scoped?: Array<string[] | { argv: string[]; scope?: "files" | "packages" | "full"; cwd?: string }>;
+    full?: Array<string[] | { argv: string[]; cwd?: string }>;
+  };
+  /**
    * Slop gate configuration.
    * Partial values are accepted; missing or invalid fields fall back to
    * defaults via `resolveSlopConfig`.

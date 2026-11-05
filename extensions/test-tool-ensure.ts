@@ -29,6 +29,8 @@ export interface EnsureTestToolResult {
   source: TestSuiteSource;
   /** Suites the generated tool runs (empty when none or an external tool owns the name). */
   suites: TestSuite[];
+  /** Full-gate suites (empty when none or an external tool owns the name). */
+  fullSuites: TestSuite[];
   /** Absolute path of the generated file — present only when a file was written. */
   path?: string;
   /** One-line detection evidence for the save_task output. */
@@ -80,6 +82,7 @@ export async function ensureTestTool(
     return {
       source: "existing",
       suites: [],
+      fullSuites: [],
       message:
         `test tool already registered from ${existing.sourceInfo.path} — ` +
         "no generation, the existing tool owns the name",
@@ -91,6 +94,7 @@ export async function ensureTestTool(
     return {
       source: "none",
       suites: [],
+      fullSuites: [],
       message: "no test tool: no test suites detected (no manifest matched)",
     };
   }
@@ -108,6 +112,7 @@ export async function ensureTestTool(
     return {
       source: "existing",
       suites: [],
+      fullSuites: [],
       message:
         `test tool not generated: ${TEST_EXTENSION_RELATIVE} exists without the ` +
         "GENERATED marker (hand-written) — left untouched",
@@ -123,6 +128,7 @@ export async function ensureTestTool(
   return {
     source: detection.source,
     suites: detection.suites,
+    fullSuites: detection.full ?? [],
     path: targetPath,
     message:
       `test tool ${verb}: ${TEST_EXTENSION_RELATIVE} — runs ` +
@@ -180,6 +186,7 @@ export async function ensureTestExtensionAtStart(
   const detection: TestSuiteDetection = {
     source: state.testTool?.source ?? "detected",
     suites: recorded,
+    full: state.testTool?.fullSuites ?? recorded,
   };
   const ensured = await ensureTestTool(pi, cwd, detection);
   if (!ensured.path) {

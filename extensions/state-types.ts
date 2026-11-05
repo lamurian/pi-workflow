@@ -151,6 +151,8 @@ export interface TestToolInfo {
   source: TestSuiteSource;
   /** Suites the test tool runs (empty for none / external-tool sources). */
   suites: TestSuite[];
+  /** Suites the full gate runs (absent on older sessions). */
+  fullSuites?: TestSuite[];
 }
 
 /** Test run results. */

@@ -37,10 +37,8 @@ function pkg(testScript: string): string {
 describe("detectTestSuites — package.json runner by lockfile", () => {
   it("defaults to npm run test without a lockfile", () => {
     const result = detectTestSuites(facts({ "package.json": pkg("vitest run") }));
-    assert.deepEqual(result, {
-      source: "detected",
-      suites: [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
-    });
+    const s = [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }];
+    assert.deepEqual(result, { source: "detected", suites: s, full: s });
   });
 
   it("derives pnpm, yarn and bun runners from their lockfiles", () => {
@@ -66,10 +64,8 @@ describe("detectTestSuites — package.json runner by lockfile", () => {
 
   it("maps a bare vitest script to `vitest run` (watch-mode hazard)", () => {
     const result = detectTestSuites(facts({ "package.json": pkg("vitest") }));
-    assert.deepEqual(result, {
-      source: "detected",
-      suites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
-    });
+    const s = [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }];
+    assert.deepEqual(result, { source: "detected", suites: s, full: s });
   });
 
   it("maps a bare jest script to `jest --ci` (watch-mode hazard)", () => {
@@ -88,12 +84,12 @@ describe("detectTestSuites — package.json runner by lockfile", () => {
     const result = detectTestSuites(
       facts({ "package.json": JSON.stringify({ scripts: { build: "tsc" } }) }),
     );
-    assert.deepEqual(result, { source: "none", suites: [] });
+    assert.deepEqual(result, { source: "none", suites: [], full: [] });
   });
 
   it("tolerates a broken package.json without throwing", () => {
     const result = detectTestSuites(facts({ "package.json": "{not json" }));
-    assert.deepEqual(result, { source: "none", suites: [] });
+    assert.deepEqual(result, { source: "none", suites: [], full: [] });
   });
 });
 
@@ -101,10 +97,8 @@ describe("detectTestSuites — package.json runner by lockfile", () => {
 describe("detectTestSuites — other toolchains", () => {
   it("go.mod yields `go test ./...`", () => {
     const result = detectTestSuites(facts({ "go.mod": "module example.com/x\n" }));
-    assert.deepEqual(result, {
-      source: "detected",
-      suites: [{ label: "go (go test ./...)", argv: ["go", "test", "./..."] }],
-    });
+    const s = [{ label: "go (go test ./...)", argv: ["go", "test", "./..."] }];
+    assert.deepEqual(result, { source: "detected", suites: s, full: s });
   });
 
   it("Cargo.toml yields `cargo test`", () => {
@@ -130,12 +124,12 @@ describe("detectTestSuites — other toolchains", () => {
 
   it("a Makefile without a test: target yields nothing", () => {
     const result = detectTestSuites(facts({ Makefile: "build:\n\ttsc\n" }));
-    assert.deepEqual(result, { source: "none", suites: [] });
+    assert.deepEqual(result, { source: "none", suites: [], full: [] });
   });
 
   it("does not treat a pattern target (test-%:) as the test target", () => {
     const result = detectTestSuites(facts({ Makefile: "test-%:\n\trun $@\n" }));
-    assert.deepEqual(result, { source: "none", suites: [] });
+    assert.deepEqual(result, { source: "none", suites: [], full: [] });
   });
 });
 
@@ -202,7 +196,10 @@ describe("detectTestSuites — implement.testCommands override", () => {
     });
     assert.deepEqual(result, {
       source: "config",
-      suites: [{ label: "config (npm run test:ci)", argv: ["npm", "run", "test:ci"] }],
+      suites: [
+        { label: "config (npm run test:ci)", argv: ["npm", "run", "test:ci"], scope: "full" },
+      ],
+      full: [{ label: "config (npm run test:ci)", argv: ["npm", "run", "test:ci"] }],
     });
   });
 
@@ -228,7 +225,10 @@ describe("detectTestSuites — implement.testCommands override", () => {
     const partial = detectTestSuites(facts({ "go.mod": "" }), {
       implement: { testCommands: [["go", "test"], "npm test", [], [42]] as never },
     });
-    assert.deepEqual(partial.suites, [{ label: "config (go test)", argv: ["go", "test"] }]);
+    assert.deepEqual(partial.suites, [
+      { label: "config (go test)", argv: ["go", "test"], scope: "packages" },
+    ]);
+    assert.deepEqual(partial.full, [{ label: "config (go test)", argv: ["go", "test"] }]);
 
     const none = detectTestSuites(facts({ "go.mod": "" }), {
       implement: { testCommands: ["npm test", []] as never },
@@ -248,7 +248,7 @@ describe("detectTestSuites — implement.testCommands override", () => {
 // ═══ No manifests ═══
 describe("detectTestSuites — no manifests", () => {
   it("returns { source: none, suites: [] } when nothing matches", () => {
-    assert.deepEqual(detectTestSuites(facts({})), { source: "none", suites: [] });
+    assert.deepEqual(detectTestSuites(facts({})), { source: "none", suites: [], full: [] });
   });
 });
 
@@ -260,10 +260,8 @@ describe("projectFacts (real fs)", () => {
       writeFileSync(join(dir, "package.json"), pkg("vitest"));
       writeFileSync(join(dir, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
       const result = detectTestSuites(projectFacts(dir));
-      assert.deepEqual(result, {
-        source: "detected",
-        suites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
-      });
+      const s = [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }];
+      assert.deepEqual(result, { source: "detected", suites: s, full: s });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -272,7 +270,11 @@ describe("projectFacts (real fs)", () => {
   it("reports none for an empty directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-detect-empty-"));
     try {
-      assert.deepEqual(detectTestSuites(projectFacts(dir)), { source: "none", suites: [] });
+      assert.deepEqual(detectTestSuites(projectFacts(dir)), {
+        source: "none",
+        suites: [],
+        full: [],
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

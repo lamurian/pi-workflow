@@ -633,7 +633,11 @@ describe("save_task test-tool ensure wiring (T3)", () => {
     );
     assert.deepEqual(
       s.testTool,
-      { source: "detected", suites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }] },
+      {
+        source: "detected",
+        suites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
+        fullSuites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
+      },
       "state.testTool records the detection result",
     );
     assert.ok(
@@ -665,7 +669,7 @@ describe("save_task test-tool ensure wiring (T3)", () => {
       /no test tool: no test suites detected \(no manifest matched\)/,
       "the save result carries the no-suite message",
     );
-    assert.deepEqual(s.testTool, { source: "none", suites: [] });
+    assert.deepEqual(s.testTool, { source: "none", suites: [], fullSuites: [] });
     assert.ok(
       !s.task!.files.some((f) => f.path === ".pi/extensions/test.ts"),
       "no files entry is appended when nothing was generated",

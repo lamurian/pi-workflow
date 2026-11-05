@@ -246,17 +246,15 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       const tracked = await readTrackedPaths(pi, ctx.cwd);
       state.task = deriveTaskContract(preserved.contract, tracked);
       const behaviorWarnings = state.task.behaviors.flatMap(collectBehaviorWarnings);
-      // T3/T7: ensure the test tool AFTER validation: it populates
-      // state.testTool and echoes the detection evidence line. The generated
-      // extension is orchestrator-owned — it is never injected into the
-      // contract's allowlist. Precedence: config testCommands -> external
-      // `test` -> manifest detection + generation -> none (warned).
+      // T3/T7: ensure the test tool after validation (orchestrator-owned file,
+      // never injected). Precedence: config -> external `test` -> detection -> none.
       const workflow = await loadWorkflowConfig(ctx.cwd);
       const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
       const ensured = await ensureTestTool(pi, ctx.cwd, detection);
-      state.testTool = { source: ensured.source, suites: ensured.suites };
+      const { source, suites, fullSuites } = ensured;
+      state.testTool = { source, suites, fullSuites };
       const scan = await runContractScan(pi, ctx.cwd, state.task.files);
-      const allWarnings = [...behaviorWarnings, ...(scan?.warnings ?? [])];
+      const allWarnings = [...behaviorWarnings, ...(detection.warnings ?? []), ...(scan?.warnings ?? [])];
       const entering = state.phase === "discussing";
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);

@@ -34,13 +34,15 @@ const DETECTED: TestSuiteDetection = {
     { label: "javascript (npm run test)", argv: ["npm", "run", "test"] },
     { label: "go (go test ./...)", argv: ["go", "test", "./..."] },
   ],
+  full: [{ label: "make (make test)", argv: ["make", "test"] }],
 };
 
-const NONE: TestSuiteDetection = { source: "none", suites: [] };
+const NONE: TestSuiteDetection = { source: "none", suites: [], full: [] };
 
 const CONFIG: TestSuiteDetection = {
   source: "config",
   suites: [{ label: "config (npm run test:ci)", argv: ["npm", "run", "test:ci"] }],
+  full: [{ label: "config (npm run test:ci)", argv: ["npm", "run", "test:ci"] }],
 };
 
 const tmpDirs: string[] = [];
@@ -490,9 +492,10 @@ describe("ensureTestTool", () => {
     assert.ok(!("files" in result), "nothing the caller could inject into a contract allowlist");
     assert.deepEqual(
       Object.keys(result).sort(),
-      ["message", "path", "source", "suites"],
-      "the result shape is exactly { source, suites, path?, message }",
+      ["fullSuites", "message", "path", "source", "suites"],
+      "the result shape is exactly { source, suites, fullSuites, path?, message }",
     );
+    assert.deepEqual(result.fullSuites, DETECTED.full, "the full list is returned");
     assert.equal(
       pi.execCalls.some((c) => c.cmd === "git"),
       false,
@@ -627,6 +630,7 @@ describe("dogfood: pi-workflow's own generated test extension (T5)", () => {
   it("detects the repo's own suite: package.json scripts.test + package-lock -> npm run test", () => {
     const detection = detectTestSuites(projectFacts(repoRoot));
     assert.equal(detection.source, "detected", "manifest scan with no config override");
+    assert.deepEqual(detection.full, detection.suites, "detected full list mirrors the suites");
     assert.deepEqual(
       detection.suites,
       [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],

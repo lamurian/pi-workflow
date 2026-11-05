@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { LANG_PROFILES } from "./test-scan-profiles.ts";
 import type { WorkflowConfig } from "./paths.ts";
+import { parseTestsConfig, type ParsedTestsConfig } from "./test-suite-config.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,10 @@ export interface TestSuiteDetection {
   source: TestSuiteSource;
   /** Every detected suite, in deterministic order. */
   suites: TestSuite[];
+  /** Suites the full gate runs. */
+  full: TestSuite[];
+  /** Config warnings (dropped suites), when any. */
+  warnings?: string[];
 }
 
 /** Injected filesystem facts for one project root (the pure test seam). */
@@ -95,17 +100,9 @@ function suiteFor(manifest: string, argv: string[]): TestSuite {
  */
 function configSuites(
   config: Pick<WorkflowConfig, "implement"> | undefined,
-): TestSuite[] | undefined {
-  const raw = config?.implement?.testCommands;
-  if (!Array.isArray(raw)) return undefined;
-  const suites: TestSuite[] = [];
-  for (const entry of raw) {
-    if (!Array.isArray(entry) || entry.length === 0) continue;
-    if (!entry.every((part) => typeof part === "string" && part.length > 0)) continue;
-    const argv = [...entry];
-    suites.push({ label: `config (${argv.join(" ")})`, argv });
-  }
-  return suites.length > 0 ? suites : undefined;
+  facts: DetectionFacts,
+): ParsedTestsConfig | undefined {
+  return parseTestsConfig(config?.implement, (rel) => facts.hasFile(rel));
 }
 
 /**
@@ -171,8 +168,16 @@ export function detectTestSuites(
   facts: DetectionFacts,
   config?: Pick<WorkflowConfig, "implement">,
 ): TestSuiteDetection {
-  const configured = configSuites(config);
-  if (configured) return { source: "config", suites: configured };
+  const configured = configSuites(config, facts);
+  if (configured) {
+    const out: TestSuiteDetection = {
+      source: "config",
+      suites: configured.scoped,
+      full: configured.full,
+    };
+    if (configured.warnings.length > 0) out.warnings = configured.warnings;
+    return out;
+  }
 
   const suites: TestSuite[] = [];
   const js = packageSuite(facts);
@@ -185,7 +190,11 @@ export function detectTestSuites(
   const make = makeSuite(facts);
   if (make) suites.push(make);
 
-  return { source: suites.length > 0 ? "detected" : "none", suites };
+  return {
+    source: suites.length > 0 ? "detected" : "none",
+    suites,
+    full: suites.map((s) => ({ ...s, argv: [...s.argv] })),
+  };
 }
 
 /**
