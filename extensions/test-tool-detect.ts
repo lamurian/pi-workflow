@@ -4,7 +4,15 @@
 // pi.exec directly. Language labels reuse LANG_PROFILES (test-scan-profiles.ts),
 // keeping detection in sync with the contract scan's profile table.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import {
+  hasPixi,
+  JEST_CONFIGS,
+  lockfileRunner,
+  taskRunnerArgvs,
+  VITEST_CONFIGS,
+} from "./test-tool-detect-runners.ts";
+import { nestedGoModules, walkDirs, workspacePackages } from "./test-tool-detect-nested.ts";
 import { join } from "node:path";
 import { LANG_PROFILES } from "./test-scan-profiles.ts";
 import type { WorkflowConfig } from "./paths.ts";
@@ -49,16 +57,11 @@ export interface DetectionFacts {
   hasFile(name: string): boolean;
   /** File content at the project root, or null when absent/unreadable. */
   readFile(name: string): string | null;
+  /** Directory entries of a repo-relative dir (optional: enables the nested walk). */
+  listDir?(rel: string): Array<{ name: string; dir: boolean }>;
 }
 
 // ── Data tables ───────────────────────────────────────────────────────────────
-
-/** Lockfile → package-manager runner, checked in order (pnpm wins). */
-const LOCKFILE_RUNNERS: ReadonlyArray<readonly [lockfile: string, runner: string]> = [
-  ["pnpm-lock.yaml", "pnpm"],
-  ["yarn.lock", "yarn"],
-  ["bun.lockb", "bun"],
-];
 
 /** Manifest → LANG_PROFILES id (labels stay in sync with the profile table). */
 const MANIFEST_PROFILES: ReadonlyArray<readonly [manifest: string, profileId: string]> = [
@@ -80,13 +83,27 @@ const MANIFEST_PROFILES: ReadonlyArray<readonly [manifest: string, profileId: st
  * @param argv     - The suite command as an argv array.
  * @returns The labeled suite.
  */
-function suiteFor(manifest: string, argv: string[]): TestSuite {
+function suiteFor(
+  manifest: string,
+  argv: string[],
+  scope: TestSuite["scope"],
+  cwd?: string,
+): TestSuite {
   const profileId = MANIFEST_PROFILES.find(([m]) => m === manifest)?.[1];
   const language =
     profileId && LANG_PROFILES.some((profile) => profile.id === profileId)
       ? profileId
-      : "make";
-  return { label: `${language} (${argv.join(" ")})`, argv };
+      : manifest;
+  const where = cwd ? ` @ ${cwd}` : "";
+  const suite: TestSuite = { label: `${language} (${argv.join(" ")})${where}`, argv };
+  if (scope !== "full") suite.scope = scope; // full is the derived default.
+  if (cwd) suite.cwd = cwd;
+  return suite;
+}
+
+/** Prefix a relative path with a package dir ("" = root). */
+function under(dir: string, name: string): string {
+  return dir ? `${dir}/${name}` : name;
 }
 
 /**
@@ -106,44 +123,42 @@ function configSuites(
 }
 
 /**
- * Derive the package suite from package.json's scripts.test.
+ * Derive the JS suite of one package dir ("" = root).
  *
- * The runner comes from the lockfile (pnpm/yarn/bun, else npm). Watch-mode
- * hazard: a bare `vitest` or `jest` script would attach to the TTY and watch
- * forever, so those map to the safe non-watch argv `vitest run` / `jest --ci`.
+ * Bare `vitest`/`jest` scripts (and vitest/jest configs) become scoped files
+ * suites run through the lockfile exec prefix in non-watch mode; any other
+ * test script becomes a full `<runner> run test` suite.
  *
  * @param facts - Injected filesystem facts.
- * @returns The javascript suite, or undefined when package.json has no test script.
+ * @param dir   - Package directory relative to the root.
+ * @returns The javascript suite, or undefined.
  */
-function packageSuite(facts: DetectionFacts): TestSuite | undefined {
-  const raw = facts.readFile("package.json");
-  if (raw === null) return undefined;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return undefined; // Broken manifest: no suite, never a throw.
+function packageSuite(facts: DetectionFacts, dir: string): TestSuite | undefined {
+  const raw = facts.readFile(under(dir, "package.json"));
+  let script = "";
+  if (raw !== null) {
+    try {
+      const parsed = JSON.parse(raw) as { scripts?: Record<string, unknown> } | null;
+      const t = parsed?.scripts?.test;
+      if (typeof t === "string") script = t.trim();
+    } catch {
+      // Broken manifest: treat as no script, never a throw.
+    }
   }
-  const script = (parsed as { scripts?: Record<string, unknown> } | null)?.scripts?.test;
-  if (typeof script !== "string" || !script.trim()) return undefined;
-  const trimmed = script.trim();
-  if (trimmed === "vitest") return suiteFor("package.json", ["vitest", "run"]);
-  if (trimmed === "jest") return suiteFor("package.json", ["jest", "--ci"]);
-  const runner = LOCKFILE_RUNNERS.find(([lockfile]) => facts.hasFile(lockfile))?.[1] ?? "npm";
-  return suiteFor("package.json", [runner, "run", "test"]);
-}
-
-/**
- * Detect a `test:` target in the project Makefile.
- *
- * @param facts - Injected filesystem facts.
- * @returns The make suite, or undefined when no Makefile or no test target.
- */
-function makeSuite(facts: DetectionFacts): TestSuite | undefined {
-  if (!facts.hasFile("Makefile")) return undefined;
-  const text = facts.readFile("Makefile");
-  if (text === null || !/^test\s*:/m.test(text)) return undefined;
-  return suiteFor("Makefile", ["make", "test"]);
+  const { runner, exec } = lockfileRunner(facts);
+  const cwd = dir || undefined;
+  const hasVitestCfg = VITEST_CONFIGS.some((c) => facts.hasFile(under(dir, c)));
+  const hasJestCfg = JEST_CONFIGS.some((c) => facts.hasFile(under(dir, c)));
+  const vitest = (): TestSuite =>
+    suiteFor("package.json", [...exec, "vitest", "run", "{tests}"], "files", cwd);
+  const jest = (): TestSuite =>
+    suiteFor("package.json", [...exec, "jest", "--ci", "{tests}"], "files", cwd);
+  if (script === "vitest") return vitest();
+  if (script === "jest") return jest();
+  if (script) return suiteFor("package.json", [runner, "run", "test"], "full", cwd);
+  if (hasVitestCfg) return vitest();
+  if (hasJestCfg) return jest();
+  return undefined;
 }
 
 // ── Detection ─────────────────────────────────────────────────────────────────
@@ -180,20 +195,36 @@ export function detectTestSuites(
   }
 
   const suites: TestSuite[] = [];
-  const js = packageSuite(facts);
+  const dirs = walkDirs(facts);
+  const js = packageSuite(facts, "");
   if (js) suites.push(js);
-  if (facts.hasFile("go.mod")) suites.push(suiteFor("go.mod", ["go", "test", "./..."]));
-  if (facts.hasFile("Cargo.toml")) suites.push(suiteFor("Cargo.toml", ["cargo", "test"]));
-  if (facts.hasFile("pyproject.toml") || facts.hasFile("pytest.ini")) {
-    suites.push(suiteFor("pytest.ini", ["pytest"]));
+  for (const dir of workspacePackages(facts, dirs)) {
+    const ws = packageSuite(facts, dir);
+    if (ws) suites.push(ws);
   }
-  const make = makeSuite(facts);
-  if (make) suites.push(make);
+  const goArgv = (): string[] => ["go", "test", "{pkgs}"];
+  if (facts.hasFile("go.mod")) suites.push(suiteFor("go.mod", goArgv(), "packages"));
+  for (const dir of nestedGoModules(facts, dirs)) {
+    suites.push(suiteFor("go.mod", goArgv(), "packages", dir));
+  }
+  if (facts.hasFile("Cargo.toml")) {
+    suites.push(suiteFor("Cargo.toml", ["cargo", "test"], "full"));
+  }
+  if (facts.hasFile("pyproject.toml") || facts.hasFile("pytest.ini")) {
+    const argv = hasPixi(facts)
+      ? ["pixi", "run", "python", "-m", "pytest", "{tests}"]
+      : ["pytest", "{tests}"];
+    suites.push(suiteFor("pytest.ini", argv, "files"));
+  }
+  const runners = taskRunnerArgvs(facts).map(
+    (argv): TestSuite => ({ label: `${argv[0]} (${argv.join(" ")})`, argv }),
+  );
+  const full = runners.length > 0 ? runners : suites.map((s) => ({ ...s, argv: [...s.argv] }));
 
   return {
-    source: suites.length > 0 ? "detected" : "none",
+    source: suites.length > 0 || full.length > 0 ? "detected" : "none",
     suites,
-    full: suites.map((s) => ({ ...s, argv: [...s.argv] })),
+    full,
   };
 }
 
@@ -211,6 +242,16 @@ export function projectFacts(cwd: string): DetectionFacts {
         return readFileSync(join(cwd, name), "utf8");
       } catch {
         return null;
+      }
+    },
+    listDir: (rel) => {
+      try {
+        return readdirSync(join(cwd, rel), { withFileTypes: true }).map((e) => ({
+          name: e.name,
+          dir: e.isDirectory(),
+        }));
+      } catch {
+        return [];
       }
     },
   };

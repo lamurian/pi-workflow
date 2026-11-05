@@ -635,8 +635,20 @@ describe("save_task test-tool ensure wiring (T3)", () => {
       s.testTool,
       {
         source: "detected",
-        suites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
-        fullSuites: [{ label: "javascript (vitest run)", argv: ["vitest", "run"] }],
+        suites: [
+          {
+            label: "javascript (npx vitest run {tests})",
+            argv: ["npx", "vitest", "run", "{tests}"],
+            scope: "files",
+          },
+        ],
+        fullSuites: [
+          {
+            label: "javascript (npx vitest run {tests})",
+            argv: ["npx", "vitest", "run", "{tests}"],
+            scope: "files",
+          },
+        ],
       },
       "state.testTool records the detection result",
     );
