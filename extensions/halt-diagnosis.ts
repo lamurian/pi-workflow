@@ -1,4 +1,3 @@
-// ─── Halt diagnosis (T8/T9) ──────────────────────────────────────────────────
 // Outcome classification of a fresh attempt and the diagnosis/recommendation
 // derivation for a halted orchestration. Pure: no I/O — the loop gathers
 // attempts, tree state and findings; this module classifies and diagnoses.

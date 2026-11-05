@@ -1,8 +1,6 @@
 import { spawn } from "node:child_process";
 import { createTimeoutSignal, getPiInvocation, getImplementerTimeoutMs } from "./process-utils.ts";
 
-// ─── Raw subprocess layer ──────────────────────────────────────────────────────
-
 /** Raw output from a spawned pi subprocess. */
 export interface RawProcessResult {
   /** Full stdout captured from the process. */

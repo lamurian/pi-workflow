@@ -15,8 +15,6 @@ import type { SlopGateRunner } from "./slop-gate.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
 
-// ─── Commit gate ───────────────────────────────────────────────────────────────
-
 /** Outcome of a commit attempt, classified by the HEAD gate. */
 export interface CommitAttempt {
   outcome: Exclude<GateOutcome, { kind: "landed" }> | null;

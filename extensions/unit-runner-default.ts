@@ -1,4 +1,3 @@
-// ─── Default unit runner ─────────────────────────────────────────────────────
 // The built-in UnitRunner for one /implement run: writes the per-spawn
 // payload, then spawns the unit with PI_UNIT_FILE pointing at it so the
 // child contract-guard extension can enforce the allowlist in-turn.

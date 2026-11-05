@@ -1,4 +1,3 @@
-// ─── HITL clock and steer watchdog (T12) ─────────────────────────────────────
 // The timeout budgets, the steer-response watchdog and the pause timer state,
 // split out of hitl-pause.ts. The timer state is module-private and exposed
 // through accessors (armHitlTimer, setHitlRearm) so the pause flow never

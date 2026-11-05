@@ -1,4 +1,3 @@
-// ─── Orchestrator test gates: execution (T8) ─────────────────────────────────
 // Runs the per-task SCOPE GATE and the FULL GATE via the orchestrator's own
 // exec (never a unit's tool call). Report text lives in test-gate-report.ts.
 

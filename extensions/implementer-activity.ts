@@ -1,8 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { disarmSteerWatchdog } from "./hitl-clock.ts";
 
-// ─── Zero-token activity relay (T2) ─────────────────────────────────────────────
-
 /** Data persisted for one relayed implementer activity entry. */
 export interface ImplementerActivityData {
   /** Behavior the activity belongs to, e.g. "T2". */

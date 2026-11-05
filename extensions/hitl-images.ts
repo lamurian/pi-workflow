@@ -1,4 +1,3 @@
-// ─── Steer image attachments (T12) ───────────────────────────────────────────
 // Image token detection and best-effort attachment reads, split out of
 // hitl-pause.ts.
 

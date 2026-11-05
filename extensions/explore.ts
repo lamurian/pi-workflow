@@ -8,8 +8,6 @@ import {
 import { synthesizeResults } from "./explore-synthesis.ts";
 import { formatModelRef } from "./process-utils.ts";
 
-// ─── /explore command registration ────────────────────────────────────────────
-
 /**
  * Register the `/explore` slash command.
  *
@@ -42,11 +40,9 @@ export function registerExploreCommand(pi: ExtensionAPI): void {
 
       setStatus("✦ Decomposing exploration into parallel searches...");
 
-      // Phase 1: Decompose
       const tasks = await decomposeInstruction(instruction, ctx, ctx.signal);
       setStatus(`✦ Running ${tasks.length} parallel search${tasks.length > 1 ? "es" : ""}...`);
 
-      // Phase 2: Execute in parallel
       const loader = createLoader(instruction);
       loader.update("Running scouts...");
       const results = await runParallelExploration(
@@ -66,17 +62,13 @@ export function registerExploreCommand(pi: ExtensionAPI): void {
       setStatus(`✦ Synthesis: ${successCount}/${results.length} tasks succeeded`);
       loader.done();
 
-      // Phase 3: Synthesize
       const summary = await synthesizeResults(instruction, results, ctx, ctx.signal);
 
-      // Phase 4: Clear status and inject into conversation
       setStatus(undefined);
       pi.sendUserMessage(summary, { deliverAs: "steer" });
     },
   });
 }
-
-// ─── explore tool registration ─────────────────────────────────────────────────
 
 /**
  * Register the `explore` tool for LLM-initiated use.
@@ -118,12 +110,10 @@ export function registerExploreTool(pi: ExtensionAPI): void {
         });
       };
 
-      // Phase 1: Decompose
       sendProgress(`✦ Decomposing instruction into search tasks...`);
       const tasks = await decomposeInstruction(instruction, ctx, signal);
       sendProgress(`✦ Split into ${tasks.length} parallel search task${tasks.length > 1 ? "s" : ""}`);
 
-      // Phase 2: Execute with per-scout progress
       const results = await runParallelExploration(
         tasks,
         ctx.cwd,
@@ -135,7 +125,6 @@ export function registerExploreTool(pi: ExtensionAPI): void {
         formatModelRef(ctx.model),
       );
 
-      // Phase 3: Synthesize
       sendProgress(`✦ Synthesizing ${results.length} scout result${results.length > 1 ? "s" : ""}...`);
       const summary = await synthesizeResults(instruction, results, ctx, signal);
 

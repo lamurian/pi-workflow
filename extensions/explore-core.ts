@@ -4,20 +4,14 @@ import { loadContent, getPackageRoot } from "./utils.ts";
 import { discoverEmbeddedAgents, runScoutSubprocess, type ScoutResult } from "./scout-runner.ts";
 import { mapWithConcurrencyLimit } from "./process-utils.ts";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
 /** A single search task produced by decomposition. */
 export interface SearchTask {
   agent: string;
   task: string;
 }
 
-// ─── Constants ─────────────────────────────────────────────────────────────────
-
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
-
-// ─── Decomposition ─────────────────────────────────────────────────────────────
 
 /**
  * Decompose an exploration instruction into parallel search tasks.
@@ -94,8 +88,6 @@ export async function decomposeInstruction(
     return [{ agent: "scout", task: `Search the codebase for: ${instruction}` }];
   }
 }
-
-// ─── Parallel execution ────────────────────────────────────────────────────────
 
 /**
  * Run parallel exploration tasks by spawning scout subprocesses.

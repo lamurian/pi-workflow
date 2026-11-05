@@ -1,4 +1,3 @@
-// ─── Generated test extension: source template ───────────────────────────────
 // Renders the self-contained `.pi/extensions/test.ts`. The runtime helper
 // block lives in test-extension-template-helpers.ts. Output must stay
 // byte-identical across refactors (see __tests__/fixtures/test-extension.golden.txt).

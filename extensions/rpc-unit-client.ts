@@ -2,8 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { buildImplementerArgs } from "./implementer-args.ts";
 import { getPiInvocation } from "./process-utils.ts";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
 /** An image attachment in RPC ImageContent format. */
 export interface RpcImage {
   type: "image";
@@ -88,8 +86,6 @@ export interface RpcUnitClient {
   /** True while the child process has not exited. */
   isAlive(): boolean;
 }
-
-// ─── Spawn ─────────────────────────────────────────────────────────────────────
 
 let commandSeq = 0;
 

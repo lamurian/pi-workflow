@@ -1,4 +1,3 @@
-// ─── Completion gate (T1) ────────────────────────────────────────────────────
 // Test-run result parsing (display only) and the deterministic
 // complete_implementation gate. Split out of task-contract.ts.
 

@@ -15,8 +15,6 @@ import { crossCheck } from "./test-scan-check.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
 
-// ─── Deterministic contract scan (T3) ───────────────────────────────────
-
 /** Fixed find excludes for the contract scan. */
 const SCAN_EXCLUDES = ["node_modules", ".git", "dist", "build", "coverage", ".venv", "vendor"];
 /** Scan exec budget: enumerate + read is local I/O, 5s covers cold caches. */

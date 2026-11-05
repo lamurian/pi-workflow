@@ -1,4 +1,3 @@
-// ─── Contract types ──────────────────────────────────────────────────────────
 // Type-only: the v1 TaskContract shape and the normalized contract v2
 // (tasks/sources/tests), split out of state.ts and re-exported from there.
 
@@ -48,8 +47,6 @@ export interface TaskContract {
   /** Behaviors covered by the task. */
   behaviors: Behavior[];
 }
-
-// ─── Contract v2 (T1): normalized tasks/sources/tests ───────────────────────
 
 /** One declared path in a v2 contract list (sources or tests). */
 export interface PathEntry {

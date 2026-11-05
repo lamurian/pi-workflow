@@ -1,4 +1,3 @@
-// ─── Generated test extension: runtime helper block ──────────────────────────
 // Source text of the helper functions embedded in the generated
 // `.pi/extensions/test.ts` (suiteTimeoutMs, tail, readUnitPayload,
 // validScopeEntry, suiteArgv). The text must stay byte-identical across

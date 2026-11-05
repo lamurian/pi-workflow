@@ -1,4 +1,3 @@
-// ─── Guard diff helpers ───────────────────────────────────────────────────────
 // Staged-diff reads and cross-task contamination handling used by the commit
 // gate (git-commit-gate.ts). Split out of git-ops.ts to keep every module
 // within the line budget.

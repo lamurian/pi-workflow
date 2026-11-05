@@ -1,4 +1,3 @@
-// ─── Solo TDD implementation path (T13) ──────────────────────────────────────
 // `--solo` mode: the in-session TDD prompt steered into the conversation,
 // split out of implement.ts.
 

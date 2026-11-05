@@ -23,12 +23,10 @@ import { setupAutocomplete } from "./autocomplete.ts";
 import { handlePreCompact, handlePostCompact } from "./compaction.ts";
 
 export default function (pi: ExtensionAPI): void {
-  // ─── Resources Discovery ────────────────────────────────────
   pi.on("resources_discover", async () => {
     return { skillPaths: [getSkillsDir()] };
   });
 
-  // ─── Session Lifecycle ──────────────────────────────────────
   pi.on("session_start", async (_event, ctx) => {
     resetWidgetVisibility();
     const state = loadState(ctx);
@@ -36,7 +34,6 @@ export default function (pi: ExtensionAPI): void {
     setupAutocomplete(ctx, ctx.cwd);
   });
 
-  // ─── Compaction Preservation ─────────────────────────────────
   pi.on("session_before_compact", async (event, ctx) => {
     const result = await handlePreCompact(event, ctx);
     if (result) return result;
@@ -46,7 +43,6 @@ export default function (pi: ExtensionAPI): void {
     await handlePostCompact(event, ctx);
   });
 
-  // ─── Orphan Safety (T6) ──────────────────────────────────
   // Session shutdown aborts and kills any live implementer child, clears
   // the pause window, and unregisters the input handler so a dying session
   // never leaves an orphaned subprocess steering nobody.
@@ -54,7 +50,6 @@ export default function (pi: ExtensionAPI): void {
     await cleanupOrchestration(500);
   });
 
-  // ─── Context Injection ──────────────────────────────────────
   pi.on("before_agent_start", async (event, ctx) => {
     const currentState = loadState(ctx);
 
@@ -72,11 +67,9 @@ export default function (pi: ExtensionAPI): void {
     };
   });
 
-  // ─── Register Commands ──────────────────────────────────────
   registerExploreCommand(pi);
   registerExploreTool(pi);
 
-  // ─── Register Workflow Tools ────────────────────────────────
   registerSaveTaskTool(pi);
   registerMarkTaskDoneTool(pi);
   registerCompleteImplementationTool(pi);

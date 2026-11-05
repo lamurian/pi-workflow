@@ -5,8 +5,6 @@ import { deriveUnitScope, type UnitScope } from "./contract-derive.ts";
 import { buildContextPreload } from "./unit-context-preload.ts";
 import type { UnitAttempt } from "./implement-loop.ts";
 
-// ─── Task text builders ────────────────────────────────────────────────────────
-
 let _unitPrompt: string | undefined;
 
 /**

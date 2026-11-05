@@ -1,4 +1,3 @@
-// ─── Staged-diff half of the contract guard ─────────────────────────────────
 // Name-status parsing, baseline-diff classification and the commit-time
 // cross-task contamination plan (T4/T6), split out of contract-guard-core.ts.
 // Pure: no I/O, no exec, no model calls — callers supply raw git output.

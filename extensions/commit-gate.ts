@@ -1,8 +1,6 @@
 import type { Behavior, TaskContract } from "./state.ts";
 import type { StagedDiffResult } from "./staged-diff-guard.ts";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
 /** Outcome of the HEAD-gate check after a commit attempt. */
 export type GateOutcome =
   /** HEAD moved: the commit landed and the project's hooks passed. */
@@ -155,8 +153,6 @@ export function classifyCommit(behavior: Behavior, input: GateInput): GateOutcom
       "Implement the behavior's expectedOutput and land actual file changes.",
   };
 }
-
-// ─── Retry instructions ────────────────────────────────────────────────────────
 
 /** Maximum fix-subagent retries per behavior (engineer's note: 5). */
 export const RETRY_BUDGET = 5;

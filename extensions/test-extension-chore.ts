@@ -1,4 +1,3 @@
-// ─── Test-extension chore commit (T9) ────────────────────────────────────────
 // The sole orchestrator-authored chore commit: the regenerated test extension.
 // Path-limited (`git commit --only -- <path>`): other staged work — e.g. left
 // over by a halted unit attempt — never blocks it and is never swept in.

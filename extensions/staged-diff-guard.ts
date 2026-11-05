@@ -1,7 +1,5 @@
 import { isTestPath, LANG_PROFILES } from "./test-scan-profiles.ts";
 
-// ─── Staged-diff tamper guard (T4) ──────────────────────────────────────────
-
 /** Everything the staged-diff classifier needs for one commit attempt. */
 export interface StagedDiffInput {
   /** Raw `git diff --cached --name-status` output. */

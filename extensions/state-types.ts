@@ -1,6 +1,4 @@
-// ─── Workflow state data types ───────────────────────────────────────────────
-// Type-only: the persisted WorkflowState shape plus its field types, split
-// out of state.ts and re-exported from there.
+// Type-only: the persisted WorkflowState shape and its field types.
 
 import type { WorkflowPhase } from "./state.ts";
 import type { AttemptRecord } from "./halt-report.ts";

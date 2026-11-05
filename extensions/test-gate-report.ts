@@ -1,4 +1,3 @@
-// ─── Orchestrator test gates: report text (T8) ───────────────────────────────
 // Fix-forward task text, halt/notify lines, gate reports and done evidence
 // rendered from a recorded GateResult. Pure: no I/O.
 

@@ -1,4 +1,3 @@
-// ─── Orchestrator halt builder ───────────────────────────────────────────────
 // Builds the halt closure used across one runOrchestratedImplement pass:
 // persists lastHalt, enriches the result with tree state, baseline commits,
 // attempt history, findings and the derived diagnosis.

@@ -5,8 +5,6 @@ import type { Behavior } from "./state.ts";
 import { armHitlTimer, armSteerWatchdog, disarmHitlClock, disarmSteerWatchdog, getHitlTimeoutMs, resetHitlClock, setHitlRearm } from "./hitl-clock.ts";
 import { readImageAttachments } from "./hitl-images.ts";
 
-// ─── Manual verification pause (T3) ───────────────────────────────────────────
-
 /** An open manual-verification pause (one at a time; the loop runs one unit). */
 export interface HitlWindow {
   /** Behavior awaiting verification, e.g. "T2". */

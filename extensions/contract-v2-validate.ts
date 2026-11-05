@@ -1,4 +1,3 @@
-// ─── Contract v2 validation (T1) ─────────────────────────────────────────
 // Contract-v2 payload validation (self-naming hard invariants) and the v2 done-status preservation T10 uses on re-save.
 
 import type { ContractV2, FileStatus, PathEntry, TaskUnit } from "./state.ts";

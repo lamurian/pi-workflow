@@ -1,4 +1,3 @@
-// ─── Test-tool ensure step (T2/T7) ──────────────────────────────────────────
 // Registry-aware generation of the local test extension. Decision rule:
 // a `test` tool from ANOTHER path owns the name -> stop (existing); the file
 // carries the GENERATED marker -> regenerate in place; the file exists without

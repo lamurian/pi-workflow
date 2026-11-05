@@ -3,8 +3,6 @@ import { complete } from "@earendil-works/pi-ai";
 import { loadContent } from "./utils.ts";
 import type { ScoutResult } from "./scout-runner.ts";
 
-// ─── Synthesis ─────────────────────────────────────────────────────────────────
-
 /**
  * Synthesize multiple scout results into a structured summary.
  *

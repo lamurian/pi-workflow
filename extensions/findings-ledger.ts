@@ -78,8 +78,6 @@ export function renderFindingsSection(ledger: Finding[] | undefined): string {
   return `\n\n${FINDINGS_SECTION_HEADING}\n\n${lines.join("\n")}\n`;
 }
 
-// ─── Tool-call digest (T5) ────────────────────────────────────────────────────
-
 /** Maximum characters kept from a bash command head in the digest. */
 export const TOOL_DIGEST_MAX_CHARS = 120;
 

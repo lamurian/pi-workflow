@@ -1,11 +1,8 @@
-// ─── Deterministic test-scan derivation layers ─────────────────────────────
 // Pure module, split from test-scan.ts to stay under the 300-line rule.
 // Depends only on the profile/data table in test-scan-profiles.ts.
 
 import { profileFor, isTestPath, buildImportRegex, escapeRe } from "./test-scan-profiles.ts";
 import type { LangProfile } from "./test-scan-profiles.ts";
-
-// ─── Derivation layers ─────────────────────────────────────────────────────────
 
 /** How a test file was matched to a source entry. */
 export type MatchMethod = "structural" | "import-path" | "symbol" | "basename";

@@ -1,12 +1,10 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { cancelVerificationPause, cleanupOrchestration } from "./hitl-pause.ts";
 
-// ─── In-flight orchestration registry (B2: /discuss cancellation) ─────────────
-
 /** True while a background orchestrated implementation is running. */
 let inFlight = false;
 
-/** Set by cancelOrchestration; checked at behavior-loop checkpoints. */
+/** Set by cancelOrchestration. */
 let cancelled = false;
 
 /** Settlement promise of the current background run, when launched. */

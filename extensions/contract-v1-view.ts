@@ -1,4 +1,3 @@
-// ─── Contract v1 view (T10) ──────────────────────────────────────────────────
 // The TaskContract view older consumers read from a saved v2 contract: the
 // derivation, the v1 behavior warnings save_task surfaces over that view, and
 // the v1 done-status preservation for legacy drafts.

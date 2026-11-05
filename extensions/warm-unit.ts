@@ -1,4 +1,3 @@
-// ─── Warm unit children (T5) ──────────────────────────────────────────────────
 // Test-kind children stay alive after their report so hook-rejected/no-changes
 // retries re-deliver fix tasks as `prompt` + streamingBehavior "steer" into the SAME child (attempt recording, warm rounds, completion shutdowns).
 

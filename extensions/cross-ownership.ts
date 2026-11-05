@@ -1,4 +1,3 @@
-// ─── Cross-ownership hook blocks (T4/T1) ─────────────────────────────────────
 // Path extraction and ownership matching over the RAW hook evidence of a
 // rejected commit. The classifier scans only the hook output (never the
 // investigation text, which embeds tree state that is not hook evidence) and

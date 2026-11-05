@@ -1,4 +1,3 @@
-// ─── Read-only git helpers ────────────────────────────────────────────────────
 // HEAD, tree-state, diff-stat and commit-log reads plus the commit timeout
 // budget. Commit-invoking code lives in git-commit-gate.ts (behavior commits)
 // and test-extension-chore.ts (the sole chore commit).
@@ -175,8 +174,6 @@ export async function readCommitsSinceBaseline(
     return null;
   }
 }
-
-// ─── Commit timeout budget ─────────────────────────────────────────────────────
 
 /** Default git-commit budget: hooks run lint+format+test on cold caches. */
 export const DEFAULT_COMMIT_TIMEOUT_MS = 300_000;

@@ -1,7 +1,5 @@
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 
-// ─── Active client registry ────────────────────────────────────────────────────
-
 /**
  * The single live implementer child, if any (one unit runs at a time).
  *

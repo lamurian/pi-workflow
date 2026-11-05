@@ -5,8 +5,6 @@ import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
 /** One orchestrator unit: a behavior plus the task text handed to its subprocess. */
 export interface UnitTask {
   /** Behavior id, e.g. "T1". */
@@ -17,8 +15,6 @@ export interface UnitTask {
   kind?: "test" | "manual";
   thinking?: string; // escalation floor for this spawn's --thinking; omitted on the first attempt
 }
-
-// ─── Unit runner ───────────────────────────────────────────────────────────────
 
 /** Fraction of the per-unit time budget at which the wrap-up steer fires. */
 export const SOFT_DEADLINE_RATIO = 0.75;

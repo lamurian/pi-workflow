@@ -1,4 +1,3 @@
-// ─── Rendered scan-evidence output with basename fan-out collapse ─────────────
 // Pure module, split from test-scan.ts to stay under the 300-line rule.
 // Collapses generic-basename fan-out per entry so save_task's tool result
 // stays small; high-confidence matches are never collapsed.

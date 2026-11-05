@@ -4,8 +4,6 @@ import { join, resolve } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { createTimeoutSignal, getPiInvocation, resolveChildThinking } from "./process-utils.ts";
 
-// ─── Types ─────────────────────────────────────────────────────────────────────
-
 /** Configuration for a subagent. */
 export interface AgentConfig {
   name: string;
@@ -26,8 +24,6 @@ export interface ScoutResult {
   exitCode: number;
   errorMessage?: string;
 }
-
-// ─── Agent discovery ───────────────────────────────────────────────────────────
 
 /**
  * Discover agents embedded in the extension's content/agents/ directory.
@@ -85,8 +81,6 @@ export function discoverEmbeddedAgents(packageRoot: string): AgentConfig[] {
   return agents;
 }
 
-// ─── Scout args builder ──────────────────────────────────────────────────────────
-
 /**
  * Build the argv array for the scout subprocess.
  *
@@ -128,8 +122,6 @@ export function buildScoutArgs(agent: AgentConfig, task: string, modelRef?: stri
   args.push(`Task: ${task}`);
   return args;
 }
-
-// ─── Scout subprocess execution ────────────────────────────────────────────────
 
 /**
  * Default per-scout timeout in milliseconds. Scouts that exceed this are

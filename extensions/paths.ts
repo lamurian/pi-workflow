@@ -125,7 +125,7 @@ const DEFAULT_WORKFLOW: WorkflowConfig = {
   },
 };
 
-// ── JSON config loading (same pattern as sandbox.json) ────────────────────────
+// ── JSON config loading ────────────────────────────────────────────────────
 
 /**
  * Merge semantics: defaults ← global JSON ← project-local JSON.

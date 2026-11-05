@@ -1,5 +1,3 @@
-// ─── Implementer subprocess argv builder ───────────────────────────────────────
-
 import { fileURLToPath } from "node:url";
 import { resolveChildThinking } from "./process-utils.ts";
 

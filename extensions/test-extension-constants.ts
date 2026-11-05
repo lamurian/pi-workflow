@@ -1,4 +1,3 @@
-// ─── Test-extension constants ─────────────────────────────────────────────────
 // Shared by the generator (test-extension-template*.ts), the ensure step
 // (test-tool-ensure.ts) and the orchestrator gates (test-gate-run.ts).
 

@@ -1,10 +1,7 @@
-// ─── Deterministic test-scan cross-check classifier ────────────────────────
 // Pure module, split from test-scan.ts to stay under the 300-line rule.
 
 import type { DeriveResult, MatchMethod } from "./test-scan-derive.ts";
 import type { FileEntry } from "./state.ts";
-
-// ─── Cross-check classifier ────────────────────────────────────────────────────
 
 /** Advisory warnings produced by crossCheck. */
 export type ScanWarningKind =

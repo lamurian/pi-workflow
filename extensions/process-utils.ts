@@ -1,8 +1,6 @@
 import { existsSync } from "node:fs";
 import { basename } from "node:path";
 
-// ─── Timeout signal ─────────────────────────────────────────────────────────────
-
 /**
  * Create an AbortSignal that fires after a timeout, optionally combined with
  * a parent signal (e.g., from the caller). Whichever fires first wins.
@@ -47,8 +45,6 @@ export function createTimeoutSignal(
   return { signal: controller.signal, clear };
 }
 
-// ─── Model reference ───────────────────────────────────────────────────────────
-
 /**
  * Format a session model as a canonical `provider/id` CLI reference.
  *
@@ -66,8 +62,6 @@ export function formatModelRef(
   if (!model?.provider || !model.id) return undefined;
   return `${model.provider}/${model.id}`;
 }
-
-// ─── Subprocess invocation ────────────────────────────────────────────────────
 
 /**
  * Resolve how to invoke `pi` as a subprocess.
@@ -124,8 +118,6 @@ export function getImplementerTimeoutMs(
   return DEFAULT_IMPLEMENT_TIMEOUT_MS;
 }
 
-// ─── Child thinking level ──────────────────────────────────────────────────────
-
 /** Ordered thinking levels; escalation floors only ever move up this ladder. */
 const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
 
@@ -159,8 +151,6 @@ export function resolveChildThinking(
   if (floorIdx === -1) return base;
   return floorIdx > THINKING_LEVELS.indexOf(base) ? floor : base;
 }
-
-// ─── Concurrency limiter ───────────────────────────────────────────────────────
 
 /**
  * Run an async function over an array of items with a maximum concurrency limit.

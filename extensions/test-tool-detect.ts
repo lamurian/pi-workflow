@@ -1,4 +1,3 @@
-// ─── Test-suite detection (T1) ────────────────────────────────────────────────
 // Pure decision logic over INJECTED fs facts: manifest scanning is deterministic
 // and testable without touching a real project. Commands are argv arrays —
 // never shell strings — so the generated test extension can run them via

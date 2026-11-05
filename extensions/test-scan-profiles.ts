@@ -1,4 +1,3 @@
-// ─── Deterministic language-agnostic test scan ─────────────────────────────────
 // Pure module, split from test-scan.ts to stay under the 300-line rule.
 // Holds the language profile table plus path predicates and import-regex
 // builders shared by derivation (test-scan-derive.ts) and the commit gate.

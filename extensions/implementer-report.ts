@@ -1,5 +1,3 @@
-// ─── Implementer subprocess (orchestrator units) ─────────────────────────────
-
 // The argv builder cluster (buildImplementerArgs, getImplementerTools,
 // contractGuardExtensionPath) lives in implementer-args.ts; re-exported
 // here so existing imports keep working unchanged.

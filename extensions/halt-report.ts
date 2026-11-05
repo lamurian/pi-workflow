@@ -1,11 +1,7 @@
 /**
- * Enriched halt report rendering (T8, pure logic).
- *
- * Holds the attempt-history types and the markdown renderer used by
- * composeHaltReport in implement.ts (a thin wrapper); the attempt outcome
- * classification and the diagnosis derivation live in halt-diagnosis.ts.
- * No I/O: the loop gathers commits, tree state and findings; this module
- * only renders.
+ * Enriched halt report rendering (T8, pure logic): the attempt-history
+ * types and the markdown renderer. No I/O: the loop gathers commits, tree
+ * state and findings; this module only renders.
  */
 
 import type { Finding } from "./findings-ledger.ts";
