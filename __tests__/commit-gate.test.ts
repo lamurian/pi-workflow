@@ -306,6 +306,8 @@ interface T6Call {
   cmd: string;
   args: string[];
   stdout: string;
+  /** Exit code the mock returned (0 unless a failure knob says otherwise). */
+  code: number;
 }
 
 /** The views the commit gate reads in a v2 session (T3). */
@@ -320,6 +322,12 @@ interface T6Fixture {
   status?: string;
   /** `git ls-files --cached --others --exclude-standard` — the stageable paths. */
   lsFiles?: string;
+  /** Throw from every `git diff --cached --name-status` read (T3 fail closed). */
+  throwCachedNameStatus?: boolean;
+  /** Exit code for baseline-ref `git diff --cached --name-status` reads (default 0). */
+  baselineExit?: number;
+  /** Exit code for HEAD `git diff --cached --name-status` reads (default 0). */
+  headExit?: number;
 }
 
 /**
@@ -358,6 +366,8 @@ function piT6(fixture: string | T6Fixture): { pi: ExtensionAPI; calls: T6Call[] 
     setActiveTools: () => {},
     exec: (async (cmd: string, args: string[]) => {
       let stdout = "";
+      let stderr = "";
+      let code = 0;
       if (cmd === "git" && args[0] === "rev-parse") stdout = `head${head}\n`;
       else if (cmd === "git" && args[0] === "restore") {
         restored.add(args[args.length - 1] ?? "");
@@ -365,16 +375,21 @@ function piT6(fixture: string | T6Fixture): { pi: ExtensionAPI; calls: T6Call[] 
       else if (cmd === "git" && args[0] === "status") stdout = fx.status ?? "";
       else if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
         if (!args.includes("--cached")) stdout = render(fx.worktree ?? "");
-        else
-          stdout = render(
-            args[args.length - 1] === "HEAD" ? (fx.head ?? "") : (fx.baseline ?? ""),
-          );
+        else if (fx.throwCachedNameStatus) {
+          calls.push({ cmd, args, stdout: "", code: 1 });
+          throw new Error("spawn git diff --cached --name-status ENOENT");
+        } else {
+          const isHead = args[args.length - 1] === "HEAD";
+          code = isHead ? (fx.headExit ?? 0) : (fx.baselineExit ?? 0);
+          if (code !== 0) stderr = "fatal: bad revision";
+          else stdout = render(isHead ? (fx.head ?? "") : (fx.baseline ?? ""));
+        }
       } else if (cmd === "git" && args[0] === "commit") {
         head++;
         stdout = "[main t6] landed\n";
       }
-      const result = { stdout, stderr: "", code: 0, killed: false };
-      if (cmd === "git") calls.push({ cmd, args, stdout });
+      const result = { stdout, stderr, code, killed: false };
+      if (cmd === "git") calls.push({ cmd, args, stdout, code });
       return result;
     }),
   } as unknown as ExtensionAPI;
@@ -1008,5 +1023,106 @@ describe("retryExhaustedDetail (T5)", () => {
       retryExhaustedDetail("no-changes", "T1"),
       "no changes detected for T1 after 5 retries",
     );
+  });
+});
+
+// ═══ T3: staged name-status reads fail closed ═══
+
+describe("stagedNameStatusReadFailsClosed (T3)", () => {
+  /** Fixture views that reach the staged read: teeth pass the allowlist, one owned path. */
+  const REACH_STAGED = {
+    worktree: "M\tsrc/mine.ts\n",
+    baseline: "M\tsrc/mine.ts\n",
+    head: "M\tsrc/mine.ts\n",
+    status: " M src/mine.ts\n",
+    lsFiles: "src/mine.ts\n",
+  };
+
+  it("when git diff --cached --name-status throws, the commit gate returns a halt outcome and never invokes git commit", async () => {
+    const { pi, calls } = piT6({ ...REACH_STAGED, throwCachedNameStatus: true });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "contract-guard", JSON.stringify(attempt.outcome));
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit is never invoked when the staged read throws",
+    );
+  });
+
+  it("when both the baseline diff and the HEAD fallback exit non-zero, the commit gate returns a halt outcome and never invokes git commit", async () => {
+    const { pi, calls } = piT6({ ...REACH_STAGED, baselineExit: 128, headExit: 128 });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome?.kind, "contract-guard", JSON.stringify(attempt.outcome));
+    assert.ok(
+      !calls.some((c) => c.args[0] === "commit"),
+      "git commit is never invoked when both staged reads fail",
+    );
+  });
+
+  it("the halt investigation names the failed git diff --cached command", async () => {
+    const { pi } = piT6({ ...REACH_STAGED, baselineExit: 128, headExit: 128 });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    const investigation = attempt.outcome?.investigation ?? "";
+    assert.match(
+      investigation,
+      /git diff --cached --name-status/,
+      `investigation must name the failed command, got: ${investigation}`,
+    );
+    assert.match(investigation, /failing closed/, "the halt states it fails closed");
+  });
+
+  it("when the baseline-ref diff exits non-zero but the HEAD fallback succeeds, the gate proceeds using the HEAD output", async () => {
+    const { pi, calls } = piT6({ ...REACH_STAGED, baselineExit: 128 });
+    const attempt = await commitAndGate(
+      pi,
+      "/tmp/test",
+      "feat(core): land T1",
+      BEHAVIOR,
+      TASK,
+      1,
+      "base123",
+      CONTAMINATION_CONTRACT,
+    );
+
+    assert.equal(attempt.outcome, null, JSON.stringify(attempt.outcome));
+    assert.ok(
+      calls.some((c) => c.args[0] === "commit"),
+      "the gate proceeds to git commit on the HEAD fallback output",
+    );
+    const cached = nameStatusReads(calls).filter((c) => c.args.includes("--cached"));
+    assert.equal(cached[0]?.args[cached[0].args.length - 1], "base123", "baseline read first");
+    assert.equal(cached[0]?.code, 128, "the baseline-ref diff exited non-zero");
+    assert.equal(cached[1]?.args[cached[1].args.length - 1], "HEAD", "HEAD fallback next");
+    assert.equal(cached[1]?.code, 0, "the HEAD fallback succeeded");
+    assert.match(cached[1]?.stdout ?? "", /src\/mine\.ts/, "the staged set came from HEAD");
   });
 });

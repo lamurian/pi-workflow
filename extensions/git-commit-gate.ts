@@ -5,7 +5,7 @@ import { TEST_EXTENSION_PATH, type DeclaredFile } from "./contract-guard-core.ts
 import { classifyBaselineDiff, planUnstage } from "./contract-guard-diff.ts";
 import { deriveAllowlist } from "./contract-derive.ts";
 import {
-  filterOrchestratorOwned, ownerlessHalt, readGuardNameStatus,
+  filterOrchestratorOwned, NameStatusReadError, ownerlessHalt, readGuardNameStatus,
   runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
 import {
@@ -209,6 +209,15 @@ export async function commitAndGate(
     commitExitCode = res.code;
     commitOutput = [res.stdout ?? "", res.stderr ?? ""].filter(Boolean).join("\n");
   } catch (err) {
+    if (err instanceof NameStatusReadError) {
+      // Fail closed (T3): the staged set could never be read — halt, never commit.
+      const investigation =
+        `## Contract-guard: staged name-status read failed\n\n${err.message}\n\n` +
+        "The staged set could not be read — failing closed: git commit was never invoked.";
+      return { outcome: { kind: "contract-guard", violations: [err.message],
+        investigation: withRemediation(investigation, remediation) },
+        ...(remediation.length > 0 ? { remediation } : {}) };
+    }
     const message = String((err as Error)?.message ?? err);
     commitOutput = message;
     timedOut = /timed out/i.test(message);

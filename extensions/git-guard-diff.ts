@@ -23,6 +23,9 @@ export type UnstageResult =
   | { ok: true; remediation: string[] }
   | { ok: false; halt: GuardHalt };
 
+/** A staged name-status read that failed; the message names the git command that failed. */
+export class NameStatusReadError extends Error {}
+
 /**
  * Append the cross-task remediation note to a guard investigation.
  *
@@ -41,38 +44,35 @@ export function withRemediation(investigation: string, remediation: string[]): s
 
 /**
  * Read `git diff --cached --name-status --no-renames <ref>` for the allowlist
- * and test-guard checks. Falls back to HEAD output on a failed diff so a bad
- * baseline never bricks the gate (hooks still gate the commit).
+ * and test-guard checks. Falls back to HEAD output when the baseline diff exits
+ * non-zero so a bad baseline never bricks the gate (hooks still gate the commit).
+ * Fail closed: a git failure throws NameStatusReadError instead of returning "".
  *
  * @param pi  - ExtensionAPI reference.
  * @param cwd - Working directory.
  * @param ref - Baseline ref (baselineHead or "HEAD").
- * @returns Raw name-status output, or "" when git fails.
+ * @returns Raw name-status output; throws NameStatusReadError when git fails.
  */
 export async function runBaselineNameStatus(
   pi: ExtensionAPI,
   cwd: string,
   ref: string,
 ): Promise<string> {
-  try {
-    const res = await pi.exec(
-      "git",
-      ["diff", "--cached", "--name-status", "--no-renames", ref],
-      { cwd },
-    );
-    if (res.code === 0) return res.stdout ?? "";
-    if (ref !== "HEAD") {
-      const fallback = await pi.exec(
-        "git",
-        ["diff", "--cached", "--name-status", "--no-renames", "HEAD"],
-        { cwd },
-      );
-      if (fallback.code === 0) return fallback.stdout ?? "";
+  const read = async (r: string): Promise<{ out?: string; detail: string }> => {
+    try {
+      const res = await pi.exec("git", ["diff", "--cached", "--name-status", "--no-renames", r], { cwd });
+      if (res.code === 0) return { out: res.stdout ?? "", detail: "" };
+      return { detail: `git diff --cached --name-status --no-renames ${r} exited ${res.code}: ${(res.stderr || res.stdout || "(no output)").trim()}` };
+    } catch (err) {
+      throw new NameStatusReadError(`git diff --cached --name-status --no-renames ${r} threw: ${String((err as Error)?.message ?? err)}`);
     }
-    return "";
-  } catch {
-    return "";
-  }
+  };
+  const primary = await read(ref);
+  if (primary.out !== undefined) return primary.out;
+  if (ref === "HEAD") throw new NameStatusReadError(primary.detail);
+  const fallback = await read("HEAD");
+  if (fallback.out !== undefined) return fallback.out;
+  throw new NameStatusReadError(`${primary.detail}\n${fallback.detail}`);
 }
 
 /**
@@ -83,7 +83,8 @@ export async function runBaselineNameStatus(
  *
  * @param pi  - ExtensionAPI reference.
  * @param cwd - Working directory.
- * @returns Raw name-status output of the staged set, or "" when git fails.
+ * @returns Raw name-status output of the staged set; throws NameStatusReadError
+ * when git fails (fail closed: the caller must never treat failure as empty).
  */
 export async function runHeadStagedNameStatus(
   pi: ExtensionAPI,
@@ -140,7 +141,8 @@ export function filterOrchestratorOwned(
  * @param pi  - ExtensionAPI reference.
  * @param cwd - Working directory.
  * @param ref - Baseline ref (baselineHead or "HEAD").
- * @returns The filtered name-status output.
+ * @returns The filtered name-status output; throws NameStatusReadError when the
+ * underlying staged read fails (fail closed).
  */
 export async function readGuardNameStatus(
   pi: ExtensionAPI,
