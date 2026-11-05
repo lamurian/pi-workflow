@@ -17,6 +17,10 @@ export interface TestSuite {
   label: string;
   /** Command as an argv array — never a shell string. */
   argv: string[];
+  /** Routing scope: files, packages, or full (default derived from argv). */
+  scope?: "files" | "packages" | "full";
+  /** Repo-relative working directory of the suite (default "."). */
+  cwd?: string;
 }
 
 /**
