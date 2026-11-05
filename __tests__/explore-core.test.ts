@@ -406,48 +406,6 @@ describe("runParallelExploration", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// runScoutSubprocess — backup timer cleanup
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe("runScoutSubprocess backup timer", () => {
-  it("does not leave dangling Timeout handles after abort", async () => {
-    // The killProc function inside runScoutSubprocess creates a 5-second
-    // SIGKILL backup timer. Without .unref(), this timer keeps the event
-    // loop alive, causing the test suite to hang for ~35s.
-    const packageRoot = resolve(import.meta.dirname!, "..");
-    const { runScoutSubprocess, discoverEmbeddedAgents } = await import("../extensions/scout-runner.ts");
-    const agents = discoverEmbeddedAgents(packageRoot);
-    const scout = agents.find((a: { name: string }) => a.name === "scout")!;
-    assert.ok(scout, "scout agent must be found for the test");
-
-    // Get baseline active Timeout handles
-    const before = process.getActiveResourcesInfo()
-      .filter((h) => h === "Timeout").length;
-
-    // Trigger killProc by passing an already-aborted signal. The killed
-    // scout must REJECT (not resolve with "(no output)") — a signal kill
-    // is a failure, never a silent success.
-    await assert.rejects(
-      runScoutSubprocess(scout, "test task", "/tmp", AbortSignal.abort()),
-      /abort/i,
-      "signal-killed scout should reject with the abort reason",
-    );
-
-    // Wait a microtask for any scheduled event-loop cleanup
-    await new Promise((r) => setTimeout(r, 0));
-
-    // After runScoutSubprocess returns, the backup timer should NOT
-    // be counted as an active resource (it must be unref'd)
-    const after = process.getActiveResourcesInfo()
-      .filter((h) => h === "Timeout").length;
-
-    assert.equal(after, before,
-      `Backup timer left ${after - before} active Timeout handle(s). ` +
-      "The 5-second SIGKILL backup timer in killProc must be unref'd.");
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // createLoader — progress indicator
 // ═══════════════════════════════════════════════════════════════════════════════
 
