@@ -120,15 +120,16 @@ export async function commitAndGate(
       // T3 A3: allowlist gates the WORKTREE teeth vs the baseline — a never-staged
       // edit outside the allowlist halts (bug 1 filtered in readTeethNameStatus).
       const teeth = await readTeethNameStatus(pi, cwd, baselineRef);
+      // T2: still-pending vs HEAD — a baseline D absent from this set already landed.
+      const changed = new Set(await readChangedPaths(pi, cwd));
       const allowlist = classifyBaselineDiff({
         nameStatus: teeth, files: declared, baselineRef, taskId: behavior.id,
+        pendingVsHead: changed,
       });
       if (allowlist.violations.length > 0) return guardHalt(allowlist);
       // T3 A1: stage only owned paths (sources then tests) via `git add -- <paths>`;
-      // `git add --all` never runs in v2. The changed set comes from
-      // `git status --short --untracked-files=all` so files inside a brand-new
-      // directory match their declared paths (plain --short collapses the dir).
-      const changed = new Set(await readChangedPaths(pi, cwd));
+      // `git add --all` never runs in v2; `changed` comes from `git status --short
+      // --untracked-files=all` so brand-new-directory files still match their path.
       const ownedPaths = declared
         .filter((e) => e.refs?.includes(behavior.id))
         .map((e) => e.path)

@@ -62,14 +62,17 @@ export interface BaselineDiffResult {
  *
  * HARD violations (T4) — nothing else halts: (a) a staged path declared
  * nowhere in the contract, (b) a staged `D` on a path whose refs do not
- * include the committing task (`taskId`), and (c) any `.git/` path. Staged
+ * include the committing task (`taskId`) — skipped when `pendingVsHead` is
+ * given and lacks the path, i.e. the delete already landed since the
+ * baseline — and (c) any `.git/` path. Staged
  * A on a declared M path (and the reverse) is NEVER a violation — at most
  * an advisory line. v1 entries carry no refs: without a `taskId`, staged D
  * falls back to the declared D delete authority. Pure: the caller supplies
  * the raw output.
  *
- * @param input - Raw name-status output, declared files, baseline ref label
- *                and (optionally) the committing task id.
+ * @param input - Raw name-status output, declared files, baseline ref label,
+ *                (optionally) the committing task id and (optionally) the set
+ *                of paths still pending versus HEAD (`pendingVsHead`).
  * @returns The violations, the advisories and the investigation text
  *          (empty violations = clean).
  */
@@ -79,6 +82,8 @@ export function classifyBaselineDiff(input: {
   baselineRef?: string;
   /** Committing task id: staged D then requires ownership via the entry's refs. */
   taskId?: string;
+  /** Paths still pending versus HEAD: a `D` absent from this set already landed. */
+  pendingVsHead?: ReadonlySet<string>;
 }): BaselineDiffResult {
   const declaredByPath = new Map<string, DeclaredFile>();
   for (const f of input.files) declaredByPath.set(f.path.replace(/^\.\//, ""), f);
@@ -100,6 +105,8 @@ export function classifyBaselineDiff(input: {
       continue;
     }
     if (entry.status === "D") {
+      // T2: absent from pendingVsHead ⇒ already landed — skip the ownership check.
+      if (input.pendingVsHead !== undefined && !input.pendingVsHead.has(path)) continue;
       if (input.taskId !== undefined) {
         const owners = ownersOf(declared);
         if (!owners.includes(input.taskId)) {
