@@ -3723,6 +3723,17 @@ describe("T8: orchestrator test gates", () => {
     assert.match(res.content[0].text, /go \(go test \.\/\.\.\.\)/, "the failing suite is named");
     assert.match(res.content[0].text, /--- FAIL: TestGate/, "the failing suite output tail is carried");
     assert.equal(s.phase, "implementing", "a red full gate never transitions to idle");
+    // T6: the final-gate result and the attempt counter land on state.
+    assert.equal(s.finalGate?.passed, false, "the red result is persisted on state");
+    assert.ok(
+      s.finalGate!.suites.some((x) => /--- FAIL: TestGate/.test(x.tail)),
+      "the persisted result carries the failing suite tail",
+    );
+    assert.ok(
+      !Number.isNaN(Date.parse(s.finalGate!.at)),
+      "the persisted result carries a timestamp",
+    );
+    assert.equal(s.finalGateAttempts, 1, "the first red increments the attempt counter");
     // ALL suites ran unfiltered: the Go suite keeps its plain ./... argv.
     const goRun = execLog.find((e) => e.cmd === "go");
     assert.deepEqual(goRun!.args, ["test", "./..."], "the full gate runs every suite unfiltered");
@@ -3735,6 +3746,8 @@ describe("T8: orchestrator test gates", () => {
     );
     assert.notEqual(ok.isError, true, "a green full gate allows completion");
     assert.equal(s.phase, "idle");
+    assert.equal(s.finalGate?.passed, true, "the green result replaces the red one");
+    assert.equal(s.finalGateAttempts, 0, "a green final gate resets the attempt counter");
   });
 
   it("markDoneEvidenceCarriesGateResult: mark_task_done evidence for a task with tests refs carries the orchestrator gate result line (scope and pass/fail)", async () => {
@@ -3778,6 +3791,96 @@ describe("T8: orchestrator test gates", () => {
     );
     assert.match(res2.content[0].text, /orchestrator gate/i);
     assert.match(res2.content[0].text, /failed/, "the gate line carries the fail verdict");
+  });
+});
+
+// ═══ T6: solo final-gate attempt counter ═══
+describe("T6: solo complete_implementation final-gate attempt counter", () => {
+  const GO_SUITE = { label: "go (go test ./...)", argv: ["go", "test", "./..."] };
+  const JS_SUITE = { label: "javascript (npm run test)", argv: ["npm", "run", "test"] };
+
+  /** Implementing state with all behaviors done and the recorded suites. */
+  function soloState(): WorkflowState {
+    const s = finalizingState();
+    s.phase = "implementing";
+    s.task!.behaviors[0].status = "done";
+    s.testTool = { source: "detected", suites: [GO_SUITE, JS_SUITE] };
+    return s;
+  }
+
+  /** Exec mock where the go suite fails while `goFails()` returns true. */
+  function piWithGoFailing(goFails: () => boolean) {
+    const pi = mockPi();
+    registerCompleteImplementationTool(pi);
+    pi.exec = (async (cmd: string) => {
+      if (cmd === "go" && goFails()) {
+        return { stdout: "", stderr: "--- FAIL: TestGate", code: 1, killed: false };
+      }
+      return { stdout: "ok", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  /** Invoke complete_implementation with a live AbortSignal. */
+  function complete(pi: ReturnType<typeof piWithGoFailing>, ctx: ReturnType<typeof ctxWithState>) {
+    return getTool(pi, "complete_implementation")!.execute(
+      "c1",
+      {},
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+  }
+
+  it("a first red blocks with the failing suite and tail; a second consecutive red increments the attempt counter and refuses with a stop-and-report instruction", async () => {
+    const pi = piWithGoFailing(() => true);
+    const s = soloState();
+    const ctx = ctxWithState(s);
+
+    const first = await complete(pi, ctx);
+
+    assert.equal(first.isError, true, "a red final gate blocks completion");
+    assert.match(first.content[0].text, /go \(go test \.\/\.\.\.\)/, "the first red names the failing suite");
+    assert.match(first.content[0].text, /--- FAIL: TestGate/, "the first red carries the output tail");
+    assert.doesNotMatch(
+      first.content[0].text,
+      /stop and report to the user/i,
+      "the first red still invites a fix instead of stopping",
+    );
+    assert.equal(s.finalGateAttempts, 1, "the first red increments the attempt counter");
+    assert.equal(s.phase, "implementing", "completion stays blocked");
+
+    const second = await complete(pi, ctx);
+
+    assert.equal(second.isError, true, "the second red still blocks completion");
+    assert.equal(s.finalGateAttempts, 2, "the second consecutive red increments the counter again");
+    assert.match(
+      second.content[0].text,
+      /stop and report to the user/i,
+      "the second red refuses with the stop-and-report instruction",
+    );
+    assert.match(second.content[0].text, /--- FAIL: TestGate/, "the second red still names the tail");
+    assert.equal(s.phase, "implementing", "completion stays blocked");
+    assert.equal(s.finalGate?.passed, false, "the red result is persisted on state");
+  });
+
+  it("a green final gate after a red resets the attempt counter and completes", async () => {
+    let failing = true;
+    const pi = piWithGoFailing(() => failing);
+    const s = soloState();
+    const ctx = ctxWithState(s);
+
+    const first = await complete(pi, ctx);
+    assert.equal(first.isError, true, "the red gate blocks completion");
+    assert.equal(s.finalGateAttempts, 1, "the red incremented the counter");
+
+    failing = false;
+    const ok = await complete(pi, ctx);
+
+    assert.notEqual(ok.isError, true, "a green gate allows completion");
+    assert.equal(s.phase, "idle");
+    assert.equal(s.finalGateAttempts, 0, "a green final gate resets the attempt counter");
+    assert.equal(s.finalGate?.passed, true, "the green result is persisted on state");
   });
 });
 

@@ -39,7 +39,7 @@ export function gateTimeoutMs(
  * @param text - Raw combined stdout+stderr of one suite.
  * @returns The capped tail (marked with an ellipsis when truncated).
  */
-function gateTail(text: string): string {
+export function gateTail(text: string): string {
   return text.length > OUTPUT_TAIL_CHARS ? `\u2026${text.slice(-OUTPUT_TAIL_CHARS)}` : text;
 }
 

@@ -119,6 +119,20 @@ export interface WorkflowState {
    * has run and on sessions persisted before this field existed.
    */
   gateResults?: Record<string, GateResult>;
+  /**
+   * Result of the unbounded final gate run by complete_implementation (T6):
+   * written on every final-gate run (red or green) so the verdict, the
+   * per-suite tails and the timestamp survive in the session log. Optional:
+   * absent until the final gate has run.
+   */
+  finalGate?: FinalGateResult;
+  /**
+   * Consecutive red final-gate attempts in solo mode (T6): incremented on
+   * each red complete_implementation refusal, reset on a green gate. The
+   * second consecutive red refuses with an instruction to stop and report
+   * to the user. Optional: absent until the first red refusal.
+   */
+  finalGateAttempts?: number;
 }
 
 /** One orchestrator test-gate suite verdict (T8). */
@@ -142,6 +156,16 @@ export interface GateResult {
   /** Per-suite verdicts with output tails. */
   suites: GateSuiteResult[];
   /** ISO timestamp of the gate run. */
+  at: string;
+}
+
+/** The unbounded final-gate result persisted on WorkflowState (T6). */
+export interface FinalGateResult {
+  /** True when every executed suite exited 0 without being killed. */
+  passed: boolean;
+  /** Per-suite verdicts with capped output tails. */
+  suites: GateSuiteResult[];
+  /** ISO timestamp of the final-gate run. */
   at: string;
 }
 

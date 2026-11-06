@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { loadState, transitionTo, updateUi, saveState } from "./state.ts";
 import { evaluateCompletionGate } from "./completion-gate.ts";
 import { readGitHead } from "./git-ops.ts";
-import { runTestGate } from "./test-gate-run.ts";
+import { runAndPersistFinalGate } from "./full-gate.ts";
 import { formatGateEvidenceLine } from "./test-gate-report.ts";
 import {
   formatImplementerActivity,
@@ -138,9 +138,14 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
  * Register the `complete_implementation` AI tool.
  *
  * Ends the implementing phase and returns the workflow to idle. Refuses
- * while any behavior is still active. Before completing, runs the FULL
- * GATE: every suite from state.testTool unfiltered, orchestrator-run — a
- * red gate blocks completion, naming the failing suite and its output tail.
+ * while any behavior is still active. Before completing, runs the
+ * UNBOUNDED FINAL GATE (T6): the recorded full suites — falling back to
+ * the scoped suites run unfiltered — sequentially in their own cwd with
+ * no exec timeout and the tool's AbortSignal forwarded. A red gate blocks
+ * completion, naming each failing suite and its output tail, and persists
+ * the result on state.finalGate; a second consecutive red increments
+ * state.finalGateAttempts and refuses with an instruction to stop and
+ * report to the user.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -155,7 +160,7 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
 
     parameters: Type.Object({}),
 
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
       const state = loadState(ctx);
       if (!state || state.phase !== "implementing") {
         return {
@@ -172,32 +177,38 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      // T8: FULL GATE — the orchestrator runs ALL suites unfiltered before
-      // completion; red blocks completion, naming the failing suite and its
-      // output tail. Runs outside any unit's tool call.
-      const suites = state.testTool?.suites ?? [];
-      if (suites.length > 0) {
-        const gate = await runTestGate(pi, ctx.cwd, suites);
-        if (!gate.passed) {
-          const failing = gate.suites.filter((s) => !s.passed);
-          const detail = failing
-            .map((s) => `### ${s.label} (FAIL) — output tail\n\n${s.tail}`)
-            .join("\n\n");
-          return {
-            content: [
-              {
-                type: "text",
-                text:
-                  `Cannot complete: the full test gate is red — ` +
-                  `${failing.length}/${gate.suites.length} suite(s) failed.\n\n${detail}\n\n` +
-                  `Fix the failing suite and re-run complete_implementation.`,
-              },
-            ],
-            details: {},
-            isError: true,
-          };
-        }
+      // T6: UNBOUNDED FINAL GATE — the recorded full suites (falling back
+      // to the scoped suites unfiltered) run sequentially in their cwd with
+      // no timeout and this tool's AbortSignal forwarded. Red blocks
+      // completion, naming each failing suite and its tail; the result is
+      // persisted on state.finalGate. Runs outside any unit's tool call.
+      const gate = await runAndPersistFinalGate(pi, ctx.cwd, state, signal);
+      if (!gate.passed) {
+        const failing = gate.suites.filter((s) => !s.passed);
+        const detail = failing
+          .map((s) => `### ${s.label} (FAIL) — output tail\n\n${s.tail}`)
+          .join("\n\n");
+        const attempts = (state.finalGateAttempts ?? 0) + 1;
+        state.finalGateAttempts = attempts;
+        saveState(pi, state);
+        const text =
+          attempts >= 2
+            ? `Cannot complete: the final test gate is red again — ` +
+              `${failing.length}/${gate.suites.length} suite(s) failed ` +
+              `(consecutive red attempt ${attempts}).\n\n${detail}\n\n` +
+              `Stop and report to the user: the final gate stayed red across ` +
+              `${attempts} consecutive attempts — do not retry ` +
+              `complete_implementation without their direction.`
+            : `Cannot complete: the final test gate is red — ` +
+              `${failing.length}/${gate.suites.length} suite(s) failed.\n\n${detail}\n\n` +
+              `Fix the failing suite and re-run complete_implementation.`;
+        return {
+          content: [{ type: "text", text }],
+          details: {},
+          isError: true,
+        };
       }
+      state.finalGateAttempts = 0;
       transitionTo(pi, state, "idle");
       updateUi(null, ctx);
       return {
