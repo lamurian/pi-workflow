@@ -85,14 +85,17 @@ export function deriveAllowlist(contract: ContractV2): AllowlistEntry[] {
  * Derive one task's scope: its slice of the contract.
  *
  * `sources`/`tests` keep only the entries whose `tasks` include the task id
- * (full refs retained — a filter view, not a rewrite). `packages` is the
- * unique repo-relative dirs of the task's owned TEST paths: scoping a test
- * run belongs to test paths, so a task with no `tests` refs (e.g. a manual
- * task that owns only a source) always yields empty packages ⇒ no test gate.
+ * (full refs retained — a filter view, not a rewrite). `testFiles` is the
+ * owned test paths that are not `D` (the unit's default test routing scope)
+ * and `packages` is the unique repo-relative dirs of the task's owned TEST
+ * paths: scoping a test run belongs to test paths, so a task with no
+ * `tests` refs (e.g. a manual task that owns only a source) always yields
+ * empty testFiles/packages ⇒ no test gate.
  *
  * @param contract - A validated v2 contract.
  * @param taskId   - The task id to derive the scope for.
- * @returns The task's filtered sources/tests plus its package dirs.
+ * @returns The task's filtered sources/tests, its non-D testFiles and its
+ *          package dirs.
  */
 export function deriveUnitScope(contract: ContractV2, taskId: string): UnitScope {
   const sources = contract.sources

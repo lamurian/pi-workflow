@@ -251,6 +251,7 @@ describe("generateTestExtension — static shape", () => {
       "test-extension-constants.ts",
       "test-extension-template.ts",
       "test-extension-template-helpers.ts",
+      "test-extension-template-routing.ts",
       "test-gate-run.ts",
       "test-gate-report.ts",
     ]) {

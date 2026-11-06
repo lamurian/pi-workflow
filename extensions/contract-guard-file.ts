@@ -4,9 +4,9 @@
  * spawn and passes its path to the child via `PI_UNIT_FILE`
  * (`PI_CONTRACT_GUARD_FILE` stays as the child guard's read-fallback for
  * one release). With a v2 contract the payload carries the derived
- * `allowlist` and the unit's slice `unit { id, sources, tests, packages,
- * testSuites }` (both derived via contract-derive); v1 sessions keep
- * writing the plain `files` allowlist. Writing under `.git/` keeps the
+ * `allowlist` and the unit's slice `unit { id, sources, tests, testFiles,
+ * packages, testSuites }` (both derived via contract-derive); v1 sessions
+ * keep writing the plain `files` allowlist. Writing under `.git/` keeps the
  * payload out of the staged diff, so it can never violate the allowlist it
  * describes.
  */
@@ -44,9 +44,9 @@ export function contractGuardFilePath(cwd: string): string {
  *
  * v2 mode (`options.contract` + `options.taskId`): the payload carries
  * `repoRoot`, `baselineHead`, the derived `allowlist` (contract-derive
- * union of sources+tests) and `unit { id, sources, tests, packages,
- * testSuites }` (the unit's derived slice). v1 mode: the payload keeps the
- * plain `files` allowlist. Both modes also carry `baselineExisting`: the
+ * union of sources+tests) and `unit { id, sources, tests, testFiles,
+ * packages, testSuites }` (the unit's derived slice). v1 mode: the payload
+ * keeps the plain `files` allowlist. Both modes also carry `baselineExisting`: the
  * declared paths present at the baseline, queried via
  * `git ls-tree -r --name-only <baseline> -- <paths>`; a failed or empty
  * query degrades to an empty list — the allowlist decisions never depend
