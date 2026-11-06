@@ -129,6 +129,82 @@ describe("checkToolAction (T2)", () => {
   });
 });
 
+// ─── Pure core: .pi/workflow runtime dir is orchestrator-owned (T2) ─────────
+
+describe("checkToolAction workflow runtime block (T2)", () => {
+  const PAYLOAD = ".pi/workflow/contract-guard.json";
+  const runtimeCheck = (action: string, path: string, files: Array<{ path: string; status?: "A" | "M" | "D"; tasks?: readonly string[] }>) =>
+    checkToolAction({ action, path, cwd: CWD, files, taskId: "T1" });
+
+  it("blocks write on the payload with an orchestrator-owned reason even when declared", () => {
+    const result = runtimeCheck("write", PAYLOAD, [
+      { path: PAYLOAD, status: "M", tasks: ["T1"] },
+    ]);
+    assert.equal(result.allowed, false, "write on the payload must be blocked even when declared");
+    if (result.allowed) return;
+    assert.match(result.reason, /orchestrator/i, "the reason says orchestrator-owned");
+    assert.match(result.reason, /\.pi\/workflow/, "the reason names the folder");
+    assert.match(result.reason, /runtime/i, "the reason names runtime files");
+  });
+
+  it("blocks edit on the payload with the same orchestrator-owned reason even when declared", () => {
+    const result = runtimeCheck("edit", PAYLOAD, [
+      { path: PAYLOAD, status: "M", tasks: ["T1"] },
+    ]);
+    assert.equal(result.allowed, false, "edit on the payload must be blocked even when declared");
+    if (result.allowed) return;
+    assert.match(result.reason, /orchestrator/i);
+    assert.match(result.reason, /\.pi\/workflow/);
+    assert.match(result.reason, /runtime/i);
+  });
+
+  it("blocks delete_file on the payload even when declared with status D", () => {
+    const result = runtimeCheck("delete_file", PAYLOAD, [
+      { path: PAYLOAD, status: "D", tasks: ["T1"] },
+    ]);
+    assert.equal(
+      result.allowed,
+      false,
+      "delete_file on the payload must be blocked even when declared D",
+    );
+    if (result.allowed) return;
+    assert.match(result.reason, /orchestrator/i);
+    assert.match(result.reason, /\.pi\/workflow/);
+  });
+
+  it("blocks a path under .pi/workflow/ other than the payload", () => {
+    for (const path of [".pi/workflow/state.json", ".pi/workflow"]) {
+      const result = runtimeCheck("write", path, [
+        { path: ".pi/workflow/state.json", status: "M", tasks: ["T1"] },
+      ]);
+      assert.equal(result.allowed, false, `${path} must be blocked`);
+      if (result.allowed) continue;
+      assert.match(result.reason, /orchestrator/i);
+      assert.match(result.reason, /\.pi\/workflow/);
+    }
+  });
+
+  it("leaves normal declared-path write/edit/delete behavior outside .pi/workflow unchanged", () => {
+    const files = [
+      { path: "src/new.ts", status: "A" as const },
+      { path: "src/existing.ts", status: "M" as const },
+      { path: "src/gone.ts", status: "D" as const },
+    ];
+    assert.deepEqual(
+      checkToolAction({ action: "write", path: "src/new.ts", cwd: CWD, files }),
+      { allowed: true },
+    );
+    assert.deepEqual(
+      checkToolAction({ action: "edit", path: "src/existing.ts", cwd: CWD, files }),
+      { allowed: true },
+    );
+    assert.deepEqual(
+      checkToolAction({ action: "delete_file", path: "src/gone.ts", cwd: CWD, files }),
+      { allowed: true },
+    );
+  });
+});
+
 // ─── Pure core: strict per-task ownership + orchestrator-owned test ext (T4) ─
 
 describe("checkToolAction per-task ownership (T4)", () => {

@@ -128,6 +128,9 @@ export function normalizeRepoPath(rawPath: string, cwd: string): NormalizedPath 
  * action additionally requires the path's refs to include that task id.
  * Write/edit on `.pi/extensions/test.ts` is blocked unconditionally — the
  * generated test extension is orchestrator-owned, declared or not (T4).
+ * All three actions on `.pi/workflow` or anything under it are blocked
+ * unconditionally — the runtime folder holds orchestrator-owned payload
+ * files, declared or not (T2).
  *
  * @param input - The action, the tool-provided path, cwd, declared files and
  *                (optionally) the unit's task id.
@@ -161,6 +164,22 @@ export function checkToolAction(input: {
         `test extension) — ${input.action} is never allowed on it from a unit, ` +
         `declared or not. The orchestrator regenerates the file; no contract ` +
         `path grants access.`,
+    };
+  }
+  // Orchestrator-owned workflow runtime (T2): `.pi/workflow` and everything
+  // under it holds the per-spawn payload — write/edit/delete_file is never
+  // allowed from a unit, declared or not.
+  if (
+    norm.path === WORKFLOW_RUNTIME_DIR ||
+    norm.path.startsWith(`${WORKFLOW_RUNTIME_DIR}/`)
+  ) {
+    return {
+      allowed: false,
+      reason:
+        `Blocked: ${norm.path} is under ${WORKFLOW_RUNTIME_DIR}/ — ` +
+        `orchestrator-owned runtime files (the per-spawn payload lives ` +
+        `there). ${input.action} is never allowed on them from a unit, ` +
+        `declared or not.`,
     };
   }
   const list = formatDeclaredList(input.files);
