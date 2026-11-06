@@ -181,12 +181,18 @@ async function withUnitEnv<T>(unitFile: string | undefined, run: () => Promise<T
   }
 }
 
-/** Write a unit payload carrying the given derived packages (T7). */
-function writeUnitPayload(packages: string[]): string {
+/** Write a unit payload carrying the given repoRoot and derived test scope (T4). */
+function writeUnitPayload(
+  unit: { testFiles?: string[]; packages?: string[] },
+  repoRoot = "/repo",
+): string {
   const dir = mkdtempSync(join(tmpdir(), "pi-unit-"));
   tmpDirs.push(dir);
   const file = join(dir, "unit.json");
-  writeFileSync(file, JSON.stringify({ repoRoot: dir, unit: { id: "T1", packages } }));
+  writeFileSync(
+    file,
+    JSON.stringify({ repoRoot, unit: { id: "T1", testFiles: [], packages: [], ...unit } }),
+  );
   return file;
 }
 
@@ -265,8 +271,9 @@ describe("generateTestExtension — runtime behavior", () => {
       () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
     ]);
     assert.equal(definition.name, "test");
+    const unitFile = writeUnitPayload({ testFiles: ["foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition);
+    const result = await runTool(definition, {}, { unitFile });
 
     assert.equal(result.isError, undefined, "all-pass must not be an error");
     assert.equal(calls.length, 2, "both suites run");
@@ -315,8 +322,9 @@ describe("generateTestExtension — runtime behavior", () => {
       () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
       () => ({ stdout: "", stderr: "FAIL", code: 1, killed: false }),
     ]);
+    const unitFile = writeUnitPayload({ testFiles: ["foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition);
+    const result = await runTool(definition, {}, { unitFile });
 
     assert.equal(result.isError, true, "a failing suite must surface isError");
     assert.match(result.content[0]!.text, /1\/2 suite\(s\) failed/);
@@ -339,48 +347,92 @@ describe("generateTestExtension — runtime behavior", () => {
   });
 });
 
-// ═══ T7 — structured scope/run filters on the generated tool ═══
-describe("generated tool structured filters (T7)", () => {
-  it("testToolDefaultsToPayloadScope: no args runs payload packages on filterable suites plus all non-filterable suites", async () => {
-    const src = generateTestExtension(DETECTED.suites);
+// ═══ T4 — routing: default scope, scope param, per-suite cwd ═══
+describe("generated tool routing (T4)", () => {
+  /** Routing shapes: a go packages suite, a files suite with a cwd, a files suite at root. */
+  const ROUTING: TestSuiteDetection = {
+    source: "detected",
+    suites: [
+      { label: "go (go test ./...)", argv: ["go", "test", "./..."] },
+      {
+        label: "python (pytest)",
+        argv: ["python", "-m", "pytest", "{tests}"],
+        scope: "files",
+        cwd: "py",
+      },
+      { label: "js (vitest run)", argv: ["npx", "vitest", "run", "{tests}"], scope: "files" },
+    ],
+    full: [],
+  };
+
+  it("testToolRoutesPayloadTestFiles: a no-args run routes unit.testFiles and skips suites with no routed paths", async () => {
+    const src = generateTestExtension(ROUTING.suites);
     const { definition, calls } = await loadGenerated(src, [
-      () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
       () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "py ok", stderr: "", code: 0, killed: false }),
     ]);
-    const unitFile = writeUnitPayload(["extensions", "__tests__"]);
+    const unitFile = writeUnitPayload(
+      { testFiles: ["pkg/foo_test.go", "py/test_alpha.py"] },
+      "/proj",
+    );
 
     const result = await runTool(definition, {}, { unitFile });
 
     assert.equal(result.isError, undefined, "the default-scope run passes");
-    assert.equal(calls.length, 2, "no suite is skipped without an explicit filter");
+    assert.equal(calls.length, 2, "only the suites with routed paths run");
     assert.deepEqual(
       calls[0]!.args,
-      ["run", "test"],
-      "the non-filterable suite keeps its argv",
+      ["test", "./pkg/..."],
+      "the packages suite routes the payload's owned test files",
     );
     assert.deepEqual(
       calls[1]!.args,
-      ["test", "./extensions/...", "./__tests__/..."],
-      "the filterable (Go) suite runs the payload's derived packages",
+      ["-m", "pytest", "test_alpha.py"],
+      "the files suite inserts the routed path at {tests}",
     );
     const text = result.content[0]!.text;
     assert.match(text, /all 2 suite\(s\) passed/);
-    assert.ok(!text.includes("filtered run"), "a default-scope run carries no filtered header");
-    assert.ok(!text.includes("skipped"), "nothing is skipped on a no-args run");
+    assert.ok(
+      text.includes("suite 'js (vitest run)' skipped (no routed paths)"),
+      "a suite with no routed paths is skipped with an explicit line",
+    );
+    assert.ok(!text.includes("filtered run"), "a no-args run carries no filtered header");
   });
 
-  it("testToolDefaultsToPayloadScope: a missing payload falls back to the suites' own package pattern", async () => {
-    const src = generateTestExtension(DETECTED.suites);
+  it("testToolRoutesScopeParam: an explicit scope routes the given paths instead of the payload's testFiles and carries the header", async () => {
+    const src = generateTestExtension(ROUTING.suites);
     const { definition, calls } = await loadGenerated(src, [
-      () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
       () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "py ok", stderr: "", code: 0, killed: false }),
     ]);
+    const unitFile = writeUnitPayload({ testFiles: ["pkg/foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition, {}, { unitFile: undefined });
+    const result = await runTool(
+      definition,
+      { scope: ["other/bar_test.go", "py/test_beta.py"] },
+      { unitFile },
+    );
 
     assert.equal(result.isError, undefined);
-    assert.deepEqual(calls[1]!.args, ["test", "./..."], "no payload means the full unfiltered run");
-    assert.equal(calls.length, 2);
+    assert.deepEqual(
+      calls[0]!.args,
+      ["test", "./other/..."],
+      "the scope param routes the given paths, not the payload's testFiles",
+    );
+    assert.deepEqual(calls[1]!.args, ["-m", "pytest", "test_beta.py"]);
+    assert.equal(calls.length, 2, "the js suite has no routed path here");
+    const text = result.content[0]!.text;
+    assert.equal(
+      text.split("\n")[0],
+      "filtered run — 2/3 suites — does not satisfy the done criteria",
+      "a scope-param run carries the filtered-run header first",
+    );
+    assert.ok(
+      text.includes(
+        "suite 'js (vitest run)' skipped (no routed paths) — filtered iteration run, not verification",
+      ),
+      "the skip line on a filtered pass names the filtered status",
+    );
   });
 
   it("testToolRejectsMalformedScope: leading '-', '..' and out-of-set chars are rejected before anything runs", async () => {
@@ -399,68 +451,121 @@ describe("generated tool structured filters (T7)", () => {
   });
 
   it("testToolRejectsMalformedScope: a structured run-only filter stays -run and never free-form argv", async () => {
-    const src = generateTestExtension(DETECTED.suites);
+    const src = generateTestExtension(ROUTING.suites);
     const { definition, calls } = await loadGenerated(src, [
       () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
     ]);
+    const unitFile = writeUnitPayload({ testFiles: ["pkg/foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition, { run: "TestScope" });
+    const result = await runTool(definition, { run: "TestScope" }, { unitFile });
 
     assert.equal(result.isError, undefined);
     assert.deepEqual(
       calls[0]!.args,
-      ["test", "-run", "TestScope", "./..."],
-      "run maps to -run <regex> on the filterable suite",
+      ["test", "-run", "TestScope", "./pkg/..."],
+      "run maps to -run <regex> on the routed go test argv",
     );
-    assert.equal(calls.length, 1, "the non-filterable suite is skipped");
+    assert.equal(calls.length, 1, "suites without routed paths are skipped");
+    assert.equal(
+      result.content[0]!.text.split("\n")[0],
+      "filtered run — 1/3 suites — does not satisfy the done criteria",
+    );
   });
 
-  it("testToolReportsSkippedSuites: a filter pass skips non-filterable suites with the explicit line and header", async () => {
-    const src = generateTestExtension(DETECTED.suites);
+  it("testToolRunsInSuiteCwd: every suite execs with cwd join(repoRoot, suite.cwd)", async () => {
+    const src = generateTestExtension(ROUTING.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "ok", stderr: "", code: 0, killed: false }),
+      () => ({ stdout: "ok", stderr: "", code: 0, killed: false }),
+    ]);
+    const unitFile = writeUnitPayload(
+      { testFiles: ["pkg/foo_test.go", "py/test_alpha.py", "src/app.test.ts"] },
+      "/repo",
+    );
+
+    const result = await runTool(definition, {}, { unitFile });
+
+    assert.equal(result.isError, undefined, "every suite received a path");
+    assert.equal(calls.length, 3);
+    assert.equal(calls[0]!.opts.cwd, "/repo", "suite cwd '.' joins to repoRoot");
+    assert.equal(calls[1]!.opts.cwd, "/repo/py", "repoRoot joined with the suite cwd");
+    assert.equal(calls[2]!.opts.cwd, "/repo", "the root files suite joins to repoRoot");
+  });
+
+  it("testToolRunsInSuiteCwd: without a payload the repo root falls back to the tool context cwd", async () => {
+    const src = generateTestExtension([ROUTING.suites[0]!]);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "ok", stderr: "", code: 0, killed: false }),
+    ]);
+
+    const result = await runTool(
+      definition,
+      { scope: ["pkg/foo_test.go"] },
+      { cwd: "/proj", unitFile: undefined },
+    );
+
+    assert.deepEqual(calls[0]!.args, ["test", "./pkg/..."]);
+    assert.equal(calls[0]!.opts.cwd, "/proj", "repoRoot falls back to ctx.cwd");
+  });
+
+  it("testToolRunsScopedSuitesOnly: only suites with routed paths run — never the full list", async () => {
+    const src = generateTestExtension(ROUTING.suites);
     const { definition, calls } = await loadGenerated(src, [
       () => ({ stdout: "go ok", stderr: "", code: 0, killed: false }),
     ]);
+    const unitFile = writeUnitPayload({ testFiles: ["pkg/foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition, { scope: ["extensions"] });
+    const result = await runTool(definition, {}, { unitFile });
 
-    assert.equal(calls.length, 1, "only the filterable suite runs");
-    assert.deepEqual(calls[0]!.args, ["test", "./extensions/..."]);
-    const text = result.content[0]!.text;
-    assert.equal(
-      text.split("\n")[0],
-      "filtered run — 1/2 suites — does not satisfy the done criteria",
-      "every filtered result carries the header first (n = suites run, m = total)",
-    );
+    assert.equal(calls.length, 1, "suites without routed paths never exec");
+    assert.deepEqual(calls[0]!.args, ["test", "./pkg/..."]);
+    assert.match(result.content[0]!.text, /all 1 suite\(s\) passed/);
     assert.ok(
-      text.includes(
-        "suite 'javascript (npm run test)' skipped (not filterable) — filtered iteration run, not verification",
-      ),
-      "the skip line is explicit",
+      !generateTestExtension(DETECTED.suites).includes("make (make test)"),
+      "the generated tool embeds only the scoped suites, never the full-gate list",
     );
-    assert.equal(result.isError, undefined, "no run suite failed");
+  });
+
+  it("testToolDefaultsToPayloadScope: a missing payload routes nothing — only full-scope suites run", async () => {
+    const src = generateTestExtension(DETECTED.suites);
+    const { definition, calls } = await loadGenerated(src, [
+      () => ({ stdout: "js ok", stderr: "", code: 0, killed: false }),
+    ]);
+
+    const result = await runTool(definition, {}, { unitFile: undefined });
+
+    assert.equal(result.isError, undefined);
+    assert.equal(calls.length, 1, "only the full-scope (npm) suite runs");
+    assert.deepEqual(calls[0]!.args, ["run", "test"]);
+    assert.ok(
+      result.content[0]!.text.includes("suite 'go (go test ./...)' skipped (no routed paths)"),
+      "the packages suite has no routed paths without a payload",
+    );
   });
 
   it("testToolReportsSkippedSuites: a failing filtered run still reports the header and isError", async () => {
-    const src = generateTestExtension(DETECTED.suites);
-    // Only the filterable suite execs on this filtered run (npm is skipped),
-    // so the queue's first item is what the go suite consumes.
+    const src = generateTestExtension(ROUTING.suites);
     const { definition } = await loadGenerated(src, [
       () => ({ stdout: "FAIL", stderr: "", code: 1, killed: false }),
     ]);
+    const unitFile = writeUnitPayload({ testFiles: ["pkg/foo_test.go"] }, "/proj");
 
-    const result = await runTool(definition, { run: "TestX" });
+    const result = await runTool(definition, { scope: ["other/bar_test.go"] }, { unitFile });
 
     assert.equal(result.isError, true);
     const text = result.content[0]!.text;
     assert.equal(
       text.split("\n")[0],
-      "filtered run — 1/2 suites — does not satisfy the done criteria",
+      "filtered run — 1/3 suites — does not satisfy the done criteria",
+      "every filtered result carries the header first (n = suites run, m = total)",
     );
     assert.match(text, /1\/1 suite\(s\) failed/);
     assert.ok(
       text.includes(
-        "suite 'javascript (npm run test)' skipped (not filterable) — filtered iteration run, not verification",
+        "suite 'python (pytest)' skipped (no routed paths) — filtered iteration run, not verification",
       ),
+      "skipped suites stay explicit on a failing filtered run",
     );
   });
 });

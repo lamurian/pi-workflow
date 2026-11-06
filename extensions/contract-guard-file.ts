@@ -109,6 +109,7 @@ export async function writeContractGuardFile(
             id: taskId,
             sources: slice.sources,
             tests: slice.tests,
+            testFiles: slice.testFiles,
             packages: slice.packages,
             testSuites: [...(options.testSuites ?? [])],
           },

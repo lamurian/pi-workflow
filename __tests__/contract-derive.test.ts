@@ -101,8 +101,25 @@ describe("deriveUnitScopeFiltersByTaskRef", () => {
     assert.deepEqual(deriveUnitScope(contract, "T9"), {
       sources: [],
       tests: [],
+      testFiles: [],
       packages: [],
     });
+  });
+
+  it("derives testFiles as the owned non-D test paths", () => {
+    const contract = v2Contract();
+    contract.tests.push({ path: "__tests__/gone.test.ts", status: "D", tasks: ["T1"] });
+    const scope = deriveUnitScope(contract, "T1");
+    assert.deepEqual(
+      scope.testFiles,
+      ["__tests__/contract-derive.test.ts"],
+      "D-status test paths are excluded from testFiles",
+    );
+    assert.deepEqual(
+      deriveUnitScope(contract, "T2").testFiles,
+      ["__tests__/shared.test.ts", "__tests__/shared-2.test.ts"],
+      "testFiles lists the owned test paths in contract order",
+    );
   });
 
   it("derives packages as the unique dirs of the owned test paths", () => {
@@ -127,11 +144,16 @@ describe("deriveUnitScopeFiltersByTaskRef", () => {
     const first = deriveUnitScope(contract, "T2");
     first.sources.push({ path: "evil.ts", tasks: ["T2"] });
     first.tests[0]!.tasks.push("T9");
+    first.testFiles.push("evil.test.ts");
     first.packages.push("evil-dir");
     const second = deriveUnitScope(contract, "T2");
     assert.equal(second.sources.length, 2);
     assert.equal(second.tests.length, 2);
     assert.deepEqual(second.tests[0]!.tasks, ["T2"]);
+    assert.deepEqual(second.testFiles, [
+      "__tests__/shared.test.ts",
+      "__tests__/shared-2.test.ts",
+    ]);
     assert.deepEqual(second.packages, ["__tests__"]);
   });
 });

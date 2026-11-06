@@ -1,6 +1,6 @@
 // Source text of the helper functions embedded in the generated
 // `.pi/extensions/test.ts` (suiteTimeoutMs, tail, readUnitPayload,
-// validScopeEntry, suiteArgv). The text must stay byte-identical across
+// validScopeEntry). The text must stay byte-identical across
 // refactors: any change regenerates the file in every user repo.
 
 import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "./test-extension-constants.ts";
@@ -9,9 +9,9 @@ import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "./test-extension-co
  * Render the generated extension's runtime helper block.
  *
  * Emits plain JS-compatible source for the per-suite timeout budget, the
- * output tail cap, the unit-payload reader (default package scope), the
- * scope-entry validator and the per-suite filtered argv builder. The block
- * ends with a blank line so the tool registration follows directly.
+ * output tail cap, the unit-payload reader (default test scope: the payload's
+ * owned test files) and the scope-entry validator. The block ends with a
+ * blank line so the routing block follows directly.
  *
  * @returns The helper block source text.
  */
@@ -29,9 +29,10 @@ function tail(text) {
 
 /**
  * Read the orchestrator-written unit payload (PI_UNIT_FILE, with the legacy
- * PI_CONTRACT_GUARD_FILE fallback) for the default package scope.
+ * PI_CONTRACT_GUARD_FILE fallback): repoRoot drives the per-suite cwd and
+ * unit.testFiles is the default routing scope.
  *
- * @returns The payload's unit slice, or null when absent or invalid.
+ * @returns The parsed payload ({ repoRoot, unit }), or null when absent/invalid.
  */
 async function readUnitPayload() {
   try {
@@ -39,9 +40,9 @@ async function readUnitPayload() {
     if (!file) return null;
     const { readFileSync } = await import("node:fs");
     const parsed = JSON.parse(readFileSync(file, "utf8"));
-    const unit = parsed && parsed.unit;
-    if (!unit || !Array.isArray(unit.packages)) return null;
-    return unit;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.unit || typeof parsed.unit !== "object") return null;
+    return parsed;
   } catch (err) {
     return null;
   }
@@ -55,20 +56,6 @@ function validScopeEntry(entry) {
     !entry.startsWith("-") &&
     entry.indexOf("..") === -1
   );
-}
-
-/** The argv one suite runs with under the resolved filter (T7). */
-function suiteArgv(suite, packages, run) {
-  if (!suite.filterable) return suite.argv;
-  const extra = suite.argv.slice(2).filter((arg) => arg !== "./...");
-  const patterns =
-    packages && packages.length > 0
-      ? packages.map((p) => (p === "." ? "./..." : "./" + p + "/..."))
-      : ["./..."];
-  return ["go", "test"]
-    .concat(run ? ["-run", run] : [])
-    .concat(patterns)
-    .concat(extra);
 }
 
 `;

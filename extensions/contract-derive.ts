@@ -29,6 +29,12 @@ export interface UnitScope {
   /** Tests entries whose `tasks` include the task id. */
   tests: PathEntry[];
   /**
+   * Repo-relative paths of the owned test entries that are not `D` (first-seen
+   * order): the unit's default test routing scope (a deleted test path is
+   * never routed).
+   */
+  testFiles: string[];
+  /**
    * Unique repo-relative dirs of the owned TEST paths (first-seen order).
    * A task with no `tests` refs yields empty packages ⇒ no test gate
    * (manual-ness is derived, no `kind` field).
@@ -95,6 +101,9 @@ export function deriveUnitScope(contract: ContractV2, taskId: string): UnitScope
   const tests = contract.tests
     .filter((entry) => entry.tasks.includes(taskId))
     .map(copyEntry);
+  const testFiles = tests
+    .filter((entry) => entry.status !== "D")
+    .map((entry) => entry.path);
   const packages: string[] = [];
   const seen = new Set<string>();
   for (const entry of tests) {
@@ -104,7 +113,7 @@ export function deriveUnitScope(contract: ContractV2, taskId: string): UnitScope
       packages.push(dir);
     }
   }
-  return { sources, tests, packages };
+  return { sources, tests, testFiles, packages };
 }
 
 /**
