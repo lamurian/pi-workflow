@@ -1,9 +1,12 @@
 // Runs the per-task SCOPE GATE and the FULL GATE via the orchestrator's own
 // exec (never a unit's tool call). Report text lives in test-gate-report.ts.
 
+import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TestSuite } from "./test-tool-detect.ts";
 import { saveState } from "./state.ts";
+import { routeSuites } from "./suite-scope.ts";
+import { SKIPPED_TAIL } from "./test-gate-report.ts";
 import type { ContractV2, GateResult, GateSuiteResult, WorkflowState } from "./state.ts";
 import { deriveUnitScope } from "./contract-derive.ts";
 import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "./test-extension-constants.ts";
@@ -86,39 +89,58 @@ export async function runTestGate(
   const timeout = gateTimeoutMs();
   const results: GateSuiteResult[] = [];
   for (const suite of suites) {
-    const argv = gateSuiteArgv(suite, scope);
-    const [cmd = "", ...rest] = argv;
-    let execResult: { code: number; killed?: boolean; stdout?: string; stderr?: string };
-    try {
-      execResult = await pi.exec(cmd, rest, { cwd, timeout });
-    } catch (err) {
-      results.push({
-        label: suite.label,
-        passed: false,
-        tail: `spawn failed: ${String((err as Error)?.message ?? err)}`,
-      });
-      continue;
-    }
-    const passed = execResult.code === 0 && !execResult.killed;
-    results.push({
-      label: suite.label,
-      passed,
-      tail:
-        gateTail([execResult.stdout ?? "", execResult.stderr ?? ""].filter(Boolean).join("\n")) ||
-        "(no output)",
-    });
+    results.push(await execGateSuite(pi, cwd, suite, gateSuiteArgv(suite, scope), timeout));
   }
   return { passed: results.every((r) => r.passed), suites: results };
 }
 
 /**
+ * Execute one suite inside a gate run and capture its verdict.
+ *
+ * @param pi     - ExtensionAPI used for exec.
+ * @param cwd    - Working directory for this suite's exec call.
+ * @param suite  - The detected suite (supplies the label).
+ * @param argv   - The argv this suite runs with.
+ * @param timeout - Per-suite wall-clock budget in ms.
+ * @returns The suite verdict with a capped output tail.
+ */
+async function execGateSuite(
+  pi: ExtensionAPI,
+  cwd: string,
+  suite: TestSuite,
+  argv: string[],
+  timeout: number,
+): Promise<GateSuiteResult> {
+  const [cmd = "", ...rest] = argv;
+  try {
+    const r = await pi.exec(cmd, rest, { cwd, timeout });
+    const passed = r.code === 0 && !r.killed;
+    return {
+      label: suite.label,
+      passed,
+      tail: gateTail([r.stdout ?? "", r.stderr ?? ""].filter(Boolean).join("\n")) || "(no output)",
+    };
+  } catch (err) {
+    return {
+      label: suite.label,
+      passed: false,
+      tail: `spawn failed: ${String((err as Error)?.message ?? err)}`,
+    };
+  }
+}
+
+/**
  * Run the per-task SCOPE GATE for one committed task (T8).
  *
- * From `state.testTool.suites`: every filterable suite runs with the task's
- * derived packages scope, every non-filterable suite runs unfiltered — the
- * orchestrator's own exec, never the unit's tool call. Tasks with no tests
- * refs (empty derived packages) and sessions without suites get no gate
- * (manual-ness is derived, not declared).
+ * Routes the task's owned test paths (`deriveUnitScope().testFiles`) over
+ * `state.testTool.suites` via `routeSuites`: each scoped suite runs the
+ * routed argv in its own cwd (repo root when none is declared), scoped
+ * suites that received no paths are not executed and are recorded with
+ * the skip marker, and full-scope suites run unfiltered at every scope
+ * gate. `GateResult.scope` records the routed test paths. Sessions without
+ * suites and tasks owning no (non-D) test paths get no gate (manual-ness
+ * is derived, not declared). The orchestrator's own exec, never the unit's
+ * tool call.
  *
  * @param pi         - ExtensionAPI used for exec.
  * @param cwd        - Repository working directory.
@@ -136,13 +158,23 @@ export async function runTaskScopeGate(
 ): Promise<GateResult | null> {
   if (suites.length === 0) return null;
   const scope = deriveUnitScope(contract, behaviorId);
-  if (scope.packages.length === 0) return null;
-  const gate = await runTestGate(pi, cwd, suites, scope.packages);
+  if (scope.testFiles.length === 0) return null;
+  const runs = routeSuites([...suites], scope.testFiles.map((path) => ({ path })));
+  const timeout = gateTimeoutMs();
+  const results: GateSuiteResult[] = [];
+  for (const run of runs) {
+    if (run.skipped) {
+      results.push({ label: run.suite.label, passed: true, tail: SKIPPED_TAIL });
+      continue;
+    }
+    const suiteCwd = run.suite.cwd ? join(cwd, run.suite.cwd) : cwd;
+    results.push(await execGateSuite(pi, suiteCwd, run.suite, run.argv, timeout));
+  }
   return {
     behaviorId,
-    scope: [...scope.packages],
-    passed: gate.passed,
-    suites: gate.suites,
+    scope: [...scope.testFiles],
+    passed: results.every((r) => r.passed),
+    suites: results,
     at: new Date().toISOString(),
   };
 }

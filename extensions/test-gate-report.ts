@@ -1,8 +1,21 @@
 // Fix-forward task text, halt/notify lines, gate reports and done evidence
 // rendered from a recorded GateResult. Pure: no I/O.
 
-import type { GateResult } from "./state.ts";
+import type { GateResult, GateSuiteResult } from "./state.ts";
 import { RETRY_BUDGET } from "./commit-gate.ts";
+
+/** Tail marker recorded for a scoped suite the gate listed but never executed. */
+export const SKIPPED_TAIL = "(skipped — no routed paths)";
+
+/**
+ * True when a gate-suite verdict records a suite the scope gate skipped.
+ *
+ * @param suite - One GateResult.suites entry.
+ * @returns True when the entry carries the skip marker (never executed).
+ */
+export function isSkippedSuite(suite: GateSuiteResult): boolean {
+  return suite.tail === SKIPPED_TAIL;
+}
 
 /**
  * Build the fix-forward task text for a red scope gate (T8).
@@ -26,8 +39,9 @@ export function buildScopeGateFixTask(
     `${renderGateReport(result, "scope gate")}\n\n` +
     `The scope gate is run by the ORCHESTRATOR after your commit landed — it is ` +
     `not your own test-tool call and cannot be satisfied by reporting success: ` +
-    `every filterable suite runs with this task's derived package scope plus ` +
-    `every non-filterable suite, unfiltered. Fix forward: make the failing suite ` +
+    `each suite runs the argv produced by routing this task's owned test paths ` +
+    `in that suite's own cwd — suites with no routed paths are skipped and ` +
+    `full-scope suites run unfiltered. Fix forward: make the failing suite ` +
     `pass with real code changes. Do NOT delete, skip, or weaken a test to turn ` +
     `the gate green.\n\n` +
     `## Original task\n` + original
@@ -84,7 +98,9 @@ export function renderGateReport(
     `Scope: ${result.scope.length > 0 ? result.scope.join(", ") : "(all packages — unfiltered)"}`,
     `Suites: ${
       result.suites.length > 0
-        ? result.suites.map((s) => `${s.label} ${s.passed ? "PASS" : "FAIL"}`).join("; ")
+        ? result.suites
+            .map((s) => `${s.label} ${isSkippedSuite(s) ? "SKIP" : s.passed ? "PASS" : "FAIL"}`)
+            .join("; ")
         : "(none)"
     }`,
     "",
@@ -102,10 +118,13 @@ export function renderGateReport(
  * @returns e.g. `orchestrator gate T1 — scope pkg/foo — passed (2/2 suites)`.
  */
 export function formatGateEvidenceLine(result: GateResult): string {
-  const passedCount = result.suites.filter((s) => s.passed).length;
+  const executed = result.suites.filter((s) => !isSkippedSuite(s));
+  const passedCount = executed.filter((s) => s.passed).length;
+  const skipped = result.suites.length - executed.length;
+  const skippedNote = skipped > 0 ? `, ${skipped} skipped` : "";
   return (
     `orchestrator gate ${result.behaviorId} — scope ` +
     `${result.scope.length > 0 ? result.scope.join(", ") : "(all packages)"} — ` +
-    `${result.passed ? "passed" : "failed"} (${passedCount}/${result.suites.length} suites)`
+    `${result.passed ? "passed" : "failed"} (${passedCount}/${executed.length} suites${skippedNote})`
   );
 }

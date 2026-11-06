@@ -3613,7 +3613,7 @@ describe("T8: orchestrator test gates", () => {
     return { pi, execLog };
   }
 
-  it("scopeGateRunsDerivedPackages: after each task commit the orchestrator runs every filterable suite with the task's derived packages scope plus every non-filterable suite, unfiltered", async () => {
+  it("scopeGateRunsRoutedPaths: after each task commit the orchestrator runs each scoped suite with the argv routed from the task's owned test paths, in that suite's cwd, and records skipped suites", async () => {
     const { pi, execLog } = piWithGateExec(0);
     const state = gatedState();
     const ctx = ctxWithState(state);
@@ -3623,14 +3623,14 @@ describe("T8: orchestrator test gates", () => {
       suggestedCommit: "feat(foo): add first behavior",
     }));
 
-    // The filterable (Go) suite ran with the task's derived packages scope —
-    // scoped package pattern, no -run filter, and NOT the unscoped ./....
+    // The filterable (Go) suite ran with the argv routed from the owned test
+    // path — scoped package pattern, no -run filter, and NOT the unscoped ./....
     const goRuns = execLog.filter((e) => e.cmd === "go");
     assert.equal(goRuns.length, 1, "one orchestrator scope-gate run per landed task commit");
     assert.deepEqual(
       goRuns[0]!.args,
       ["test", "./pkg/foo/..."],
-      "filterable suite runs with the derived packages scope, unfiltered",
+      "filterable suite runs the routed package pattern, unfiltered",
     );
     // The non-filterable (npm) suite ran unfiltered too.
     const npmRuns = execLog.filter((e) => e.cmd === "npm");
@@ -3644,7 +3644,11 @@ describe("T8: orchestrator test gates", () => {
     // The gate result is recorded per task with scope + pass/fail.
     const gate = state.gateResults?.T1;
     assert.ok(gate, "the orchestrator records the scope-gate result for the task");
-    assert.deepEqual(gate!.scope, ["pkg/foo"], "the gate result carries the derived scope");
+    assert.deepEqual(
+      gate!.scope,
+      ["pkg/foo/foo_test.go"],
+      "the gate result records the routed test paths",
+    );
     assert.equal(gate!.passed, true, "a green gate passes");
     assert.equal(gate!.suites.length, 2, "every suite carries a verdict");
     assert.equal(state.task!.behaviors[0]!.status, "done");
