@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
-import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError } from "./unit-progress.ts";
+import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
 import { crossOwnershipHalt } from "./cross-ownership.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts";
@@ -81,10 +81,10 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     head: () => readGitHead(pi, cwd),
     history: attemptHistory,
   });
-  let attemptProgress = false; let attemptHeadBefore: string | null = null; // T11a: HEAD before the last round, compared with HEAD after it (the flag alone never skips the commit gate).
+  let attemptProgress = false; let attemptHeadBefore: string | null = null; let timeoutStreak = 0; // T11a: HEAD before the last round, compared with HEAD after it (the flag alone never skips the commit gate). T5: consecutive timed-out attempts (reset by any non-timeout attempt), counted in adoptRound.
   const adoptRound = () => {
-    attemptProgress = recorder.progress();
-    attemptHeadBefore = recorder.headBefore();
+    attemptProgress = recorder.progress(); attemptHeadBefore = recorder.headBefore();
+    timeoutStreak = attempt.timedOut ? timeoutStreak + 1 : 0; // T5: any non-timeout attempt resets the consecutive-timeout count.
   };
   let attempt = await recorder.runFresh(baseTask);
   liveChild = attempt.client;
@@ -141,6 +141,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         // T7: repeated identical timeouts/partial reports waste hours — halt with an actionable diagnosis instead of burning retries.
         return haltWithChild(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
       }
+      if (shouldHaltOnTimeout(timeoutStreak)) return haltWithChild(behavior.id, buildTimeoutHaltError(behavior.id, timeoutStreak)); // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);

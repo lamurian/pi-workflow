@@ -11,7 +11,9 @@
  * progress the attempt consumes one retry as before. {@link shouldHaltEarly}
  * additionally halts the behavior after {@link EARLY_HALT_THRESHOLD}
  * consecutive no-progress timed-out/partial attempts (T7). Plain unit
- * errors and missing-report attempts never enter this path. The module
+ * errors and missing-report attempts never enter this path. {@link shouldHaltOnTimeout}
+ * additionally halts the behavior after {@link TIMEOUT_HALT_THRESHOLD} consecutive
+ * timed-out attempts regardless of progress (T5). The module
  * also hosts {@link isAlreadySatisfied} (T11a): the predicate that lets
  * the loop mark a behavior done without a commit when the unit reports it
  * is already implemented at an unchanged HEAD and a clean tree.
@@ -25,6 +27,12 @@ export const EARLY_HALT_THRESHOLD = 2;
 
 /** Diagnosis named verbatim in the early-halt error text. */
 export const EARLY_HALT_DIAGNOSIS = "exploration not converging";
+
+/** Consecutive timed-out attempts, regardless of progress, that halt the behavior (T5). */
+export const TIMEOUT_HALT_THRESHOLD = 2;
+
+/** Diagnosis named verbatim in the timeout-halt error text (T5). */
+export const TIMEOUT_HALT_DIAGNOSIS = "unit too large";
 
 /** Heading rendered at the top of every continuation task text. */
 export const CONTINUATION_HEADING = "## Continue previous partial attempt";
@@ -137,6 +145,44 @@ export function buildEarlyHaltError(behaviorId: string, attempts: number): strin
     `diagnosis: ${EARLY_HALT_DIAGNOSIS}. ` +
     `Split this behavior into smaller behaviors via /discuss -> /finalize, or raise ` +
     `PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.`
+  );
+}
+
+/**
+ * Whether consecutive timed-out attempts should halt the behavior (T5).
+ *
+ * Counts attempts killed by the wall-clock limit in a row regardless of
+ * progress: at {@link TIMEOUT_HALT_THRESHOLD} (2) the loop halts even when
+ * the tree fingerprint moved — the unit does not fit the time budget.
+ * Any non-timeout attempt resets the count.
+ *
+ * @param consecutiveTimeouts - Timed-out attempts so far, in a row.
+ * @returns True when the behavior must halt now.
+ */
+export function shouldHaltOnTimeout(consecutiveTimeouts: number): boolean {
+  return consecutiveTimeouts >= TIMEOUT_HALT_THRESHOLD;
+}
+
+/**
+ * Build the timeout-halt error text for a unit that is too large (T5).
+ *
+ * Names the diagnosis ("unit too large") and both actionable
+ * recommendations: split the unit into smaller units via
+ * /discuss -> /finalize (widening a task's slice through
+ * finalize.maxPathsPerTask in workflow.json), or raise
+ * PI_IMPLEMENT_TIMEOUT_MS so each unit gets more time.
+ *
+ * @param behaviorId - The halted behavior.
+ * @param attempts   - Consecutive timed-out attempts that triggered the halt.
+ * @returns The halt error text.
+ */
+export function buildTimeoutHaltError(behaviorId: string, attempts: number): string {
+  return (
+    `Unit ${behaviorId}: ${attempts} consecutive attempts hit the wall-clock time limit — ` +
+    `diagnosis: ${TIMEOUT_HALT_DIAGNOSIS}. ` +
+    `Split this behavior into smaller units via /discuss -> /finalize ` +
+    `(raise finalize.maxPathsPerTask when a task needs a wider path slice), or raise ` +
+    `PI_IMPLEMENT_TIMEOUT_MS so each unit gets more time.`
   );
 }
 

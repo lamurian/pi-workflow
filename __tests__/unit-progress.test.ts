@@ -9,6 +9,9 @@ import {
   buildContinuationTaskText,
   shouldHaltEarly,
   buildEarlyHaltError,
+  TIMEOUT_HALT_THRESHOLD,
+  shouldHaltOnTimeout,
+  buildTimeoutHaltError,
 } from "../extensions/unit-progress.ts";
 import { runOrchestratedImplement, type UnitRunner } from "../extensions/implement-loop.ts";
 import type { WorkflowState, TaskContract } from "../extensions/state.ts";
@@ -445,5 +448,121 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
     assert.match(spawns[2]!.taskText, /## Continue previous partial attempt/, "progress spawned a continuation");
     assert.match(spawns[3]!.taskText, /Previous attempt failed \(retry 2\/5\)/, "the later no-progress partial retried instead of halting");
     assert.equal(commits().length, 1);
+  });
+});
+
+// ═══ Consecutive-timeout halt regardless of progress (T5) ═══
+describe("unit-progress: consecutive timeout halt (T5)", () => {
+  interface Spawn {
+    behaviorId: string;
+    taskText: string;
+  }
+
+  it("the timeout predicate is false after one timeout and true after two consecutive timeouts", () => {
+    assert.equal(TIMEOUT_HALT_THRESHOLD, 2);
+    assert.equal(shouldHaltOnTimeout(0), false);
+    assert.equal(shouldHaltOnTimeout(1), false, "one timeout still retries");
+    assert.equal(shouldHaltOnTimeout(2), true, "two consecutive timeouts halt");
+    assert.equal(shouldHaltOnTimeout(3), true, "the threshold holds beyond two");
+  });
+
+  it("the timeout halt text names the unit-too-large diagnosis, /discuss -> /finalize and PI_IMPLEMENT_TIMEOUT_MS", () => {
+    const text = buildTimeoutHaltError("T1", 2);
+    assert.match(text, /T1/, "the halted behavior is named");
+    assert.match(text, /unit too large/, "diagnosis is present");
+    assert.match(text, /\/discuss -> \/finalize/, "split recommendation is present");
+    assert.match(text, /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation is present");
+  });
+
+  it("two consecutive timed-out attempts that each made progress halt after 2 spawns with the unit-too-large error", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      return {
+        summary: `timed out ${spawns.length}`,
+        error: "timed out after 900000ms",
+        timedOut: true,
+        findings: [`fact: progress from attempt ${spawns.length}`],
+      };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, false, "progress does not save a second consecutive timeout");
+    assert.equal(spawns.length, 2, "halts after the second timeout, not the retry budget");
+    assert.equal(result.haltedOn, "T1");
+    assert.match(result.error ?? "", /unit too large/, "unit-too-large diagnosis");
+    assert.doesNotMatch(result.error ?? "", /exploration not converging/, "the no-progress rule stays silent when the tree moved");
+    assert.match(result.error ?? "", /\/discuss -> \/finalize/, "split recommendation");
+    assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation");
+    assert.equal(commits().length, 0, "no commit for a timeout halt");
+    assert.match(state.lastHalt?.error ?? "", /unit too large/, "halt persists in state");
+  });
+
+  it("a timeout followed by a successful attempt still lands the commit", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 1) {
+        return {
+          summary: "",
+          error: "timed out after 900000ms",
+          timedOut: true,
+          findings: ["fact: partial work from the timed-out attempt"],
+        };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, true, "one timeout never blocks a later success");
+    assert.equal(spawns.length, 2, "timeout then success");
+    assert.equal(commits().length, 1, "the successful attempt lands the commit");
+    assert.doesNotMatch(result.error ?? "", /unit too large/, "no timeout halt after a single timeout");
+    assert.equal(state.phase, "idle");
+  });
+
+  it("timeout, non-timeout partial with progress, timeout does not halt on the timeout rule (streak reset)", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 2) {
+        return {
+          summary: "explored further",
+          status: "partial",
+          nextSteps: "keep going",
+          findings: ["fact: the entry point lives in index.ts"],
+        };
+      }
+      if (spawns.length <= 3) {
+        return {
+          summary: `timed out ${spawns.length}`,
+          error: "timed out after 900000ms",
+          timedOut: true,
+          findings: [`fact: progress from attempt ${spawns.length}`],
+        };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, true, "the non-timeout attempt reset the streak, so the third timeout does not halt");
+    assert.equal(spawns.length, 4, "timeout, continuation, timeout, success");
+    assert.doesNotMatch(result.error ?? "", /unit too large/, "no timeout halt on a reset streak");
+    assert.equal(commits().length, 1, "the final success lands the commit");
   });
 });
