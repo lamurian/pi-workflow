@@ -1,5 +1,6 @@
-// Runs the per-task SCOPE GATE and the FULL GATE via the orchestrator's own
-// exec (never a unit's tool call). Report text lives in test-gate-report.ts.
+// Runs the per-task SCOPE GATE via the orchestrator's own exec (never a
+// unit's tool call). The unbounded final gate lives in full-gate.ts (T6);
+// report text lives in test-gate-report.ts.
 
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -72,7 +73,8 @@ export function gateSuiteArgv(suite: TestSuite, scope?: readonly string[]): stri
  * tool call. With a `scope`, every filterable suite runs with the scoped
  * package patterns while every non-filterable suite runs unfiltered (the
  * per-task SCOPE GATE after each task commit); without a scope every suite
- * runs unfiltered (the FULL GATE before complete_implementation).
+ * runs unfiltered. complete_implementation no longer runs here — it uses the
+ * unbounded final gate in full-gate.ts (T6) instead of this runner.
  *
  * @param pi     - ExtensionAPI used for exec.
  * @param cwd    - Repository working directory.

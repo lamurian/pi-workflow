@@ -156,7 +156,8 @@ export function registerCompleteImplementationTool(pi: ExtensionAPI): void {
     description:
       "Finalize implementation. Ends the implementing phase and returns " +
       "the workflow to idle. Call this ONLY after all behaviors are done. " +
-      "Test outcomes are not checked here — the project's commit hooks own verification.",
+      "An unbounded final test gate runs first: a red gate blocks completion " +
+      "and names each failing suite with its output tail.",
 
     parameters: Type.Object({}),
 
