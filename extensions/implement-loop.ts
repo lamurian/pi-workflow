@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
+import { saveState, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
 import { evaluateCompletionGate } from "./completion-gate.ts";
 import { appendFindings, renderFindingsSection, type Finding } from "./findings-ledger.ts";
 import type { AttemptRecord } from "./halt-report.ts";
@@ -7,7 +7,7 @@ import { renderPreviousHaltSection } from "./resume-context.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
-import { cleanupOrchestration, registerWorkflowInputHandler } from "./hitl-pause.ts";
+import { registerWorkflowInputHandler } from "./hitl-pause.ts";
 import { readTreeState } from "./git-ops.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
@@ -15,6 +15,7 @@ import { buildEngineerNoteSection } from "./unit-task-text.ts";
 import { createDefaultUnitRunner } from "./unit-runner-default.ts";
 import { formatModelRef } from "./process-utils.ts";
 import { createHalt } from "./orchestrator-halt.ts";
+import { finishRun, type FinalGateDeps } from "./full-gate-fix.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
 
 /** Result of one unit attempt: the parsed report plus failure diagnostics. */
@@ -136,17 +137,17 @@ export async function runOrchestratedImplement(
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
+  // T7: the final-gate phase (run the unbounded final gate, triage red
+  // output, exactly one FULL-GATE fix round) runs after the completion gate
+  // passes — both on the empty-units resume path and after the behavior loop.
+  const gateDeps: FinalGateDeps = { pi, ctx, state, task, runUnit, halt, landedCommits, result };
+
   if (units.length === 0) {
-    result.complete = evaluateCompletionGate(state) === null;
-    if (result.complete) {
-      state.phase = "idle";
-      state.engineerNote = undefined;
-      state.findings = undefined;
-      saveState(pi, state);
-      updateUi(null, ctx);
+    if (evaluateCompletionGate(state) !== null) {
+      ctx.ui.setStatus("implement", undefined);
+      return result;
     }
-    ctx.ui.setStatus("implement", undefined);
-    return result;
+    return finishRun(gateDeps);
   }
 
   // T9: at /implement start, before the first unit spawns, the orchestrator
@@ -237,13 +238,5 @@ export async function runOrchestratedImplement(
   if (refusal) {
     return halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`);
   }
-  await cleanupOrchestration();
-  state.phase = "idle";
-  state.engineerNote = undefined;
-  state.findings = undefined;
-  saveState(pi, state);
-  updateUi(null, ctx);
-  ctx.ui.setStatus("implement", undefined);
-  result.complete = true;
-  return result;
+  return finishRun(gateDeps);
 }

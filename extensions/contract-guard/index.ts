@@ -33,6 +33,8 @@ interface GuardPayload {
   files: DeclaredFile[];
   /** The unit's task id: enables strict per-task ownership checks. */
   taskId?: string;
+  /** T7: FULL-GATE fix unit — skip per-task ownership (allowlist still enforced). */
+  ownsAll?: boolean;
 }
 
 /** Shape of the `tool_call` event fields this guard reads. */
@@ -141,10 +143,15 @@ function readGuardPayload(
     if (typeof candidate.taskId !== "string" || candidate.taskId === "") return undefined;
     taskId ??= candidate.taskId;
   }
+  // T7: ownsAll (FULL-GATE fix unit) — validated as a boolean; when set the
+  // ownership check is skipped below (the allowlist itself still applies).
+  const ownsAll = candidate.ownsAll === true;
+  if (candidate.ownsAll !== undefined && typeof candidate.ownsAll !== "boolean") return undefined;
   return {
     repoRoot: candidate.repoRoot,
     files,
     ...(taskId !== undefined ? { taskId } : {}),
+    ...(ownsAll ? { ownsAll: true } : {}),
   };
 }
 
@@ -189,7 +196,8 @@ export async function guardToolCall(
       path,
       cwd: payload.repoRoot,
       files: payload.files,
-      ...(payload.taskId !== undefined ? { taskId: payload.taskId } : {}),
+      // T7: ownsAll skips per-task ownership; the allowlist still applies.
+      ...(payload.taskId !== undefined && !payload.ownsAll ? { taskId: payload.taskId } : {}),
     });
     if (check.allowed) return undefined;
     return { block: true, reason: check.reason };

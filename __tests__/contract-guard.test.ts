@@ -1086,3 +1086,132 @@ describe("contract-guard module split (T7)", () => {
     assert.deepEqual(offenders, [], "the stale comment must be fixed (commitAndGate lives in git-commit-gate.ts)");
   });
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T7 — FULL-GATE fix unit: ownsAll payload, runner marker, guard ownership skip
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("FULL-GATE ownsAll payload (T7)", () => {
+  it("writeContractGuardFile carries ownsAll: true only when the option is set", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-guard-ownsall-"));
+    const pi = mockPi();
+    const { writeContractGuardFile } = await import("../extensions/contract-guard-file.ts");
+
+    const plainPath = await writeContractGuardFile(pi, tmp, TASK.files, "base123");
+    const plain = JSON.parse(readFileSync(plainPath, "utf8")) as Record<string, unknown>;
+    assert.equal(plain.ownsAll, undefined, "regular units get no ownsAll marker");
+    assert.deepEqual(plain.files, TASK.files, "the allowlist is carried either way");
+
+    const ownedPath = await writeContractGuardFile(pi, tmp, TASK.files, "base123", {
+      ownsAll: true,
+    });
+    const owned = JSON.parse(readFileSync(ownedPath, "utf8")) as Record<string, unknown>;
+    assert.equal(owned.ownsAll, true, "the ownsAll option lands in the payload");
+    assert.deepEqual(owned.files, TASK.files, "the allowlist still applies");
+  });
+
+  it("createDefaultUnitRunner writes ownsAll: true for the FULL-GATE unit and omits it for a regular task id", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-guard-runner-"));
+    const fake = join(tmp, "fake-pi.sh");
+    writeFileSync(
+      fake,
+      "#!/bin/sh\n" +
+        "while IFS= read -r line; do\n" +
+        "  case \"$line\" in\n" +
+        "    *'\"type\":\"prompt\"'*)\n" +
+        "      printf '%s\\n' \"{\\\"type\\\":\\\"message_end\\\",\\\"message\\\":{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"ok \\`\\`\\`json {\\\\\\\"summary\\\\\\\":\\\\\\\"guarded unit\\\\\\\",\\\\\\\"suggestedCommit\\\\\\\":\\\\\\\"feat(core): add first behavior\\\\\\\"} \\`\\`\\`\\\"}]}}\"\n" +
+        "      ;;\n" +
+        "    *'\"type\":\"abort\"'*) exit 0 ;;\n" +
+        "  esac\n" +
+        "done\n" +
+        "exit 0\n",
+    );
+    chmodSync(fake, 0o755);
+    const prev = process.env.PI_BIN;
+    process.env.PI_BIN = fake;
+    try {
+      const pi = mockPi();
+      const task: TaskContract = { ...TASK, behaviors: [{ ...BEHAVIOR }] };
+      const state: WorkflowState = {
+        phase: "finalizing",
+        specText: "topic",
+        task,
+        baselineHead: "base123",
+      };
+      const { createDefaultUnitRunner } = await import("../extensions/unit-runner-default.ts");
+      const { FULL_GATE_UNIT_ID } = await import("../extensions/full-gate-fix.ts");
+      const { shutdownWarmChild } = await import("../extensions/warm-unit.ts");
+      const runner = createDefaultUnitRunner(pi, state, task);
+      const guardPath = join(tmp, ".git", "pi-workflow", "contract-guard.json");
+
+      const first = await runner(
+        { behaviorId: "T1", taskText: "task text", kind: "test" },
+        tmp,
+      );
+      assert.equal(first.error, undefined, first.error ?? "the T1 unit must settle cleanly");
+      const firstPayload = JSON.parse(readFileSync(guardPath, "utf8")) as Record<string, unknown>;
+      assert.equal(firstPayload.ownsAll, undefined, "a regular task id writes no ownsAll marker");
+      assert.deepEqual(firstPayload.files, TASK.files, "the payload carries the declared allowlist");
+      await shutdownWarmChild(first.client);
+
+      const fix = await runner(
+        { behaviorId: FULL_GATE_UNIT_ID, taskText: "task text", kind: "test" },
+        tmp,
+      );
+      assert.equal(fix.error, undefined, fix.error ?? "the FULL-GATE unit must settle cleanly");
+      const fixPayload = JSON.parse(readFileSync(guardPath, "utf8")) as Record<string, unknown>;
+      assert.equal(fixPayload.ownsAll, true, "the FULL-GATE unit writes ownsAll: true");
+      assert.deepEqual(fixPayload.files, TASK.files, "the allowlist still applies to the fix unit");
+      await shutdownWarmChild(fix.client);
+    } finally {
+      if (prev === undefined) delete process.env.PI_BIN;
+      else process.env.PI_BIN = prev;
+    }
+  });
+
+  it("the guard hook with unit id FULL-GATE and ownsAll allows another task's declared path but still blocks undeclared paths", async () => {
+    const payload = {
+      repoRoot: CWD,
+      baselineHead: "base123",
+      allowlist: [
+        { path: "src/mine.ts", status: "M", refs: ["T1"] },
+        { path: "src/theirs.ts", status: "M", refs: ["T2"] },
+      ],
+      unit: { id: "FULL-GATE" },
+      ownsAll: true,
+    };
+    const { hook } = await loadGuardExtension(writeGuardFile(payload));
+    assert.equal(
+      await hook(toolCall("write", "src/theirs.ts")),
+      undefined,
+      "ownsAll skips the per-task ownership check",
+    );
+    assert.equal(
+      await hook(toolCall("edit", "src/mine.ts")),
+      undefined,
+      "every declared path stays writable/editable",
+    );
+    const undeclared = await hook(toolCall("write", "secrets.env"));
+    assert.equal(undeclared?.block, true, "undeclared paths stay blocked");
+    assert.match(undeclared?.reason ?? "", /not declared/i);
+    const te = await hook(toolCall("write", ".pi/extensions/test.ts"));
+    assert.equal(te?.block, true, "the orchestrator-owned test extension stays blocked");
+    assert.match(te?.reason ?? "", /orchestrator/i);
+    const del = await hook(toolCall("delete_file", "src/theirs.ts"));
+    assert.equal(del?.block, true, "delete_file still requires a declared D path");
+  });
+
+  it("the same payload without ownsAll enforces per-task ownership for the FULL-GATE unit id", async () => {
+    const payload = {
+      repoRoot: CWD,
+      baselineHead: "base123",
+      allowlist: [{ path: "src/theirs.ts", status: "M", refs: ["T2"] }],
+      unit: { id: "FULL-GATE" },
+    };
+    const { hook } = await loadGuardExtension(writeGuardFile(payload));
+    const theirs = await hook(toolCall("write", "src/theirs.ts"));
+    assert.equal(theirs?.block, true, "without ownsAll the ownership check still applies");
+    assert.match(theirs?.reason ?? "", /FULL-GATE/, "the reason names the unit's task id");
+    assert.match(theirs?.reason ?? "", /T2/, "the reason names the owning task");
+  });
+});

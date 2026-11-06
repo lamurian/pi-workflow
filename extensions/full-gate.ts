@@ -66,6 +66,9 @@ async function execFinalSuite(
       label: suite.label,
       passed,
       tail: gateTail([r.stdout ?? "", r.stderr ?? ""].filter(Boolean).join("\n")) || "(no output)",
+      // T7: capture the repo-relative suite cwd so triage can map reported
+      // test paths into repo-relative paths (absent when the suite ran at root).
+      ...(suite.cwd && suite.cwd !== "." ? { cwd: suite.cwd } : {}),
     };
   } catch (err) {
     return {

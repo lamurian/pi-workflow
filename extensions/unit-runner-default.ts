@@ -6,6 +6,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TaskContract, WorkflowState } from "./state.ts";
 import type { UnitRunner } from "./implement-loop.ts";
 import { writeContractGuardFile } from "./contract-guard-file.ts";
+import { FULL_GATE_UNIT_ID } from "./full-gate-fix.ts";
 import { runImplementerUnit } from "./implementer-runner.ts";
 import { loadUnitPrompt } from "./unit-task-text.ts";
 
@@ -43,6 +44,8 @@ export function createDefaultUnitRunner(
         contract: state.contractV2,
         taskId: unit.behaviorId,
         testSuites: state.testTool?.suites ?? [],
+        // T7: the FULL-GATE fix unit may touch every declared path.
+        ...(unit.behaviorId === FULL_GATE_UNIT_ID ? { ownsAll: true } : {}),
       },
     );
     // T5: keep the child alive after every report — test-kind children absorb

@@ -27,6 +27,13 @@ export interface UnitPayloadOptions {
   taskId?: string;
   /** Test suites recorded in state.testTool (payload `unit.testSuites`). */
   testSuites?: readonly TestSuite[];
+  /**
+   * T7: grant the FULL-GATE fix unit write/edit on EVERY declared path
+   * regardless of task ownership. Written as payload `ownsAll: true`; the
+   * child guard then skips the per-task ownership check (undeclared paths
+   * and D-status rules still block).
+   */
+  ownsAll?: boolean;
 }
 
 /**
@@ -99,6 +106,7 @@ export async function writeContractGuardFile(
     repoRoot: resolve(cwd),
     baselineHead,
     baselineExisting,
+    ...(options.ownsAll ? { ownsAll: true } : {}),
   };
   const payload =
     contract && taskId !== undefined && slice

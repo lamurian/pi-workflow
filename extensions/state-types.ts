@@ -143,6 +143,12 @@ export interface GateSuiteResult {
   passed: boolean;
   /** Capped output tail carried into gate reports and evidence lines. */
   tail: string;
+  /**
+   * Repo-relative working directory the suite ran in (T7), captured by the
+   * final gate so triage can map reported test paths to repo-relative paths.
+   * Optional: absent for suites run at the repo root and on scope-gate verdicts.
+   */
+  cwd?: string;
 }
 
 /** One orchestrator test-gate result recorded per task (T8). */

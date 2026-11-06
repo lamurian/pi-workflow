@@ -3626,16 +3626,18 @@ describe("T8: orchestrator test gates", () => {
     // The filterable (Go) suite ran with the argv routed from the owned test
     // path — scoped package pattern, no -run filter, and NOT the unscoped ./....
     const goRuns = execLog.filter((e) => e.cmd === "go");
-    assert.equal(goRuns.length, 1, "one orchestrator scope-gate run per landed task commit");
     assert.deepEqual(
-      goRuns[0]!.args,
-      ["test", "./pkg/foo/..."],
-      "filterable suite runs the routed package pattern, unfiltered",
+      goRuns.map((e) => e.args),
+      [["test", "./pkg/foo/..."], ["test", "./..."]],
+      "one scoped scope-gate run per landed task commit, then the T7 final gate runs the suite unfiltered",
     );
-    // The non-filterable (npm) suite ran unfiltered too.
+    // The non-filterable (npm) suite ran unfiltered in both gates.
     const npmRuns = execLog.filter((e) => e.cmd === "npm");
-    assert.equal(npmRuns.length, 1, "every non-filterable suite runs in the scope gate");
-    assert.deepEqual(npmRuns[0]!.args, ["run", "test"], "non-filterable suites run their plain argv");
+    assert.equal(npmRuns.length, 2, "every non-filterable suite runs in the scope gate and again in the final gate");
+    assert.ok(
+      npmRuns.every((e) => e.args.join(" ") === "run test"),
+      "non-filterable suites run their plain argv",
+    );
     // The gate ran AFTER the task commit landed, from the orchestrator's own
     // exec log — the injected unit runner has no test tool at all.
     const commitIdx = execLog.findIndex((e) => e.cmd === "git" && e.args[0] === "commit");
@@ -3791,6 +3793,290 @@ describe("T8: orchestrator test gates", () => {
     );
     assert.match(res2.content[0].text, /orchestrator gate/i);
     assert.match(res2.content[0].text, /failed/, "the gate line carries the fail verdict");
+  });
+});
+
+// ═══ T7: orchestrator final gate — triage, one FULL-GATE fix round, halts ═══
+describe("T7: orchestrator final gate", () => {
+  const JS_SUITE = { label: "javascript (npm run test)", argv: ["npm", "run", "test"] };
+
+  /** Finalizing state: one active behavior, recorded suites, v2 refs for triage owners. */
+  function finalGateState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      testTool: { source: "detected", suites: [JS_SUITE] },
+      contractV2: {
+        title: "Final Gate Task",
+        instruction: "do things",
+        done: "all green",
+        sources: [{ path: "src/a.ts", tasks: ["T1"] }],
+        tests: [{ path: "__tests__/a.test.ts", status: "M", tasks: ["T1"] }],
+        tasks: [
+          { id: "T1", description: "first behavior", expectedOutput: ["e1"], status: "active" },
+        ],
+      },
+      task: {
+        title: "Final Gate Task",
+        instruction: "do things",
+        files: [
+          { path: "src/a.ts", status: "M" },
+          { path: "__tests__/a.test.ts", status: "M" },
+        ],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  type NpmResult = { code: number; stdout: string; stderr: string };
+
+  /**
+   * Exec mock: git commits advance HEAD; every npm call shifts the next
+   * queued result (scope-gate runs included), defaulting to green.
+   */
+  function piWithNpmQueue(results: NpmResult[]) {
+    const pi = mockPi();
+    const execLog: Array<{ cmd: string; args: string[] }> = [];
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      execLog.push({ cmd, args });
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "npm") {
+        const next = results.shift() ?? { code: 0, stdout: "ok", stderr: "" };
+        return { ...next, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return { pi, execLog };
+  }
+
+  const GREEN: NpmResult = { code: 0, stdout: "ok", stderr: "" };
+  /** Red suite whose only failing test is declared with owner T1. */
+  const RED_DECLARED: NpmResult = {
+    code: 1,
+    stdout: "",
+    stderr: "FAIL  __tests__/a.test.ts > suite > test",
+  };
+
+  it("a green final gate after the completion gate completes the run and returns the workflow to idle", async () => {
+    const { pi, execLog } = piWithNpmQueue([GREEN]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: "feat(core): add first behavior",
+      };
+    });
+
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.equal(state.phase, "idle", "a green final gate returns the workflow to idle");
+    assert.equal(state.finalGate?.passed, true, "the final-gate result is persisted");
+    assert.deepEqual(spawns, ["T1"], "no fix unit runs on a green final gate");
+    const npmRuns = execLog.filter((e) => e.cmd === "npm");
+    assert.equal(npmRuns.length, 2, "scope gate + final gate each run the suite once");
+    const lastCommit = execLog.findLastIndex((e) => e.cmd === "git" && e.args[0] === "commit");
+    assert.ok(
+      execLog.indexOf(npmRuns[1]!) > lastCommit,
+      "the final gate runs after the completion gate passes (last commit landed)",
+    );
+  });
+
+  it("runs the final gate on resume when every task is already done", async () => {
+    const { pi, execLog } = piWithNpmQueue([GREEN]);
+    const state = finalGateState();
+    state.phase = "implementing";
+    state.task!.behaviors[0]!.status = "done";
+    state.contractV2!.tasks[0]!.status = "done";
+    const ctx = ctxWithState(state);
+    let spawned = 0;
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async () => {
+      spawned++;
+      return { summary: "x", suggestedCommit: "feat: x" };
+    });
+
+    assert.equal(spawned, 0, "the all-done resume path spawns no unit");
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.equal(state.phase, "idle");
+    assert.equal(state.finalGate?.passed, true, "the final gate still ran on the resume path");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      1,
+      "the resume path runs the recorded suites through the final gate",
+    );
+  });
+
+  it("runs exactly one FULL-GATE fix unit with tails, landed commits and failing-test owners, commits its work and re-runs the gate", async () => {
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, GREEN]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const units: Array<{ id: string; taskText: string }> = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      units.push({ id: unit.behaviorId, taskText: unit.taskText });
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit:
+          unit.behaviorId === "FULL-GATE"
+            ? "fix(final): repair the failing test"
+            : "feat(core): add first behavior",
+      };
+    });
+
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.deepEqual(
+      units.map((u) => u.id),
+      ["T1", "FULL-GATE"],
+      "exactly one FULL-GATE fix unit runs when every failing test is declared",
+    );
+    const fix = units[1]!;
+    assert.match(fix.taskText, /## Failing tests \(with owning tasks\)/, "the failing tests section");
+    assert.match(
+      fix.taskText,
+      /__tests__\/a\.test\.ts — declared \(owners: T1\)/,
+      "failing tests are mapped to their owning tasks",
+    );
+    assert.match(
+      fix.taskText,
+      /feat\(core\): add first behavior/,
+      "the landed commit subjects ride the fix task text",
+    );
+    assert.match(
+      fix.taskText,
+      /FAIL  __tests__\/a\.test\.ts > suite > test/,
+      "the red suite tail rides the fix task text",
+    );
+    const commits = execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit");
+    assert.equal(commits.length, 2, "the fix unit's work is committed through the commit gate");
+    assert.equal(commits[1]!.args[2], "fix(final): repair the failing test");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      3,
+      "scope gate, red final gate, then the re-run final gate",
+    );
+    assert.equal(state.finalGate?.passed, true, "the re-run final gate is green");
+    assert.equal(state.phase, "idle");
+  });
+
+  it("halts with the full-gate report when the final gate stays red after the fix round", async () => {
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, RED_DECLARED]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit:
+          unit.behaviorId === "FULL-GATE"
+            ? "fix(final): repair the failing test"
+            : "feat(core): add first behavior",
+      };
+    });
+
+    assert.equal(result.complete, false, "a red gate after the fix round halts the run");
+    assert.equal(result.haltedOn, "FULL-GATE");
+    assert.match(result.error ?? "", /stayed red after the single FULL-GATE fix round/);
+    assert.match(result.error ?? "", /## Orchestrator full gate: FULL-GATE — RED/, "the full-gate report");
+    assert.match(result.error ?? "", /FAIL  __tests__\/a\.test\.ts/, "the failing suite tail");
+    assert.equal(
+      spawns.filter((id) => id === "FULL-GATE").length,
+      1,
+      "exactly one fix round runs before the halt",
+    );
+    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 3, "no third gate round");
+    assert.equal(state.phase, "implementing", "the halt keeps the resume phase");
+  });
+
+  it("halts without a fix round when a failing test is undeclared, listing it and steering to /discuss -> /finalize -> /implement", async () => {
+    const RED_UNDECLARED: NpmResult = {
+      code: 1,
+      stdout: "",
+      stderr: "FAIL  secrets/hidden.test.ts > suite > test",
+    };
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_UNDECLARED]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(result.complete, false);
+    assert.equal(result.haltedOn, "FULL-GATE");
+    assert.match(result.error ?? "", /secrets\/hidden\.test\.ts — undeclared/, "the undeclared failing test is listed");
+    assert.match(result.error ?? "", /__tests__\/a\.test\.ts|no fix/, "the triage report renders");
+    assert.match(result.error ?? "", /\/discuss -> \/finalize -> \/implement/, "the contract-change steer");
+    assert.deepEqual(spawns, ["T1"], "no fix round runs for an undeclared failing test");
+    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 2, "the gate ran once and never re-ran");
+  });
+
+  it("halts without a fix round when a red suite yields no parseable failing test path", async () => {
+    const RED_UNPARSEABLE: NpmResult = {
+      code: 1,
+      stdout: "",
+      stderr: "worker crashed before reporting any test",
+    };
+    const { pi } = piWithNpmQueue([GREEN, RED_UNPARSEABLE]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(result.complete, false);
+    assert.equal(result.haltedOn, "FULL-GATE");
+    assert.match(result.error ?? "", /Unparseable red suites/, "the unparseable suite is reported");
+    assert.match(result.error ?? "", /javascript \(npm run test\)/, "the red suite label is named");
+    assert.match(result.error ?? "", /\/discuss -> \/finalize -> \/implement/);
+    assert.deepEqual(spawns, ["T1"], "no fix round runs on unparseable output");
+  });
+
+  it("halts with the requested paths when the fix unit is blocked on an undeclared path", async () => {
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED]);
+    const state = finalGateState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      if (unit.behaviorId === "FULL-GATE") {
+        return { summary: "blocked on an undeclared path", findings: ["BLOCKED PATH: secrets/env.ts"] };
+      }
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: "feat(core): add first behavior" };
+    });
+
+    assert.equal(result.complete, false);
+    assert.equal(result.haltedOn, "FULL-GATE");
+    assert.match(result.error ?? "", /## FULL-GATE fix round blocked on undeclared paths/);
+    assert.match(result.error ?? "", /- secrets\/env\.ts — undeclared/, "the requested path is listed");
+    assert.match(result.error ?? "", /\/discuss -> \/finalize -> \/implement/, "the same contract-change steer");
+    assert.deepEqual(spawns, ["T1", "FULL-GATE"], "the blocked fix unit is the only fix round");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit").length,
+      1,
+      "no fix commit lands when the unit is blocked",
+    );
+    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 2, "no gate re-run after a blocked fix unit");
   });
 });
 
