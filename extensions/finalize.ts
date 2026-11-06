@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
 import type { FileEntry } from "./state.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
+import { checkTaskBreadth } from "./contract-breadth.ts";
 import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
-import { loadWorkflowConfig } from "./paths.ts";
+import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
 import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
 import { ensureTestTool } from "./test-tool-ensure.ts";
 import { isTestPath } from "./test-scan-profiles.ts";
@@ -23,6 +24,13 @@ const SCAN_BUDGET_MS = 5000;
 const MAX_SCAN_FILE_BYTES = 256 * 1024;
 /** Tracked-path read budget: one git ls-tree, 5s covers cold caches. */
 const TRACKED_BUDGET_MS = 5000;
+/** Rejection text for the legacy files/behaviors save_task payload. */
+const LEGACY_PAYLOAD_REJECTION =
+  "save_task rejected: the legacy files/behaviors payload is not " +
+  "accepted — call save_task with the contract v2 payload " +
+  "{ title, instruction, done, sources, tests, tasks } where each " +
+  "sources/tests entry is { path, status?, tasks } and each tasks " +
+  "entry is { id, description, expectedOutput[], status? } (see content/finalize-prompt.md).";
 
 /** Read a file JS-side with size cap and binary sniffing; null when skipped. */
 function readCapped(full: string): string | null {
@@ -215,18 +223,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       const legacy = raw.files !== undefined || raw.behaviors !== undefined;
       if (legacy || raw.sources === undefined || raw.tests === undefined || raw.tasks === undefined) {
         return {
-          content: [
-            {
-              type: "text",
-              text:
-                "save_task rejected: the legacy files/behaviors payload is not " +
-                "accepted — call save_task with the contract v2 payload " +
-                "{ title, instruction, done, sources, tests, tasks } where each " +
-                "sources/tests entry is { path, status?, tasks } and each tasks " +
-                "entry is { id, description, expectedOutput[], status? } " +
-                "(see content/finalize-prompt.md).",
-            },
-          ],
+          content: [{ type: "text", text: LEGACY_PAYLOAD_REJECTION }],
           details: {},
           isError: true,
         };
@@ -239,16 +236,20 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      // T10: validated contract stored directly; done statuses preserved from
-      // the prior v2 contract by task id; the v1 view derives from it.
+      // T10: validated contract stored directly; done statuses preserved from the prior v2 contract by task id.
       const preserved = preserveContractDoneStatuses(state.contractV2, result.contract);
+      // T1: per-task path cap — reject over-broad tasks before mutating state.
+      const workflow = await loadWorkflowConfig(ctx.cwd);
+      const tooBroad = checkTaskBreadth(preserved.contract, resolveMaxPathsPerTask(workflow));
+      if (tooBroad !== null) {
+        return { content: [{ type: "text", text: `save_task rejected: ${tooBroad}` }], details: {}, isError: true };
+      }
       state.contractV2 = preserved.contract;
       const tracked = await readTrackedPaths(pi, ctx.cwd);
       state.task = deriveTaskContract(preserved.contract, tracked);
       const behaviorWarnings = state.task.behaviors.flatMap(collectBehaviorWarnings);
       // T3/T7: ensure the test tool after validation (orchestrator-owned file,
       // never injected). Precedence: config -> external `test` -> detection -> none.
-      const workflow = await loadWorkflowConfig(ctx.cwd);
       const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
       const ensured = await ensureTestTool(pi, ctx.cwd, detection);
       const { source, suites, fullSuites } = ensured;

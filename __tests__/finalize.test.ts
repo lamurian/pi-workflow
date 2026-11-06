@@ -556,6 +556,10 @@ describe("save_task scan wiring (T3)", () => {
     const basenames = Array.from({ length: entryCount }, (_, i) => `feat${i}`);
     const testContent = basenames.join(" ") + "\n";
     const files: Record<string, string> = {};
+    // The render-wiring fixture is deliberately over-broad (100 paths for one
+    // task); raise the T1 per-task cap for this project so the breadth check
+    // does not reject before the rendering is exercised.
+    files[".pi/workflow.json"] = JSON.stringify({ finalize: { maxPathsPerTask: 200 } });
     for (let i = 0; i < entryCount; i++) files[`src/feat${i}.ts`] = "use strict;\n";
     for (let j = 0; j < testCount; j++) files[`tests/f${j}.test.ts`] = testContent;
     const dir = tmpProject(files);
@@ -1083,5 +1087,58 @@ describe("save_task contract v2 (T10)", () => {
       const lines = text.split("\n").length;
       assert.ok(lines <= limit, `${file} has ${lines} lines (budget ${limit})`);
     }
+  });
+});
+
+// ═══ per-task path cap (T1) ═══
+describe("save_task per-task path cap (T1)", () => {
+  it("rejects an over-limit task naming 'task too broad' and leaves state and phase unchanged", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s: WorkflowState = { phase: "discussing", specText: "topic", contractV2: VALID_V2 };
+    const ctx = ctxWithState(s);
+    const draft = {
+      ...VALID_V2,
+      sources: Array.from({ length: 11 }, (_, i) => ({ path: `src/p${i}.ts`, tasks: ["T1"] })),
+    };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /save_task rejected: task too broad/);
+    assert.match(res.content[0].text, /\bT1\b/);
+    assert.match(res.content[0].text, /\blimit 10\b/);
+    assert.deepEqual(s.contractV2, VALID_V2, "prior contract must stay untouched");
+    assert.equal(s.phase, "discussing", "phase must stay unchanged on rejection");
+    assert.equal(s.task, undefined, "no v1 view is derived on rejection");
+  });
+
+  it("applies the cap to the done-preserved contract: a preserved done task stays exempt", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const sources = Array.from({ length: 11 }, (_, i) => ({ path: `src/p${i}.ts`, tasks: ["T1"] }));
+    const prior = {
+      ...VALID_V2,
+      sources,
+      tasks: [{ id: "T1", description: "x", expectedOutput: ["returns x"], status: "done" as const }],
+    };
+    const s: WorkflowState = { phase: "discussing", specText: "topic", contractV2: prior };
+    const ctx = ctxWithState(s);
+    const draft = { ...VALID_V2, sources };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true, res.content?.[0]?.text ?? "");
+    assert.equal(s.phase, "finalizing");
+    assert.equal(s.contractV2!.tasks[0]!.status, "done", "preserved done stays done");
+  });
+});
+
+describe("finalize-prompt.md task-too-broad invariant (T1)", () => {
+  it("lists the invariant with the finalize.maxPathsPerTask setting and default 10", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /task too broad/);
+    assert.match(content, /finalize\.maxPathsPerTask/);
+    assert.match(content, /default 10/);
   });
 });

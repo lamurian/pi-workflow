@@ -36,7 +36,8 @@ Each rejection below names the invariant; fix the contract and call `save_task` 
 - **both lists** — no path in both `sources` and `tests`; each path belongs to exactly one list;
 - **D entry with empty tasks** — every `status: "D"` entry names at least one owning task;
 - **empty expectedOutput** — every task lists at least one assertion;
-- **duplicate task id** — task ids are unique.
+- **duplicate task id** — task ids are unique;
+- **task too broad** — a task may own at most `finalize.maxPathsPerTask` paths (default 10) across `sources` and `tests`; the cap counts distinct paths for every task whose status is not `done` (a shared path counts for each owner, `D` entries count), and save_task rejects naming each over-limit task, its count and the limit.
 
 Advisory only, never blocking: a task with no path refs (pure-manual), overlapping refs on shared files, and an `A`/`M` status that disagrees with git — status is display-only.
 

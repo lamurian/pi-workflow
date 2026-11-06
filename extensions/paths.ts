@@ -116,11 +116,26 @@ export interface ImplementConfig {
   slop?: Partial<SlopConfig>;
 }
 
+/** Finalize behavior configuration. */
+export interface FinalizeConfig {
+  /**
+   * Per-task path cap: a task may own at most this many distinct paths
+   * across `sources` and `tests`; save_task rejects broader contracts.
+   * Non-positive or non-integer values fall back to the default.
+   * @default 10
+   */
+  maxPathsPerTask?: number;
+}
+
 /** Top-level workflow configuration from workflow.json. */
 export interface WorkflowConfig {
   brainstorm?: BrainstormConfig;
   implement?: ImplementConfig;
+  finalize?: FinalizeConfig;
 }
+
+/** Default per-task path cap at finalize when workflow.json sets none. */
+export const DEFAULT_MAX_PATHS_PER_TASK = 10;
 
 const DEFAULT_WORKFLOW: WorkflowConfig = {
   brainstorm: {
@@ -131,7 +146,26 @@ const DEFAULT_WORKFLOW: WorkflowConfig = {
   implement: {
     enforceTdd: true,
   },
+  finalize: {
+    maxPathsPerTask: DEFAULT_MAX_PATHS_PER_TASK,
+  },
 };
+
+/**
+ * Resolve the per-task path cap from a workflow config.
+ *
+ * @param config - The merged workflow configuration.
+ * @returns `config.finalize.maxPathsPerTask` when it is a positive integer;
+ *          otherwise DEFAULT_MAX_PATHS_PER_TASK (10) — non-positive and
+ *          non-integer values fall back to the default.
+ */
+export function resolveMaxPathsPerTask(config: WorkflowConfig): number {
+  const max = config.finalize?.maxPathsPerTask;
+  if (typeof max !== "number" || !Number.isInteger(max) || max < 1) {
+    return DEFAULT_MAX_PATHS_PER_TASK;
+  }
+  return max;
+}
 
 // ── JSON config loading ────────────────────────────────────────────────────
 
