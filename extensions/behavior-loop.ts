@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError } from "./unit-progress.ts";
 import { crossOwnershipHalt } from "./cross-ownership.ts";
+import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import { RETRY_BUDGET, buildFixTask, retryExhaustedDetail } from "./commit-gate.ts";
@@ -89,7 +90,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   liveChild = attempt.client;
   adoptRound(); result.unitsRun++;
   let continuations = 0; // T6: per-behavior continuations, bounded and never charged to RETRY_BUDGET.
-  let retry = 1;
+  let retry = 1; let previousRejection: RejectionSnapshot | undefined; // T4: last hook-rejected round, compared for an identical repeat.
   let noProgressStreak = 0; // T7: consecutive timed-out/partial attempts that neither moved the tree fingerprint nor added findings; two in a row halt the behavior early.
 
   /** Run one fresh follow-up attempt (continuation or retry) with the given task text.
@@ -186,16 +187,14 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     // T11a: the unit reports the behavior is already implemented. With a clean tree and an unchanged HEAD the commit gate would only trip the no-changes verdict — mark the behavior done without a commit and without consuming retries. A dirty tree, an unknown tree state, or a moved HEAD falls through to the normal commit gate. completeAlreadySatisfied shuts the kept-alive child down (T5).
     if (isAlreadySatisfied({ alreadySatisfied: attempt.alreadySatisfied, headBefore: attemptHeadBefore, headNow: await readGitHead(pi, cwd), treeStatus: await readTreeState(pi, cwd) })) {
       recorder.sealLast("landed");
-      await completeAlreadySatisfied({ pi, ctx, state, behavior, result, position, client: liveChild });
-      liveChild = undefined;
+      await completeAlreadySatisfied({ pi, ctx, state, behavior, result, position, client: liveChild }); liveChild = undefined;
       break;
     }
 
     // Out-of-repo behaviors (sourceFile resolves outside cwd) are inferred never-commit: no manual pause, no git add/commit — the commit gate would reject them as no-changes forever. The unit report is the verification. Placed after the alreadySatisfied short-circuit so that keeps precedence; unit errors/partials above still retry as usual.
     if (isOutOfRepoBehavior(behavior, cwd)) {
       recorder.sealLast("landed");
-      await completeLeftUncommitted({ pi, ctx, state, behavior, result, position, client: liveChild });
-      liveChild = undefined;
+      await completeLeftUncommitted({ pi, ctx, state, behavior, result, position, client: liveChild }); liveChild = undefined;
       break;
     }
 
@@ -236,8 +235,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         retry++;
         continue;
       }
-      await shutdownWarmChild(liveChild); // T5: landing ends the behavior — no live child survives it
-      liveChild = undefined;
+      await shutdownWarmChild(liveChild); liveChild = undefined; // T5: landing ends the behavior — no live child survives it
       landedCommits.push(subject);
       behavior.status = "done";
       if (pauseOutcome?.timedOut) {
@@ -280,12 +278,12 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     if (commit.outcome.kind === "hook-rejected") { // T1: scan only the raw hook evidence (never the investigation), verify named foreign paths against the true index — a staged foreign path halts now, no fix-forward round, no retry charge.
       const crossBlock = await crossOwnershipHalt(pi, cwd, commit.outcome.hookOutput, state.contractV2, behavior.id);
       if (crossBlock) return haltWithChild(behavior.id, crossBlock);
+      const currentRejection: RejectionSnapshot = { hookOutput: commit.outcome.hookOutput, treeFingerprint: await readTreeFingerprint(pi, cwd) }; // T4: identity of this rejected round.
+      if (isIdenticalRejection(previousRejection, currentRejection)) return haltWithChild(behavior.id, buildIdenticalRejectionHalt(behavior.id) + "\n\n" + commit.outcome.investigation);
+      previousRejection = currentRejection;
     }
 
-    if (retry > RETRY_BUDGET) {
-      const detail = retryExhaustedDetail(commit.outcome.kind, behavior.id);
-      return haltWithChild(behavior.id, `${detail}\n\n${commit.outcome.investigation}`);
-    }
+    if (retry > RETRY_BUDGET) return haltWithChild(behavior.id, `${retryExhaustedDetail(commit.outcome.kind, behavior.id)}\n\n${commit.outcome.investigation}`);
 
     // T5/T8: hook-rejected/no-changes and red scope-gate fixes steer into the live test-kind child below the cap; else fresh-spawn.
     const fixText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();

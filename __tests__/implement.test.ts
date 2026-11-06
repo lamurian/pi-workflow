@@ -533,9 +533,10 @@ describe('B3: live footer status (key "implement")', () => {
 
   const HOOK_STDERR = "golangci-lint run failed\ninternal error\nexit status 1";
 
-  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. Output varies per attempt (T4) so rejections never repeat identically. */
   function piWithRejectingHook() {
     const pi = mockPi();
+    let commitAttempts = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       if (cmd === "git" && args[0] === "rev-parse") {
         return { stdout: "headA\n", stderr: "", code: 0, killed: false };
@@ -547,7 +548,8 @@ describe('B3: live footer status (key "implement")', () => {
         return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
+        commitAttempts++;
+        return { stdout: "", stderr: `${HOOK_STDERR} (attempt ${commitAttempts})`, code: 1, killed: false };
       }
       return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
@@ -1426,9 +1428,10 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     "internal/app/services/sts/approve.go:42:1: undefined: Probe\n" +
     "exit status 1";
 
-  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  /** Exec mock where the pre-commit hook always rejects (output varies per attempt, T4): HEAD never moves, tree dirty. */
   function piWithRejectingHook() {
     const pi = mockPi();
+    let commitAttempts = 0;
     const execLog: Array<{ cmd: string; args: string[] }> = [];
     pi.exec = (async (cmd: string, args: string[]) => {
       execLog.push({ cmd, args });
@@ -1442,7 +1445,8 @@ describe("T2: HEAD-gate hook-rejection path", () => {
         return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
+        commitAttempts++;
+        return { stdout: "", stderr: `${HOOK_STDERR} (attempt ${commitAttempts})`, code: 1, killed: false };
       }
       return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
@@ -3100,9 +3104,10 @@ describe("engineer's note: retry and fix task texts", () => {
     "approve.go:42:1: unused variable \"x\"\n" +
     "exit status 1";
 
-  /** Exec mock where the pre-commit hook always rejects: HEAD never moves, tree dirty. */
+  /** Exec mock where the pre-commit hook always rejects (output varies per attempt, T4): HEAD never moves, tree dirty. */
   function piWithRejectingHook() {
     const pi = mockPi();
+    let commitAttempts = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       if (cmd === "git" && args[0] === "rev-parse") {
         return { stdout: "headA\n", stderr: "", code: 0, killed: false };
@@ -3114,7 +3119,8 @@ describe("engineer's note: retry and fix task texts", () => {
         return { stdout: " src/a.ts | 2 +-\n", stderr: "", code: 0, killed: false };
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: HOOK_STDERR, code: 1, killed: false };
+        commitAttempts++;
+        return { stdout: "", stderr: `${HOOK_STDERR} (attempt ${commitAttempts})`, code: 1, killed: false };
       }
       return { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"];
@@ -4475,6 +4481,7 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
    */
   function piWithHook(hookStderr: string, stagedPaths = "src/a.ts\n") {
     const pi = mockPi();
+    let commitAttempts = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
       if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
@@ -4487,7 +4494,8 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
         return ok(stagedPaths);
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: hookStderr, code: 1, killed: false };
+        commitAttempts++;
+        return { stdout: "", stderr: `${hookStderr} (attempt ${commitAttempts})`, code: 1, killed: false };
       }
       return ok();
     }) as ExtensionAPI["exec"];
@@ -4571,6 +4579,7 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
     // the raw hook evidence means the ordinary fix-forward path proceeds.
     const INNOCENT_HOOK = "golangci-lint run failed\nundefined: Probe\nexit status 1";
     const pi = mockPi();
+    let commitAttempts = 0;
     pi.exec = (async (cmd: string, args: string[]) => {
       const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
       if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
@@ -4584,7 +4593,8 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
         return ok("src/a.ts\nextensions/other.ts\n");
       }
       if (cmd === "git" && args[0] === "commit") {
-        return { stdout: "", stderr: INNOCENT_HOOK, code: 1, killed: false };
+        commitAttempts++;
+        return { stdout: "", stderr: `${INNOCENT_HOOK} (attempt ${commitAttempts})`, code: 1, killed: false };
       }
       return ok();
     }) as ExtensionAPI["exec"];

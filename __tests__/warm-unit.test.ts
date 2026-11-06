@@ -126,7 +126,7 @@ function piWithGate(opts: GitGateOptions = {}) {
         head++;
         return { stdout: `[main c${commitAttempts}] landed`, stderr: "", code: 0, killed: false };
       }
-      return { stdout: "", stderr: HOOK_STDERR, code: opts.failCode ?? 1, killed: false };
+      return { stdout: "", stderr: `${HOOK_STDERR} (attempt ${commitAttempts})`, code: opts.failCode ?? 1, killed: false };
     }
     return { stdout: "", stderr: "", code: 0, killed: false };
   }) as ExtensionAPI["exec"];
