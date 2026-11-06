@@ -778,6 +778,31 @@ describe("unit-prompt.md content assertions (T7)", () => {
     assert.match(content, /suggestedCommit/);
     assert.match(content, /Do NOT run `git commit`/);
   });
+
+  it("forbids counting lines or hand-emulating lint, typecheck or format rules", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /never count lines/i);
+    assert.match(content, /never hand-emulate lint, typecheck or format rules/i);
+    assert.match(content, /lint/);
+    assert.match(content, /typecheck/);
+    assert.match(content, /format rules/i);
+  });
+
+  it("relies on the pre-commit hook output delivered as a steer for lint/typecheck/format failures", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(content, /pre-commit hook output/i);
+    assert.match(content, /steer/i);
+    assert.match(content, /fix exactly what/i);
+  });
+
+  it("hand-tracing fallback covers behavior logic only", async () => {
+    const content = await loadContent("unit-prompt.md");
+    assert.match(
+      content,
+      /hand-tracing the behavior logic/i,
+      "the hand-tracing fallback must be scoped to behavior logic, not tooling",
+    );
+  });
 });
 
 // ═══ done-preservation on re-finalize (T10) ═══
