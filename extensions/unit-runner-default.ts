@@ -12,7 +12,7 @@ import { loadUnitPrompt } from "./unit-task-text.ts";
 
 /**
  * Build the default unit runner for one /implement run: writes the
- * per-spawn payload to `.git/pi-workflow/contract-guard.json` before
+ * per-spawn payload to `.pi/workflow/contract-guard.json` before
  * every spawn (base attempt, retry, fix, continuation) and runs the unit
  * with `PI_UNIT_FILE` pointing at it so the child contract-guard
  * extension can enforce the allowlist in-turn (`PI_CONTRACT_GUARD_FILE`

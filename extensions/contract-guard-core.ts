@@ -27,6 +27,12 @@ export interface DeclaredFile {
 export const TEST_EXTENSION_PATH = ".pi/extensions/test.ts";
 
 /**
+ * Repo-relative runtime dir for the per-spawn payload. The folder carries its
+ * own `.gitignore` (`*`), so the payload never reaches the staged diff.
+ */
+export const WORKFLOW_RUNTIME_DIR = ".pi/workflow";
+
+/**
  * Owning task ids of a declared entry.
  *
  * Accepts both ref shapes: PathEntry-style `tasks` (validated contracts) and

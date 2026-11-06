@@ -1,5 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, chmodSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, sep } from "node:path";
@@ -17,7 +18,7 @@ import {
 } from "../extensions/halt-report.ts";
 import { deriveDiagnosis } from "../extensions/halt-diagnosis.ts";
 import { runOrchestratedImplement } from "../extensions/implement-loop.ts";
-import type { Behavior, TaskContract, WorkflowState } from "../extensions/state.ts";
+import type { Behavior, ContractV2, TaskContract, WorkflowState } from "../extensions/state.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -617,7 +618,7 @@ describe("buildImplementerArgs (T3 bash-free units)", () => {
 // ─── Guard file: written by the orchestrator before each spawn ──────────────
 
 describe("contract-guard file (T3)", () => {
-  it("writes .git/pi-workflow/contract-guard.json with the allowlist and baselineExisting", async () => {
+  it("writes .pi/workflow/contract-guard.json with the allowlist and baselineExisting", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "pi-guard-file-"));
     const execLog: Array<{ cmd: string; args: string[] }> = [];
     const pi = mockPi();
@@ -637,7 +638,11 @@ describe("contract-guard file (T3)", () => {
     assert.equal(guardPath, contractGuardFilePath(tmp));
     assert.equal(
       guardPath.split(sep).join("/"),
-      `${tmp.split(sep).join("/")}/.git/pi-workflow/contract-guard.json`,
+      `${tmp.split(sep).join("/")}/.pi/workflow/contract-guard.json`,
+    );
+    assert.ok(
+      !guardPath.split(sep).join("/").includes("/.git/"),
+      "the payload never lands under .git/",
     );
     const payload = JSON.parse(readFileSync(guardPath, "utf8")) as Record<string, unknown>;
     assert.equal(payload.repoRoot, tmp);
@@ -961,7 +966,7 @@ describe("orchestrator spawn wiring (T3)", () => {
       const result = await runOrchestratedImplement(pi, ctx, state, taskCopy);
 
       assert.equal(result.complete, true, result.error ?? "");
-      const guardPath = join(tmp, ".git", "pi-workflow", "contract-guard.json");
+      const guardPath = join(tmp, ".pi", "workflow", "contract-guard.json");
       assert.ok(existsSync(guardPath), "the orchestrator wrote the guard file");
       const payload = JSON.parse(readFileSync(guardPath, "utf8")) as Record<string, unknown>;
       assert.equal(payload.repoRoot, tmp);
@@ -1142,7 +1147,7 @@ describe("FULL-GATE ownsAll payload (T7)", () => {
       const { FULL_GATE_UNIT_ID } = await import("../extensions/full-gate-fix.ts");
       const { shutdownWarmChild } = await import("../extensions/warm-unit.ts");
       const runner = createDefaultUnitRunner(pi, state, task);
-      const guardPath = join(tmp, ".git", "pi-workflow", "contract-guard.json");
+      const guardPath = join(tmp, ".pi", "workflow", "contract-guard.json");
 
       const first = await runner(
         { behaviorId: "T1", taskText: "task text", kind: "test" },
@@ -1213,5 +1218,204 @@ describe("FULL-GATE ownsAll payload (T7)", () => {
     assert.equal(theirs?.block, true, "without ownsAll the ownership check still applies");
     assert.match(theirs?.reason ?? "", /FULL-GATE/, "the reason names the unit's task id");
     assert.match(theirs?.reason ?? "", /T2/, "the reason names the owning task");
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// T1 — payload relocated to .pi/workflow (self-ignored, git-invisible)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe("payload relocation to .pi/workflow (T1)", () => {
+  const CONTRACT: ContractV2 = {
+    title: "Payload Task",
+    instruction: "shared context only",
+    done: "tests pass",
+    sources: [
+      { path: "src/a.ts", status: "M", tasks: ["T1"] },
+      { path: "src/b.ts", status: "M", tasks: ["T2"] },
+    ],
+    tests: [{ path: "__tests__/a.test.ts", status: "A", tasks: ["T1"] }],
+    tasks: [
+      { id: "T1", description: "slice A", expectedOutput: ["assertion one"], status: "active" },
+      { id: "T2", description: "slice B", expectedOutput: ["other"], status: "active" },
+    ],
+  };
+
+  it("contractGuardFilePath returns <cwd>/.pi/workflow/contract-guard.json, never a .git/ path", async () => {
+    const { contractGuardFilePath } = await import("../extensions/contract-guard-file.ts");
+    const abs = contractGuardFilePath("/repo").split(sep).join("/");
+    assert.equal(abs, "/repo/.pi/workflow/contract-guard.json");
+    assert.ok(!abs.includes("/.git/"), "the payload path never lives under .git/");
+    const rel = contractGuardFilePath("relative/cwd").split(sep).join("/");
+    assert.ok(rel.endsWith("/.pi/workflow/contract-guard.json"));
+    assert.ok(!rel.includes("/.git/"), "relative cwd stays .git-free too");
+  });
+
+  it("a payload write creates .pi/workflow/.gitignore containing * (repairs a differing one)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-runtime-gitignore-"));
+    const { writeContractGuardFile, contractGuardFilePath } = await import(
+      "../extensions/contract-guard-file.ts"
+    );
+    const guardPath = await writeContractGuardFile(mockPi(), tmp, TASK.files, "base123");
+    assert.equal(guardPath, contractGuardFilePath(tmp));
+    const gitignore = join(tmp, ".pi", "workflow", ".gitignore");
+    assert.equal(readFileSync(gitignore, "utf8"), "*", "the runtime folder self-ignores");
+
+    writeFileSync(gitignore, "payload.json\n");
+    await writeContractGuardFile(mockPi(), tmp, TASK.files, "base123");
+    assert.equal(readFileSync(gitignore, "utf8"), "*", "a differing .gitignore is repaired");
+  });
+
+  it("git status --porcelain reports no changes after a payload write in a real temp repo", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-runtime-gitrepo-"));
+    execFileSync("git", ["init", "--quiet"], { cwd: tmp });
+    const { writeContractGuardFile } = await import("../extensions/contract-guard-file.ts");
+    await writeContractGuardFile(mockPi(), tmp, TASK.files, "base123");
+    const status = execFileSync("git", ["status", "--porcelain"], {
+      cwd: tmp,
+      encoding: "utf8",
+    });
+    assert.equal(
+      status.trim(),
+      "",
+      "the self-ignored payload keeps git status clean",
+    );
+  });
+
+  it("the payload write succeeds when .git is a file containing gitdir: <path> (submodule-style)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-runtime-gitfile-"));
+    writeFileSync(join(tmp, ".git"), "gitdir: /somewhere/else/.git\n");
+    const { writeContractGuardFile, contractGuardFilePath } = await import(
+      "../extensions/contract-guard-file.ts"
+    );
+    const guardPath = await writeContractGuardFile(mockPi(), tmp, TASK.files, "base123");
+    assert.equal(guardPath, contractGuardFilePath(tmp));
+    assert.ok(existsSync(guardPath), "a .git file never blocks the payload write");
+    assert.ok(
+      existsSync(join(tmp, ".pi", "workflow", ".gitignore")),
+      "the self-ignore rides along",
+    );
+  });
+
+  it("a v2 payload still carries repoRoot, baselineHead, baselineExisting, allowlist and unit slice", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-v2-payload-"));
+    const pi = mockPi();
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "ls-tree") {
+        return { stdout: "src/a.ts\n__tests__/a.test.ts\n", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    const { writeContractGuardFile } = await import("../extensions/contract-guard-file.ts");
+    const { deriveAllowlist } = await import("../extensions/contract-derive.ts");
+    const guardPath = await writeContractGuardFile(pi, tmp, deriveAllowlist(CONTRACT), "base123", {
+      contract: CONTRACT,
+      taskId: "T1",
+      testSuites: [{ label: "javascript (npm run test)", argv: ["npm", "run", "test"] }],
+    });
+    const payload = JSON.parse(readFileSync(guardPath, "utf8")) as {
+      repoRoot: string;
+      baselineHead: string;
+      baselineExisting: string[];
+      allowlist: unknown;
+      files?: unknown;
+      unit: {
+        id: string;
+        sources: Array<{ path: string }>;
+        tests: Array<{ path: string }>;
+        testFiles: string[];
+        packages: string[];
+        testSuites: unknown[];
+      };
+    };
+    assert.equal(payload.repoRoot, tmp);
+    assert.equal(payload.baselineHead, "base123");
+    assert.deepEqual(
+      payload.baselineExisting,
+      ["src/a.ts", "__tests__/a.test.ts"],
+      "baselineExisting comes from git ls-tree at the baseline",
+    );
+    assert.deepEqual(payload.allowlist, deriveAllowlist(CONTRACT), "the derived allowlist rides the payload");
+    assert.equal(payload.files, undefined, "no v1 files field in a v2 payload");
+    assert.equal(payload.unit.id, "T1");
+    assert.deepEqual(
+      payload.unit.sources.map((e) => e.path),
+      ["src/a.ts"],
+      "only T1-owned sources",
+    );
+    assert.deepEqual(
+      payload.unit.tests.map((e) => e.path),
+      ["__tests__/a.test.ts"],
+      "only T1-owned tests",
+    );
+    assert.deepEqual(payload.unit.testFiles, ["__tests__/a.test.ts"]);
+    assert.deepEqual(payload.unit.packages, ["__tests__"]);
+    assert.equal(payload.unit.testSuites.length, 1, "the recorded test suites ride the payload");
+  });
+
+  it("the generated test tool loads the payload from the new path via PI_UNIT_FILE and the legacy fallback", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "pi-test-tool-payload-"));
+    const { writeContractGuardFile } = await import("../extensions/contract-guard-file.ts");
+    const { deriveAllowlist } = await import("../extensions/contract-derive.ts");
+    const guardPath = await writeContractGuardFile(mockPi(), tmp, deriveAllowlist(CONTRACT), "base123", {
+      contract: CONTRACT,
+      taskId: "T1",
+    });
+
+    let registered: {
+      execute: (
+        id: string,
+        params: unknown,
+        signal: unknown,
+        onUpdate: unknown,
+        ctx: unknown,
+      ) => Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }>;
+    } | undefined;
+    const execCwds: Array<string | undefined> = [];
+    const toolPi = {
+      registerTool: (tool: typeof registered) => {
+        registered = tool;
+      },
+      exec: async (_cmd: string, _args: string[], opts?: { cwd?: string }) => {
+        execCwds.push(opts?.cwd);
+        return { stdout: "ok", stderr: "", code: 0, killed: false };
+      },
+    };
+    const mod = await import("../.pi/extensions/test.ts");
+    (mod.default as (pi: unknown) => void)(toolPi);
+    assert.ok(registered, "the generated test tool registers");
+
+    const prevUnit = process.env.PI_UNIT_FILE;
+    const prevLegacy = process.env.PI_CONTRACT_GUARD_FILE;
+    try {
+      process.env.PI_UNIT_FILE = guardPath;
+      delete process.env.PI_CONTRACT_GUARD_FILE;
+      const viaUnit = await registered!.execute("call-1", {}, undefined, undefined, {
+        cwd: "/elsewhere",
+      });
+      assert.equal(viaUnit.isError ?? false, false, JSON.stringify(viaUnit));
+      assert.equal(
+        execCwds[0],
+        tmp,
+        "PI_UNIT_FILE at the new path: the payload repoRoot drives the suite cwd",
+      );
+
+      delete process.env.PI_UNIT_FILE;
+      process.env.PI_CONTRACT_GUARD_FILE = guardPath;
+      const viaLegacy = await registered!.execute("call-2", {}, undefined, undefined, {
+        cwd: "/elsewhere",
+      });
+      assert.equal(viaLegacy.isError ?? false, false, JSON.stringify(viaLegacy));
+      assert.equal(
+        execCwds[1],
+        tmp,
+        "the legacy PI_CONTRACT_GUARD_FILE fallback still loads the payload",
+      );
+    } finally {
+      if (prevUnit === undefined) delete process.env.PI_UNIT_FILE;
+      else process.env.PI_UNIT_FILE = prevUnit;
+      if (prevLegacy === undefined) delete process.env.PI_CONTRACT_GUARD_FILE;
+      else process.env.PI_CONTRACT_GUARD_FILE = prevLegacy;
+    }
   });
 });

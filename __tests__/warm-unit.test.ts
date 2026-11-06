@@ -766,8 +766,12 @@ describe("unit payload and slice task text (T5)", () => {
     });
     assert.equal(
       guardPath.split(sep).join("/"),
-      `${tmp.split(sep).join("/")}/.git/pi-workflow/contract-guard.json`,
-      "the payload lands at .git/pi-workflow/contract-guard.json",
+      `${tmp.split(sep).join("/")}/.pi/workflow/contract-guard.json`,
+      "the payload lands at .pi/workflow/contract-guard.json",
+    );
+    assert.ok(
+      !guardPath.split(sep).join("/").includes("/.git/"),
+      "the payload never lives under .git/",
     );
     const payload = JSON.parse(readFileSync(guardPath, "utf8")) as {
       repoRoot: string;

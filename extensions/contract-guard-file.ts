@@ -1,20 +1,21 @@
 /**
  * Unit payload helpers (T3/T5): the orchestrator writes the per-spawn
- * payload to `.git/pi-workflow/contract-guard.json` before every unit
- * spawn and passes its path to the child via `PI_UNIT_FILE`
+ * payload to `.pi/workflow/contract-guard.json` before every unit spawn
+ * and passes its path to the child via `PI_UNIT_FILE`
  * (`PI_CONTRACT_GUARD_FILE` stays as the child guard's read-fallback for
  * one release). With a v2 contract the payload carries the derived
  * `allowlist` and the unit's slice `unit { id, sources, tests, testFiles,
  * packages, testSuites }` (both derived via contract-derive); v1 sessions
- * keep writing the plain `files` allowlist. Writing under `.git/` keeps the
- * payload out of the staged diff, so it can never violate the allowlist it
- * describes.
+ * keep writing the plain `files` allowlist. The payload stays out of the
+ * staged diff because the `.pi/workflow` folder self-ignores (its own
+ * `.gitignore` holds `*`), not because it lives under `.git/` — so it can
+ * never violate the allowlist it describes.
  */
 
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { DeclaredFile } from "./contract-guard-core.ts";
+import { WORKFLOW_RUNTIME_DIR, type DeclaredFile } from "./contract-guard-core.ts";
 import { deriveAllowlist, deriveUnitScope } from "./contract-derive.ts";
 import type { ContractV2 } from "./state.ts";
 import type { TestSuite } from "./test-tool-detect.ts";
@@ -40,10 +41,34 @@ export interface UnitPayloadOptions {
  * Absolute path of the payload file for a working directory.
  *
  * @param cwd - Repository working directory (the unit spawn cwd).
- * @returns `<cwd>/.git/pi-workflow/contract-guard.json`.
+ * @returns `<cwd>/.pi/workflow/contract-guard.json`.
  */
 export function contractGuardFilePath(cwd: string): string {
-  return join(resolve(cwd), ".git", "pi-workflow", "contract-guard.json");
+  return resolve(cwd, WORKFLOW_RUNTIME_DIR, "contract-guard.json");
+}
+
+/**
+ * Ensure the per-spawn runtime dir exists and self-ignores.
+ *
+ * Creates `<cwd>/.pi/workflow` (recursive) and writes a `.gitignore`
+ * containing `*` whenever it is missing or differs, so the payload folder
+ * never shows up in `git status` or the staged diff.
+ *
+ * @param cwd - Repository working directory (the unit spawn cwd).
+ * @returns Absolute path of the runtime directory.
+ */
+export function ensureWorkflowRuntimeDir(cwd: string): string {
+  const dir = resolve(cwd, WORKFLOW_RUNTIME_DIR);
+  mkdirSync(dir, { recursive: true });
+  const gitignore = resolve(dir, ".gitignore");
+  let existing: string | undefined;
+  try {
+    existing = readFileSync(gitignore, "utf8");
+  } catch {
+    existing = undefined;
+  }
+  if (existing !== "*") writeFileSync(gitignore, "*");
+  return dir;
 }
 
 /**
@@ -75,7 +100,7 @@ export async function writeContractGuardFile(
   options: UnitPayloadOptions = {},
 ): Promise<string> {
   const filePath = contractGuardFilePath(cwd);
-  mkdirSync(dirname(filePath), { recursive: true });
+  ensureWorkflowRuntimeDir(cwd);
 
   const contract = options.contract;
   const taskId = options.taskId;
