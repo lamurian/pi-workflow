@@ -411,6 +411,95 @@ describe("planUnstage (T4)", () => {
   });
 });
 
+// ─── Pure core: staged .pi/workflow runtime paths are violations (T3) ────────
+
+describe("staged .pi/workflow runtime paths (T3)", () => {
+  it("classifyBaselineDiff reports a staged .pi/workflow/contract-guard.json as a violation, not as owned", () => {
+    const files = [
+      { path: ".pi/workflow/contract-guard.json", status: "M" as const, tasks: ["T1"] },
+      { path: ".pi/workflow", status: "A" as const, tasks: ["T1"] },
+    ];
+    const result = classifyBaselineDiff({
+      nameStatus: "M\t.pi/workflow/contract-guard.json\nA\t.pi/workflow\n",
+      files,
+      baselineRef: "base123",
+      taskId: "T1",
+    });
+    assert.equal(
+      result.violations.length,
+      2,
+      "the payload and the runtime dir itself must both violate, declared or not",
+    );
+    assert.ok(
+      result.violations.some((v) => v.includes(".pi/workflow/contract-guard.json")),
+      "the staged payload path is named in a violation",
+    );
+    assert.ok(
+      result.violations.some((v) => v.includes(".pi/workflow")),
+      "the runtime dir itself is named in a violation",
+    );
+    assert.deepEqual(result.advisories, [], "a runtime path is never merely advisory");
+  });
+
+  it("a .git/ staged path is still reported as a violation", () => {
+    const result = classifyBaselineDiff({
+      nameStatus: "M\t.git/config\n",
+      files: TASK.files,
+      baselineRef: "base123",
+    });
+    assert.equal(result.violations.length, 1);
+    assert.match(result.violations[0]!, /\.git\//);
+  });
+
+  it("planUnstage classifies a staged .pi/workflow/... path as undeclared rather than owned", () => {
+    const files = [
+      { path: "src/mine.ts", status: "M" as const, tasks: ["T1"] },
+      { path: ".pi/workflow/contract-guard.json", status: "M" as const, tasks: ["T1"] },
+      { path: ".pi/workflow", status: "A" as const, tasks: ["T1"] },
+    ];
+    const plan = planUnstage(
+      files,
+      "M\tsrc/mine.ts\nM\t.pi/workflow/contract-guard.json\nA\t.pi/workflow\n",
+      "T1",
+    );
+    assert.deepEqual(plan.owned, ["src/mine.ts"], "only the real declared path is owned");
+    assert.deepEqual(
+      plan.undeclared,
+      [".pi/workflow/contract-guard.json", ".pi/workflow"],
+      "runtime paths land in undeclared even when the contract declares them",
+    );
+    assert.deepEqual(plan.contamination, [], "never contamination — there is nothing to unstage cleanly");
+    assert.deepEqual(plan.commands, []);
+  });
+
+  it("a staged .pi/workflow.json config path is unaffected by the check", () => {
+    const files = [{ path: ".pi/workflow.json", status: "M" as const, tasks: ["T1"] }];
+    const classified = classifyBaselineDiff({
+      nameStatus: "M\t.pi/workflow.json\n",
+      files,
+      baselineRef: "base123",
+      taskId: "T1",
+    });
+    assert.deepEqual(classified.violations, [], "the config file is a normal declared path");
+
+    const undeclared = classifyBaselineDiff({
+      nameStatus: "M\t.pi/workflow.json\n",
+      files: TASK.files,
+      baselineRef: "base123",
+    });
+    assert.equal(undeclared.violations.length, 1);
+    assert.match(
+      undeclared.violations[0]!,
+      /undeclared/i,
+      "undeclared config keeps the plain undeclared message",
+    );
+
+    const plan = planUnstage(files, "M\t.pi/workflow.json\n", "T1");
+    assert.deepEqual(plan.owned, [".pi/workflow.json"], "the config path stays owned");
+    assert.deepEqual(plan.undeclared, []);
+  });
+});
+
 // ─── Commit gate: contract-guard outcome ─────────────────────────────────────
 
 interface ExecLogEntry {
