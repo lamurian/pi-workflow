@@ -4584,7 +4584,13 @@ describe("T4: early halt on cross-ownership hook blocks", () => {
       const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
       if (cmd === "git" && args[0] === "rev-parse") return ok("headA\n");
       // The tree state/diff --stat embed the foreign path in the investigation text.
-      if (cmd === "git" && args[0] === "status") return ok(" M src/a.ts\n M extensions/other.ts\n");
+      // T6 preflight reads porcelain: keep the foreign path out of the dirty
+      // status so the preflight passes; `--short` still embeds it in the
+      // investigation text (the actual subject of this test).
+      if (cmd === "git" && args[0] === "status") {
+        if (args.includes("--porcelain")) return ok(" M src/a.ts\n");
+        return ok(" M src/a.ts\n M extensions/other.ts\n");
+      }
       if (cmd === "git" && args[0] === "add") return ok();
       if (cmd === "git" && args[0] === "diff" && args.includes("--name-status")) {
         return ok("M\tsrc/a.ts\n");
@@ -4857,6 +4863,136 @@ describe("T5: slop gate wiring in the orchestrator loop", () => {
       process.env.PI_SLOP_GATE,
       "off",
       "vitest.config.ts test.env pins PI_SLOP_GATE=off",
+    );
+  });
+});
+
+// ═══ T6: dirty-tree preflight at /implement start and resume ═══
+describe("T6: dirty-tree preflight at /implement", () => {
+  /** v2 state whose contract gives T1 src/a.ts and T7/T2 extensions/other.ts. */
+  function preflightState(phase: "finalizing" | "implementing" = "finalizing"): WorkflowState {
+    return {
+      phase,
+      specText: "topic",
+      contractV2: {
+        title: "Preflight Task",
+        instruction: "do things",
+        done: "all green",
+        sources: [
+          { path: "src/a.ts", tasks: ["T1"] },
+          { path: "extensions/other.ts", tasks: ["T7", "T2"] },
+        ],
+        tests: [{ path: "__tests__/a.test.ts", tasks: ["T1"] }],
+        tasks: [
+          { id: "T1", description: "first behavior", expectedOutput: ["e1"], status: "active" },
+          { id: "T7", description: "other behavior", expectedOutput: ["e7"], status: "active" },
+          { id: "T2", description: "third behavior", expectedOutput: ["e2"], status: "active" },
+        ],
+      },
+      task: {
+        title: "Preflight Task",
+        instruction: "do things",
+        files: [
+          { path: "src/a.ts", status: "M" },
+          { path: "extensions/other.ts", status: "M" },
+        ],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first behavior", expectedOutput: "e1", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  /** Exec mock with a fixed porcelain status; HEAD advances on each commit. */
+  function piWithPorcelain(porcelain: string) {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "rev-parse") return ok(`head${headCounter}\n`);
+      if (cmd === "git" && args[0] === "status") return ok(porcelain);
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return ok("[main abc] committed");
+      }
+      return ok();
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  it("halts before spawning any unit when a later-task-owned path is dirty, naming path, owners and fallbacks", async () => {
+    const pi = piWithPorcelain(" M extensions/other.ts\n");
+    const state = preflightState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: `feat(core): add ${unit.behaviorId}` };
+    });
+
+    assert.deepEqual(spawns, [], "the preflight halts before any unit spawns");
+    assert.equal(result.complete, false, "a blocking dirty path halts the run");
+    assert.equal(result.haltedOn, "T1");
+    const error = result.error ?? "";
+    assert.match(error, /before any unit spawned/, "the halt states it happened pre-spawn");
+    assert.match(error, /extensions\/other\.ts/, "names the blocking path");
+    assert.match(error, /owners: T7, T2/, "names the owner ids");
+    assert.match(error, /checkpoint/i, "fallback: commit as a checkpoint");
+    assert.match(error, /git stash push -- extensions\/other\.ts/, "fallback: stash the paths");
+    assert.match(error, /re-finalize/i, "fallback: re-finalize so the first active task owns them");
+    assert.match(state.lastHalt?.error ?? "", /extensions\/other\.ts/, "lastHalt persists the halt");
+  });
+
+  it("applies the same preflight halt on resume (phase implementing)", async () => {
+    const pi = piWithPorcelain(" M extensions/other.ts\n");
+    const state = preflightState("implementing");
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return { summary: `implemented ${unit.behaviorId}`, suggestedCommit: `feat(core): add ${unit.behaviorId}` };
+    });
+
+    assert.deepEqual(spawns, [], "resume runs the same preflight before any unit spawns");
+    assert.equal(result.complete, false, "the resume preflight halts too");
+    assert.equal(result.haltedOn, "T1");
+    const error = result.error ?? "";
+    assert.match(error, /extensions\/other\.ts/, "names the blocking path");
+    assert.match(error, /owners: T7, T2/, "names the owner ids");
+    assert.match(error, /git stash push -- extensions\/other\.ts/, "fallback: stash the paths");
+    assert.match(error, /re-finalize/i, "fallback: re-finalize");
+  });
+
+  it("proceeds and spawns the first unit when only first-task-owned or undeclared paths are dirty", async () => {
+    const pi = piWithPorcelain(" M src/a.ts\n?? scratch.txt\n");
+    const state = preflightState();
+    const ctx = ctxWithState(state);
+    const spawns: string[] = [];
+    const notifies: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      notifies.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    const result = await runOrchestratedViaSeam(pi, ctx, async (unit) => {
+      spawns.push(unit.behaviorId);
+      return {
+        summary: `implemented ${unit.behaviorId}`,
+        suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+      };
+    });
+
+    assert.deepEqual(
+      spawns,
+      ["T1"],
+      "first-task-owned and undeclared dirt never blocks the first unit",
+    );
+    assert.equal(result.complete, true, `the run completes, got: ${result.error ?? ""}`);
+    assert.ok(
+      notifies.some((m) => /scratch\.txt/.test(m)),
+      "the undeclared dirty path surfaces as an advisory notify",
     );
   });
 });

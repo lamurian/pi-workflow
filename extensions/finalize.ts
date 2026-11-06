@@ -12,6 +12,7 @@ import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
 import { ensureTestTool } from "./test-tool-ensure.ts";
 import { isTestPath } from "./test-scan-profiles.ts";
 import { deriveMatches, type DeriveResult } from "./test-scan-derive.ts";
+import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
 import { crossCheck } from "./test-scan-check.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
@@ -255,7 +256,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       const { source, suites, fullSuites } = ensured;
       state.testTool = { source, suites, fullSuites };
       const scan = await runContractScan(pi, ctx.cwd, state.task.files);
-      const allWarnings = [...behaviorWarnings, ...(detection.warnings ?? []), ...(scan?.warnings ?? [])];
+      const allWarnings = [...behaviorWarnings, ...(detection.warnings ?? []), ...(scan?.warnings ?? []), ...(await dirtyTreeSaveWarnings(pi, ctx.cwd, preserved.contract))];
       const entering = state.phase === "discussing";
       transitionTo(pi, state, "finalizing");
       updateUi(state, ctx);
@@ -272,12 +273,8 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       if (scan === null) {
         text += "\n\nNote: scan unavailable — apply judgment from the discussion.";
       } else if (scan.evidence.length > 0) {
-        text +=
-          "\n\n## Test scan evidence (advisory)\n" +
-          renderEvidence(scan.evidence)
-            .split("\n")
-            .map((l) => `- ${l}`)
-            .join("\n");
+        const evidence = renderEvidence(scan.evidence).split("\n").map((l) => `- ${l}`).join("\n");
+        text += "\n\n## Test scan evidence (advisory)\n" + evidence;
       }
       // T3: echo the test-tool detection evidence line.
       text += `\n${ensured.message}`;

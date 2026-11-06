@@ -9,6 +9,7 @@ import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts"
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { registerWorkflowInputHandler } from "./hitl-pause.ts";
 import { readTreeState } from "./git-ops.ts";
+import { buildDirtyTreeAdvisoryText, buildDirtyTreeHaltText, dirtyTreePreflight } from "./dirty-tree-check.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
 import { buildEngineerNoteSection } from "./unit-task-text.ts";
@@ -131,8 +132,7 @@ export async function runOrchestratedImplement(
     pendingManualChecks: [],
   };
 
-  // T8: per-attempt history of the currently-halted-behavior candidate;
-  // reset per behavior, feeds the attempt table, diagnosis and lastHalt.
+  // T8: per-attempt history of the halted-behavior candidate; reset per behavior.
   const attemptHistory: AttemptRecord[] = [];
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
@@ -150,12 +150,9 @@ export async function runOrchestratedImplement(
     return finishRun(gateDeps);
   }
 
-  // T9: at /implement start, before the first unit spawns, the orchestrator
-  // runs the ensure step for the generated test extension (orchestrator-owned,
-  // never writable by a unit) and lands any regeneration as the SOLE
-  // chore-commit exception: a path-limited commit of .pi/extensions/test.ts
-  // only. Other staged work stays staged and never blocks it; only a failed
-  // chore commit halts the run before any unit work begins.
+  // T9: at /implement start, before the first unit spawns, regenerate the
+  // orchestrator-owned test extension and land it as the sole chore commit
+  // (.pi/extensions/test.ts only); only a failed chore commit halts first.
   const startEnsure = await ensureTestExtensionAtStart(pi, cwd, state);
   if (startEnsure.kind === "failed") {
     return halt(
@@ -168,6 +165,15 @@ export async function runOrchestratedImplement(
       `${TEST_EXTENSION_CHORE_SUBJECT} — .pi/extensions/test.ts committed alone (sole chore-commit path)`,
       "info",
     );
+  }
+
+  // T6: dirty-tree preflight (v2 contracts only): after the chore commit,
+  // before any unit spawn (start+resume) — later-task-owned dirty paths halt.
+  if (state.contractV2) {
+    const pre = await dirtyTreePreflight(pi, cwd, state.contractV2, units[0]!.id);
+    if (pre.blocking.length > 0) return halt(units[0]!.id, buildDirtyTreeHaltText(pre, units[0]!.id));
+    const advisory = buildDirtyTreeAdvisoryText(pre);
+    if (advisory) ctx.ui.notify(advisory, "info");
   }
 
   const resuming = state.phase === "implementing";

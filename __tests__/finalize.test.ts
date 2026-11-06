@@ -1142,3 +1142,51 @@ describe("finalize-prompt.md task-too-broad invariant (T1)", () => {
     assert.match(content, /default 10/);
   });
 });
+
+// ═══ save_task dirty-tree advisory warning (T6) ═══
+describe("save_task dirty-tree advisory warning (T6)", () => {
+  it("warns naming a dirty path owned only by a later task and still saves the contract", async () => {
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async (cmd: string, args: string[] = []) => {
+      const ok = (stdout = "") => ({ stdout, stderr: "", code: 0, killed: false });
+      if (cmd === "git" && args[0] === "status") return ok(" M src/other.ts\n");
+      if (cmd === "git" && args[0] === "ls-tree") {
+        return ok("src/a.ts\nsrc/other.ts\ntests/a.test.ts\n");
+      }
+      if (cmd === "find") return ok("./src/a.ts\n./src/other.ts\n./tests/a.test.ts\n");
+      return ok();
+    });
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      {
+        title: "Dirty Task",
+        instruction: "do the thing",
+        done: "tests pass",
+        sources: [
+          { path: "src/a.ts", tasks: ["T1"] },
+          { path: "src/other.ts", tasks: ["T2"] },
+        ],
+        tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
+        tasks: [
+          { id: "T1", description: "first", expectedOutput: ["e1"], status: "active" },
+          { id: "T2", description: "second", expectedOutput: ["e2"], status: "active" },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true, "the dirty-tree warning is advisory; the save still succeeds");
+    assert.equal(s.phase, "finalizing", "the contract still saves");
+    assert.ok(s.contractV2, "state.contractV2 carries the saved contract");
+    const text = res.content[0].text;
+    assert.match(text, /Warnings \(advisory/, "the warning lands in the advisory block");
+    assert.match(text, /dirty-tree/, "the warning names the dirty-tree preflight");
+    assert.match(text, /src\/other\.ts/, "the warning names the dirty path");
+    assert.match(text, /\bT2\b/, "the warning names the owning task");
+  });
+});
