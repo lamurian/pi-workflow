@@ -132,7 +132,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       result.cancelled = true; ctx.ui.setStatus("implement", undefined);
       return result;
     }
-    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("blocked"); if (attempt.blockedReason === "too-large") { const r = await trySplit("too-large", blockedText); if (r) return r; behavior.status = "done"; return undefined; } return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
+    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("unit-blocked"); if (attempt.blockedReason === "too-large") { const r = await trySplit("too-large", blockedText); if (r) return r; behavior.status = "done"; return undefined; } return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
       const progressed = attemptProgress;

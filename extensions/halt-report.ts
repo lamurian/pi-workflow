@@ -32,6 +32,7 @@ export type AttemptOutcome =
   | "slop-guard"
   | "contract-guard"
   | "blocked"
+  | "unit-blocked"
   | "commit-timeout"
   | "landed"
   | "ok";

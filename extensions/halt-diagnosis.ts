@@ -45,8 +45,8 @@ interface DiagnosisContext {
 interface DiagnosisRule {
   /** Whether this rule wins for the given halt context. */
   matches: (ctx: DiagnosisContext) => boolean;
-  /** The pinned one-line diagnosis. */
-  diagnosis: string;
+  /** The pinned one-line diagnosis (or a builder from the halt context). */
+  diagnosis: string | ((ctx: DiagnosisContext) => string);
   /** The pinned one-line recommended next action. */
   recommendation: string;
 }
@@ -176,6 +176,17 @@ const DIAGNOSIS_RULES: DiagnosisRule[] = [
     "Inspect the working tree for the missing changes; refine the behavior via " +
       "/discuss -> /finalize if it is ambiguous, then run /implement again.",
   ),
+  {
+    // The unit itself reported status blocked: name its blockedReason from the halt text.
+    matches: (ctx) => ctx.outcomes.includes("unit-blocked"),
+    diagnosis: (ctx) => {
+      const reason = /blockedReason: ([\w-]+)/.exec(ctx.error)?.[1] ?? "unspecified";
+      return `the unit reported itself blocked (blockedReason: ${reason})`;
+    },
+    recommendation:
+      "Fix the named blocker, or split the behavior via /discuss -> /finalize, " +
+      "then run /implement again.",
+  },
   outcomeRule(
     "blocked",
     "a sandbox-blocked command must run outside the sandbox",
@@ -232,5 +243,6 @@ export function deriveDiagnosis(attempts: AttemptRecord[], error: string): HaltD
     error,
   };
   const rule = DIAGNOSIS_RULES.find((r) => r.matches(ctx)) ?? GENERIC_RULE;
-  return { diagnosis: rule.diagnosis, recommendation: rule.recommendation };
+  const diagnosis = typeof rule.diagnosis === "function" ? rule.diagnosis(ctx) : rule.diagnosis;
+  return { diagnosis, recommendation: rule.recommendation };
 }
