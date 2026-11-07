@@ -1,6 +1,7 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { buildSlowTasks, composeCompletionReport, composeHaltReport } from "../extensions/implement-report.ts";
+import { createDurationTracker } from "../extensions/duration-tracker.ts";
 import type { OrchestratorResult } from "../extensions/implement-loop.ts";
 import type { ContractV2 } from "../extensions/contract-types.ts";
 import type { TaskContract } from "../extensions/state.ts";
@@ -16,6 +17,19 @@ const contract = {
 } as unknown as ContractV2;
 
 const sizes: Record<string, number> = { "a.ts": 100, "a.test.ts": 50, "b.ts": 7 };
+
+describe("duration tracker", () => {
+  it("accumulates per-behavior seconds and attaches slow tasks", () => {
+    const result: { slowTasks?: unknown[] } = {};
+    const tracker = createDurationTracker("/nonexistent", () => contract, result);
+    tracker.record("T1", [{ durationSec: 300 }, { durationSec: 200 }] as never);
+    tracker.record("T2", [{ durationSec: 10 }] as never);
+    assert.deepEqual(tracker.durations, { T1: 500, T2: 10 });
+    const r = tracker.attach({} as { slowTasks?: unknown[] });
+    assert.deepEqual(r.slowTasks, [{ taskId: "T1", durationSec: 500, assertions: 2, paths: 2, ownedBytes: 0 }]);
+    assert.deepEqual(result.slowTasks, r.slowTasks);
+  });
+});
 
 describe("duration report", () => {
   it("lists only tasks over 7 minutes with calibration facts", () => {

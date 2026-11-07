@@ -18,9 +18,8 @@ import { formatModelRef } from "./process-utils.ts";
 import { createHalt } from "./orchestrator-halt.ts";
 import { finishRun, type FinalGateDeps } from "./full-gate-fix.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
-import { statSync } from "node:fs";
-import { join } from "node:path";
-import { buildSlowTasks, type SlowTask } from "./implement-report.ts";
+import type { SlowTask } from "./implement-report.ts";
+import { createDurationTracker } from "./duration-tracker.ts";
 
 /** Result of one unit attempt: the parsed report plus failure diagnostics. */
 export type UnitAttempt = ImplementerReport & {
@@ -140,16 +139,9 @@ export async function runOrchestratedImplement(
 
   const attemptHistory: AttemptRecord[] = [];
 
-  // T22: accumulated attempt seconds per behavior across the run.
-  const durations: Record<string, number> = {};
-  const setSlow = (r: OrchestratorResult): OrchestratorResult => {
-    const sizeOf = (p: string): number => {
-      try { return statSync(join(cwd, p)).size; } catch { return 0; }
-    };
-    const slow = buildSlowTasks(durations, state.contractV2, sizeOf);
-    if (slow.length) { r.slowTasks = slow; result.slowTasks = slow; }
-    return r;
-  };
+  // T22: per-behavior attempt seconds live in duration-tracker.ts.
+  const tracker = createDurationTracker(cwd, () => state.contractV2, result);
+  const setSlow = tracker.attach;
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
@@ -164,9 +156,7 @@ export async function runOrchestratedImplement(
     return finishRun(gateDeps);
   }
 
-  // T9: at /implement start, before the first unit spawns, regenerate the
-  // orchestrator-owned test extension and land it as the sole chore commit
-  // (.pi/extensions/test.ts only); only a failed chore commit halts first.
+  // T9: land the test-extension chore commit before any unit spawns; failure halts.
   const startEnsure = await ensureTestExtensionAtStart(pi, cwd, state);
   if (startEnsure.kind === "failed") {
     return halt(
@@ -181,8 +171,7 @@ export async function runOrchestratedImplement(
     );
   }
 
-  // T6: dirty-tree preflight (v2 contracts only): after the chore commit,
-  // before any unit spawn (start+resume) — later-task-owned dirty paths halt.
+  // T6: dirty-tree preflight (v2 only) — later-task-owned dirty paths halt.
   if (state.contractV2) {
     const pre = await dirtyTreePreflight(pi, cwd, state.contractV2, units[0]!.id);
     if (pre.blocking.length > 0) return halt(units[0]!.id, buildDirtyTreeHaltText(pre, units[0]!.id));
@@ -205,9 +194,7 @@ export async function runOrchestratedImplement(
   }
 
   const totalUnits = units.length;
-  // Resume after a mustRunNow pause-halt: assume the user ran the blocked
-  // command. Capture the note before the loop (a landed commit clears
-  // state.lastHalt) and attach it only to the behavior that halted.
+  // Resume after a mustRunNow pause-halt: note attaches to the halted behavior only.
   let pendingNote: { behaviorId: string; note: string } | undefined;
   if (state.lastHalt?.pendingCommand) {
     const pending = state.lastHalt.pendingCommand;
@@ -223,11 +210,7 @@ export async function runOrchestratedImplement(
         `If its effects are missing, report that in your JSON report instead of retrying the command.`,
     };
   }
-  // T9: resume halt context. Capture state.lastHalt before the loop (a
-  // landed commit clears it), render the "## Previous run halted" section
-  // once, and prepend it to the base task text of the FIRST unit of the
-  // halted behavior only — it is dropped after that unit so retries,
-  // continuations and other behaviors never inherit it.
+  // T9: resume halt context, prepended to the first unit of the halted behavior only.
   const previousHalt = state.lastHalt;
   let previousHaltSection = previousHalt ? renderPreviousHaltSection(previousHalt) : "";
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
@@ -252,8 +235,7 @@ export async function runOrchestratedImplement(
       findingsSection, recordFindings, noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt,
     });
     resumeTreeContext = "";
-    durations[behavior.id] = (durations[behavior.id] ?? 0) +
-      attemptHistory.reduce((sum, a) => sum + a.durationSec, 0);
+    tracker.record(behavior.id, attemptHistory);
     if (halted) return setSlow(halted);
   }
   setSlow(result);
