@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck } from "./state.ts";
 import { evaluateCompletionGate } from "./completion-gate.ts";
-import { appendFindings, renderFindingsSection, type Finding } from "./findings-ledger.ts";
+import { appendFindings, renderFindingsSection, GLOBAL_FINDINGS_ID, type Finding } from "./findings-ledger.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import { renderPreviousHaltSection } from "./resume-context.ts";
 import type { UnitTask } from "./implementer-runner.ts";
@@ -96,7 +96,7 @@ export async function runOrchestratedImplement(
   ctx: ExtensionContext,
   state: WorkflowState,
   task: TaskContract,
-  runUnit: UnitRunner = createDefaultUnitRunner(pi, state, task, formatModelRef(ctx.model)),
+  baseRunUnit: UnitRunner = createDefaultUnitRunner(pi, state, task, formatModelRef(ctx.model)),
   engineerNote?: string,
 ): Promise<OrchestratorResult> {
   const cwd = ctx.cwd;
@@ -104,15 +104,11 @@ export async function runOrchestratedImplement(
   const noteSection = engineerNote ? buildEngineerNoteSection(engineerNote) : "";
   const units = task.behaviors.filter((b) => b.status === "active");
 
-  /** Current findings section for task texts (shared ledger, all behaviors). */
-  const findingsSection = () => renderFindingsSection(state.findings);
+  // T13: findings are scoped to the current behavior plus global (shared) entries.
+  let currentBehaviorId: string | undefined;
+  const findingsSection = () => renderFindingsSection(state.findings, currentBehaviorId);
 
-  /**
-   * Append a unit attempt's report findings to the shared ledger and persist
-   * the state (exact duplicates skipped; no persist when nothing new lands).
-   *
-   * @returns True when at least one new finding landed in the ledger.
-   */
+  /** Append findings to the ledger and persist; true when something new landed. */
   const recordFindings = (behaviorId: string, texts: string[] | undefined): boolean => {
     if (!texts?.length) return false;
     const { ledger, changed } = appendFindings(state.findings ?? [], behaviorId, texts);
@@ -120,6 +116,12 @@ export async function runOrchestratedImplement(
     state.findings = ledger;
     saveState(pi, state);
     return true;
+  };
+
+  // Report sharedFindings land in the ledger as global entries.
+  const runUnit: UnitRunner = async (unit, unitCwd, signal, onEvent) => {
+    const attempt = await baseRunUnit(unit, unitCwd, signal, onEvent);
+    return recordFindings(GLOBAL_FINDINGS_ID, attempt.sharedFindings), attempt;
   };
 
   const result: OrchestratorResult = {
@@ -132,14 +134,11 @@ export async function runOrchestratedImplement(
     pendingManualChecks: [],
   };
 
-  // T8: per-attempt history of the halted-behavior candidate; reset per behavior.
   const attemptHistory: AttemptRecord[] = [];
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
-  // T7: the final-gate phase (run the unbounded final gate, triage red
-  // output, exactly one FULL-GATE fix round) runs after the completion gate
-  // passes — both on the empty-units resume path and after the behavior loop.
+  // T7: final-gate phase runs after the completion gate passes (both paths).
   const gateDeps: FinalGateDeps = { pi, ctx, state, task, runUnit, halt, landedCommits, result };
 
   if (units.length === 0) {
@@ -218,6 +217,7 @@ export async function runOrchestratedImplement(
   let previousHaltSection = previousHalt ? renderPreviousHaltSection(previousHalt) : "";
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
+    currentBehaviorId = behavior.id;
     let taskPrefix = "";
     if (pendingNote && pendingNote.behaviorId === behavior.id) {
       taskPrefix = pendingNote.note;

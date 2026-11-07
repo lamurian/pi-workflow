@@ -31,6 +31,8 @@ export interface ImplementerReport {
   blockedReason?: "capability" | "too-large";
   /** Short reusable facts (file paths, signatures, verified tool behavior) for later units. */
   findings?: string[];
+  /** Findings useful to every later unit; recorded under the global id. */
+  sharedFindings?: string[];
   /** What a follow-up unit should do next after a partial wrap-up. */
   nextSteps?: string;
   /** True when the behavior is already implemented at HEAD and needs no commit. */
@@ -234,6 +236,7 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
         const blockedCommands = parseBlockedCommands(parsed.blockedCommands);
         const status = parseReportStatus(parsed.status);
         const findings = parseReportFindings(parsed.findings);
+        const sharedFindings = parseReportFindings(parsed.sharedFindings);
         return {
           summary: parsed.summary,
           ...(typeof parsed.suggestedCommit === "string"
@@ -242,6 +245,7 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
           ...(blockedCommands ? { blockedCommands } : {}),
           ...(status ? { status } : {}),
           ...(findings ? { findings } : {}),
+          ...(sharedFindings ? { sharedFindings } : {}),
           ...(parsed.blockedReason === "capability" || parsed.blockedReason === "too-large"
             ? { blockedReason: parsed.blockedReason }
             : {}),

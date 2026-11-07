@@ -72,11 +72,26 @@ export function appendFindings(
  * @returns A markdown section listing every entry as `- [behaviorId] text`,
  *          or an empty string for a missing or empty ledger.
  */
-export function renderFindingsSection(ledger: Finding[] | undefined): string {
+export function renderFindingsSection(
+  ledger: Finding[] | undefined,
+  behaviorId?: string,
+): string {
   if (!ledger || ledger.length === 0) return "";
-  const lines = ledger.map((entry) => `- [${entry.behaviorId}] ${entry.text}`);
-  return `\n\n${FINDINGS_SECTION_HEADING}\n\n${lines.join("\n")}\n`;
+  const scoped =
+    behaviorId === undefined
+      ? ledger
+      : ledger.filter((e) => e.behaviorId === behaviorId || e.behaviorId === GLOBAL_FINDINGS_ID);
+  const lines = scoped.map((entry) => `- [${entry.behaviorId}] ${entry.text}`);
+  const render = (ls: string[]) => `\n\n${FINDINGS_SECTION_HEADING}\n\n${ls.join("\n")}\n`;
+  while (lines.length > 0 && render(lines).length > MAX_FINDINGS_SECTION_CHARS) lines.shift();
+  return lines.length === 0 ? "" : render(lines);
 }
+
+/** Behavior id under which report `sharedFindings` are recorded (visible to all units). */
+export const GLOBAL_FINDINGS_ID = "global";
+
+/** Maximum characters of a rendered findings section; oldest entries drop first. */
+export const MAX_FINDINGS_SECTION_CHARS = 4000;
 
 /** Maximum characters kept from a bash command head in the digest. */
 export const TOOL_DIGEST_MAX_CHARS = 120;

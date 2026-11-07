@@ -206,6 +206,49 @@ describe("findings ledger: append/cap/render", () => {
   });
 });
 
+describe("findings ledger: per-task scope", () => {
+  it("renders only own-behavior findings plus global ones", () => {
+    const ledger: Finding[] = [
+      { behaviorId: "T1", text: "t1 fact" },
+      { behaviorId: "T2", text: "t2 fact" },
+      { behaviorId: "global", text: "shared fact" },
+    ];
+    const section = renderFindingsSection(ledger, "T2");
+    assert.ok(!section.includes("t1 fact"));
+    assert.ok(section.includes("t2 fact"));
+    assert.ok(section.includes("shared fact"));
+  });
+
+  it("caps the section at 4000 chars, dropping oldest first", () => {
+    const ledger: Finding[] = Array.from({ length: 40 }, (_, i) => ({
+      behaviorId: "T1",
+      text: `entry ${i} ${"x".repeat(200)}`,
+    }));
+    const section = renderFindingsSection(ledger, "T1");
+    assert.ok(section.length <= 4000);
+    assert.ok(section.includes("entry 39 "));
+    assert.ok(!section.includes("entry 0 "));
+  });
+
+  it("orchestrator: sharedFindings reach other units, plain findings do not", async () => {
+    const pi = piWithAdvancingHead();
+    const state: WorkflowState = { phase: "finalizing", specText: "topic", task: twoBehaviorTask() };
+    const texts: Record<string, string> = {};
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      texts[unit.behaviorId] = unit.taskText;
+      return {
+        summary: "ok",
+        suggestedCommit: "feat(core): x",
+        ...(unit.behaviorId === "T1" ? { findings: ["private t1"], sharedFindings: ["public t1"] } : {}),
+      };
+    };
+    const result = await runOrchestratedImplement(pi, ctxWithState(state), state, state.task!, runner);
+    assert.equal(result.complete, true);
+    assert.ok(texts.T2!.includes("- [global] public t1"));
+    assert.ok(!texts.T2!.includes("private t1"));
+  });
+});
+
 // ═══ Tool-call digest (T5) ═══
 describe("tool-call digest", () => {
   it("records read/edit paths and bash command heads from assistant events, deduped and truncated", () => {
@@ -305,10 +348,9 @@ describe("findings ledger: orchestrator wiring", () => {
       { behaviorId: "T1", text: "the commit gate classifies via HEAD before/after" },
     ]);
 
-    // ...and fed the next unit's task text (shared across behaviors).
+    // ...but is scoped to T1: the next behavior's task text does not carry it.
     const t2Task = spawns.find((s) => s.behaviorId === "T2")!.taskText;
-    assert.match(t2Task, /## Known findings from earlier units/);
-    assert.match(t2Task, /- \[T1\] the commit gate classifies via HEAD before\/after/);
+    assert.ok(!t2Task.includes("the commit gate classifies via HEAD before/after"));
 
     // Completion clears the ledger (phase -> idle).
     assert.equal(state.phase, "idle");
