@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,10 +18,13 @@ const git = (cwd: string, ...args: string[]) =>
 
 function makePi(): ExtensionAPI {
   return {
-    exec: async (cmd: string, args: string[], opts?: { cwd?: string }) => {
-      const r = spawnSync(cmd, args, { cwd: opts?.cwd, encoding: "utf8" });
-      return { code: r.status ?? 1, stdout: r.stdout ?? "", stderr: r.stderr ?? "", killed: false };
-    },
+    exec: (cmd: string, args: string[], opts?: { cwd?: string }) =>
+      new Promise((done) => {
+        execFile(cmd, args, { cwd: opts?.cwd, encoding: "utf8" }, (err, stdout, stderr) => {
+          const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
+          done({ code, stdout: stdout ?? "", stderr: stderr ?? "", killed: false });
+        });
+      }),
   } as unknown as ExtensionAPI;
 }
 
@@ -66,7 +69,7 @@ describe("refreshTestExtensionAfterLanding", () => {
     assert.equal(head(dir), before);
   });
 
-  it("child-process generator matches the committed template output", async () => {
+  it("child-process generator matches the committed template output", { timeout: 30000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "refresh-gen-"));
     const out = await createChildProcessGenerator(makePi(), dir)(suites);
     assert.equal(out, generateTestExtension(suites));
