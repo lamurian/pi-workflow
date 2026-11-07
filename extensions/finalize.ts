@@ -57,11 +57,18 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
 
     parameters: Type.Object(
       {
-        title: Type.String({ description: "Short task title" }),
-        instruction: Type.String({ description: "What to implement" }),
+        title: Type.Optional(Type.String({ description: "Short task title" })),
+        instruction: Type.Optional(Type.String({ description: "What to implement" })),
+        parentId: Type.Optional(
+          Type.String({ description: "split only: id of the task to split" }),
+        ),
         done: Type.Optional(Type.String({ description: "Definition of done" })),
         operation: Type.Optional(
-          Type.String({ description: "Contract operation (default 'replace')" }),
+          Type.String({
+            description:
+              "Contract operation: 'replace' (default) or 'split' with { parentId, " +
+              "tasks: [{ description, expectedOutput[], paths[], commands? }] }",
+          }),
         ),
         sources: Type.Optional(
           Type.Array(Type.Unknown(), {

@@ -4,6 +4,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { transitionTo, updateUi } from "./state.ts";
 import type { WorkflowState } from "./state-types.ts";
+import type { ContractV2 } from "./contract-types.ts";
+import { buildSplitContract } from "./contract-split.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
 import { checkTaskBreadth } from "./contract-breadth.ts";
 import { checkTaskSizing, resolveSizingLimits } from "./contract-sizing.ts";
@@ -18,7 +20,7 @@ import { buildRunPlan, renderRunPlan } from "./run-plan.ts";
 import { diffScanDigest, renderScanDiff, scanDigest, writeScanReport } from "./scan-report.ts";
 
 /** Supported save_task operations. */
-export type SaveTaskOperation = "replace";
+export type SaveTaskOperation = "replace" | "split";
 /** Who invoked the pipeline. */
 export type SaveTaskCaller = "agent" | "orchestrator";
 
@@ -38,7 +40,8 @@ export interface SaveTaskResult {
 /** Rule table: phase -> operation -> callers allowed. */
 export const SAVE_TASK_RULES: Record<string, Partial<Record<SaveTaskOperation, SaveTaskCaller[]>>> = {
   discussing: { replace: ["agent", "orchestrator"] },
-  finalizing: { replace: ["agent", "orchestrator"] },
+  finalizing: { replace: ["agent", "orchestrator"], split: ["agent"] },
+  implementing: { split: ["orchestrator"] },
 };
 
 const TRACKED_BUDGET_MS = 5000;
@@ -68,7 +71,7 @@ export function checkSaveTaskRule(
   const callers = phase ? SAVE_TASK_RULES[phase]?.[operation as SaveTaskOperation] : undefined;
   if (callers && callers.includes(caller)) return null;
   return (
-    `save_task requires the discussing or finalizing phase: operation '${operation}' ` +
+    `save_task rule violation: operation '${operation}' ` +
     `by ${caller} is not allowed in phase '${phase ?? "none"}'. ` +
     `Allowed phases and operations: ${describeRules()}.`
   );
@@ -91,6 +94,54 @@ async function readTrackedPaths(pi: ExtensionAPI, cwd: string): Promise<Set<stri
 
 const fail = (text: string): SaveTaskResult => ({ ok: false, text });
 
+async function checkSharedRules(
+  contract: ContractV2,
+  cwd: string,
+  workflow: Awaited<ReturnType<typeof loadWorkflowConfig>>,
+): Promise<string | null> {
+  const declared = workflow?.implement?.commands ?? {};
+  for (const t of contract.tasks) {
+    for (const name of t.commands ?? []) {
+      if (!Object.prototype.hasOwnProperty.call(declared, name)) {
+        return (
+          `save_task rejected: task ${t.id} lists command '${name}' which is not declared ` +
+          `in .pi/workflow.json implement.commands — declare it via update_workflow_config first.`
+        );
+      }
+    }
+  }
+  const tooBroad = checkTaskBreadth(contract, resolveMaxPathsPerTask(workflow));
+  if (tooBroad !== null) return `save_task rejected: ${tooBroad}`;
+  const sizing = checkTaskSizing(contract, cwd, resolveSizingLimits(workflow));
+  if (sizing !== null) return `save_task rejected: ${sizing}`;
+  return null;
+}
+
+async function runSplit(
+  state: WorkflowState,
+  payload: Record<string, unknown>,
+  opts: SaveTaskOptions,
+): Promise<SaveTaskResult> {
+  const { pi, ctx, caller } = opts;
+  if (!state.contractV2) return fail("save_task rejected: split needs an existing contract");
+  const built = buildSplitContract(state.contractV2, payload.parentId, payload.tasks);
+  if (!built.ok) return fail(`save_task rejected: split: ${built.reason}`);
+  const result = validateContract(built.contract);
+  if (!result.ok) return fail(`save_task rejected: ${result.reason}`);
+  const workflow = await loadWorkflowConfig(ctx.cwd);
+  const shared = await checkSharedRules(result.contract, ctx.cwd, workflow);
+  if (shared !== null) return fail(shared);
+  state.contractV2 = result.contract;
+  state.task = deriveTaskContract(result.contract, await readTrackedPaths(pi, ctx.cwd));
+  state.contractHistory = [
+    ...(state.contractHistory ?? []),
+    { operation: "split", caller, at: new Date().toISOString() },
+  ];
+  updateUi(state, ctx);
+  const ids = result.contract.tasks.filter((t) => t.id.startsWith(`${payload.parentId}.`));
+  return { ok: true, text: `Task ${payload.parentId} split into ${ids.map((t) => t.id).join(", ")}.` };
+}
+
 /**
  * Run the save_task pipeline against a workflow state.
  *
@@ -108,6 +159,7 @@ export async function runSaveTask(
   const operation = typeof payload.operation === "string" ? payload.operation : "replace";
   const ruleError = checkSaveTaskRule(state?.phase, operation, caller);
   if (ruleError !== null || !state) return fail(ruleError ?? "save_task: no workflow state.");
+  if (operation === "split") return runSplit(state, payload, opts);
   const raw = { ...payload };
   delete raw.operation;
   const legacy = raw.files !== undefined || raw.behaviors !== undefined;
@@ -118,21 +170,8 @@ export async function runSaveTask(
   if (!result.ok) return fail(`save_task rejected: ${result.reason}`);
   const preserved = preserveContractDoneStatuses(state.contractV2, result.contract);
   const workflow = await loadWorkflowConfig(ctx.cwd);
-  const declared = workflow?.implement?.commands ?? {};
-  for (const t of preserved.contract.tasks) {
-    for (const name of t.commands ?? []) {
-      if (!Object.prototype.hasOwnProperty.call(declared, name)) {
-        return fail(
-          `save_task rejected: task ${t.id} lists command '${name}' which is not declared ` +
-            `in .pi/workflow.json implement.commands — declare it via update_workflow_config first.`,
-        );
-      }
-    }
-  }
-  const tooBroad = checkTaskBreadth(preserved.contract, resolveMaxPathsPerTask(workflow));
-  if (tooBroad !== null) return fail(`save_task rejected: ${tooBroad}`);
-  const sizing = checkTaskSizing(preserved.contract, ctx.cwd, resolveSizingLimits(workflow));
-  if (sizing !== null) return fail(`save_task rejected: ${sizing}`);
+  const shared = await checkSharedRules(preserved.contract, ctx.cwd, workflow);
+  if (shared !== null) return fail(shared);
   state.contractV2 = preserved.contract;
   const tracked = await readTrackedPaths(pi, ctx.cwd);
   state.task = deriveTaskContract(preserved.contract, tracked);
