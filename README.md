@@ -20,7 +20,8 @@ Two deterministic gates protect the atomic green-commit invariant: a **test scan
 | Tool | Description |
 |------|-------------|
 | `explore` | Runs parallel codebase searches via scout subagents and returns a synthesized summary with relative file paths. |
-| `save_task` | Persists the normalized contract (v2): `sources` and `tests` path lists plus `tasks[]` with a per-assertion `expectedOutput` array. Hard-validates every invariant (dangling taskRef, duplicate path, a path in both lists, a `D` entry without an owning task, empty `expectedOutput`, duplicate task id) and renders a per-task summary (id → sources → tests → assertion count). Then runs the test-suite detection step: when suites are detected and no session `test` tool exists, it generates `.pi/extensions/test.ts` — orchestrator-owned, never declared in the contract (see below). Then runs the deterministic **test scan**: per-entry evidence lines with confidence tags plus advisory warnings surface in the tool result. Transitions the workflow to the `finalizing` phase. |
+| `save_task` | Persists the normalized contract (v2): `sources` and `tests` path lists plus `tasks[]` with a per-assertion `expectedOutput` array. Hard-validates every invariant (dangling taskRef, duplicate path, a path in both lists, a `D` entry without an owning task, empty `expectedOutput`, duplicate task id) and renders a per-task summary (id → sources → tests → assertion count). Then runs the test-suite detection step: when suites are detected and no session `test` tool exists, it generates `.pi/extensions/test.ts` — orchestrator-owned, never declared in the contract (see below). Then runs the deterministic **test scan**: per-entry evidence lines with confidence tags plus advisory warnings surface in the tool result. Transitions the workflow to the `finalizing` phase. Two operations: `replace` (default) saves the whole contract; `split` (`{ operation: "split", parentId, tasks: [{ description, expectedOutput, paths, commands? }] }`) replaces one task with children `<parentId>.1..k` — the agent may split in `finalizing`, the orchestrator in `implementing`. Both run the same commands, breadth and sizing checks. |
+| `update_workflow_config` | Edits `.pi/workflow.json` (`implement.tests`, `implement.commands`, `finalize` limits) after schema validation. Allowed only in the `discussing` phase; the guard points units and later phases back to `/discuss`. |
 | `mark_task_done` | Marks one task done after implementing it. For a task with `tests` refs the evidence carries the orchestrator's gate result line (scope + pass/fail) from the per-task scope gate, replacing the unit's self-report. Soft-warns (does not block) when no commit landed since the previous task. |
 | `complete_implementation` | Ends the `implementing` phase and returns the workflow to idle. Refuses while any task is active, then runs the FULL GATE — every detected suite unfiltered, orchestrator-run — and blocks completion on red, naming the failing suite and its output tail. The orchestrator completes on its own and does not call this tool. |
 
@@ -44,7 +45,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
      - **HEAD unchanged + clean tree** → the unit landed no changes → explicit retry instruction.
      - **Commit timed out** (`PI_COMMIT_TIMEOUT_MS`) → infrastructure failure → halt, no fix subagent.
    - **Retry budget** — 5 retries per behavior (shared across unit errors, hook rejections, no-changes); a further failure halts.
-   - **Wrap-up steer (75% soft deadline)** — at 75% of the per-unit budget (`PI_IMPLEMENT_TIMEOUT_MS`), the unit is steered once to stop exploring, persist its work, and emit its JSON report. The hard kill at 100% is unchanged — the steer only gives the unit a chance to leave a coherent handoff instead of being killed mid-edit.
+   - **Progress and wrap-up steers (50% / 80%)** — the per-unit budget (`PI_IMPLEMENT_TIMEOUT_MS`, 600 s default) carries two steers: at 50% a progress check, at 80% a single wrap-up steer to stop exploring, persist its work, and emit its JSON report. The hard kill at 100% is unchanged — the steer only gives the unit a chance to leave a coherent handoff instead of being killed mid-edit.
    - **Partial reports and continuations** — the implementer report parses optional `status`, `findings`, `nextSteps` and `alreadySatisfied` fields. A `partial` attempt that made tree progress continues without committing and without consuming the retry budget: a **continuation unit** picks up the uncommitted work with the prior findings and `nextSteps` injected. Continuations are bounded at **4 per behavior** (`MAX_CONTINUATIONS`); after that, plain retries take over.
    - **Early halt on non-converging exploration** — two consecutive attempts with **no** tree progress (e.g. repeated timeouts that wrote nothing) halt the behavior immediately with diagnosis `exploration not converging`, instead of burning the retry budget on attempts that never touch the tree.
    - **Shared findings ledger** — every unit's report findings are appended to a session-wide ledger, deduplicated, capped at 40 entries, and rendered into every subsequent unit's task text as `## Known findings from earlier units`. The ledger is cleared when implementation completes. When an attempt times out or returns no report, its recorded tool calls are collapsed into a **tool-call digest** finding (`previous attempt touched: …`) so the next unit inherits what the dead one learned.
@@ -59,12 +60,33 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
 6. **Resume** — after a halt, re-run `/implement`. Done behaviors are skipped and the loop continues from the first active one; when the working tree is dirty, the resumed unit receives the `git status --short` output as context. The original baseline HEAD is kept. The persisted `lastHalt` is rendered as a `## Previous run halted` section (diagnosis, recommended next action, attempt table) and prepended to the **first unit of the halted behavior only** — retries, continuations and other behaviors never inherit it.
 7. **Commit & push** — push and open a PR with your own git workflow.
 
+### Run plan and preflight
+
+`/finalize` pins a **run plan** in the workflow state: the scoped and full suites, the declared `implement.commands`, and a hash of `.pi/workflow.json`. Before any unit spawns, `/implement` runs a **preflight** that refuses to start when the config hash changed since approval, or when an active task owns a test path but the plan has no scoped suites. The refusal names the fix (`/discuss -> /finalize` to re-pin). A dirty-tree check then blocks on declared dirty paths and warns on undeclared ones.
+
+### Named commands and the `run` tool
+
+`implement.commands` in workflow.json maps command names to argv arrays (e.g. `{ "lint": ["npm", "run", "lint"] }`). A task lists the names it needs in `commands`; `save_task` rejects a name not declared there — add it via `update_workflow_config` first. The generated extension registers a `run` tool next to `test`, so bash-free units can execute exactly those declared commands and nothing else.
+
+### Task sizing limits
+
+`save_task` rejects oversized non-done tasks. Limits live under `finalize` in workflow.json:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `maxPathsPerTask` | see `paths.ts` | Owned paths per task. |
+| `maxAssertionsPerTask` | `3` | `expectedOutput` entries per task. |
+| `maxManualAssertions` | `2` | Assertions per manual (`inspect:`) task. |
+| `maxTaskBytes` | `98304` | Total bytes of a task's owned files. |
+
+Bulk wording such as "every file" or "all rows" is rejected too. Split the task instead (`save_task` `operation: "split"`).
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `PI_COMMIT_TIMEOUT_MS` | `300000` | Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
-| `PI_IMPLEMENT_TIMEOUT_MS` | `900000` | Per-implementer-unit subprocess budget, independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 75% of this budget the unit gets its single wrap-up steer. |
+| `PI_IMPLEMENT_TIMEOUT_MS` | `600000` | Per-implementer-unit subprocess budget (600 s), independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 50% the unit gets a progress-check steer; at 80% it gets the wrap-up steer. |
 | `PI_IMPLEMENTER_TOOLS` | `read,write,edit,grep,find,ls,delete_file` | Full override of the tool allowlist granted to implementer subprocesses. Units never receive a shell through this override — the child contract-guard blocks it either way. |
 | `PI_SLOP_GATE` | (unset) | Overrides `implement.slop.mode` for the run when it holds a valid mode (`off`, `advisory`, `baseline`, `hard`); any other value is ignored and the configured mode stands. Read fresh when each behavior's gate resolves, so `PI_SLOP_GATE=off` disables the slop gate for a run (see [Slop gate](#slop-gate)). |
 | `PI_UNIT_FILE` | `.pi/workflow/contract-guard.json` | Internal: path of the per-spawn payload the orchestrator writes before each unit spawn — `repoRoot`, `baselineHead`, the derived allowlist and the unit's slice `unit { id, sources, tests, packages, testSuites }`. Read by the child contract-guard (per-task ownership) and by the generated `test` tool (default scope). Not meant to be set by hand. |
