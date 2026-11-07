@@ -55,18 +55,33 @@ export function extractTextContent(content: unknown): string {
  * Best-effort compact description of a completed turn.
  *
  * @param event - One parsed stdout event from the child (turn_end).
- * @returns "working with tools…" when the turn used tools, else "responding…".
+ * @returns "tools: a, b" naming the tools called in the turn, else "responding…".
  */
 export function summarizeTurn(event: Record<string, unknown>): string {
   const message = event.message as { content?: unknown } | undefined;
   const blocks = Array.isArray(message?.content) ? message.content : [];
-  const tools = blocks.filter(
-    (block) =>
-      typeof block === "object" &&
-      block !== null &&
-      /tool/i.test(String((block as { type?: unknown }).type ?? "")),
-  );
-  return tools.length > 0 ? "working with tools…" : "responding…";
+  const names = blocks
+    .filter(
+      (block): block is Record<string, unknown> =>
+        typeof block === "object" &&
+        block !== null &&
+        /tool/i.test(String((block as { type?: unknown }).type ?? "")),
+    )
+    .map((block) => String(block.name ?? block.toolName ?? "unknown"));
+  return names.length > 0 ? `tools: ${names.join(", ")}` : "responding…";
+}
+
+/**
+ * Format token usage reported on a message, if any.
+ *
+ * @param usage - The message usage object.
+ * @returns " [tokens in=N out=M]" or "" when usage is absent.
+ */
+export function formatUsage(usage: unknown): string {
+  if (typeof usage !== "object" || usage === null) return "";
+  const u = usage as { input?: unknown; output?: unknown };
+  if (typeof u.input !== "number" && typeof u.output !== "number") return "";
+  return ` [tokens in=${Number(u.input ?? 0)} out=${Number(u.output ?? 0)}]`;
 }
 
 /**
@@ -110,11 +125,17 @@ export function relayImplementerEvent(
     return;
   }
   if (event.type === "message_end") {
-    const message = event.message as { role?: string; content?: unknown } | undefined;
+    const message = event.message as
+      | { role?: string; content?: unknown; usage?: unknown }
+      | undefined;
     if (message?.role !== "assistant") return;
     const text = extractTextContent(message.content);
     if (!text) return;
     ctx.ui.notify(`${behaviorId}: ${text}`, "info");
-    persistActivity(pi, { behaviorId, kind: "assistant", text, at: new Date().toISOString() });
+    persistActivity(pi, {
+      behaviorId,
+      kind: "assistant",
+      text: text + formatUsage(message.usage),
+      at: new Date().toISOString() });
   }
 }
