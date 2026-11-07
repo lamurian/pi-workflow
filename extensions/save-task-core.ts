@@ -6,6 +6,7 @@ import { transitionTo, updateUi } from "./state.ts";
 import type { WorkflowState } from "./state-types.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
 import { checkTaskBreadth } from "./contract-breadth.ts";
+import { checkTaskSizing, resolveSizingLimits } from "./contract-sizing.ts";
 import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
 import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
 import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
@@ -130,6 +131,8 @@ export async function runSaveTask(
   }
   const tooBroad = checkTaskBreadth(preserved.contract, resolveMaxPathsPerTask(workflow));
   if (tooBroad !== null) return fail(`save_task rejected: ${tooBroad}`);
+  const sizing = checkTaskSizing(preserved.contract, ctx.cwd, resolveSizingLimits(workflow));
+  if (sizing !== null) return fail(`save_task rejected: ${sizing}`);
   state.contractV2 = preserved.contract;
   const tracked = await readTrackedPaths(pi, ctx.cwd);
   state.task = deriveTaskContract(preserved.contract, tracked);
