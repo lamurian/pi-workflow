@@ -17,6 +17,7 @@ import {
 import { runSoloImplement } from "./implement-solo.ts";
 import { setUnitPrompt } from "./unit-task-text.ts";
 import { readGitHead } from "./git-ops.ts";
+import { preflightImplement } from "./implement-preflight.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { composeCompletionReport, composeHaltReport } from "./implement-report.ts";
 import { beginOrchestration, endOrchestration, isOrchestrationCancelled, isOrchestrationInFlight } from "./orchestration-cancel.ts";
@@ -97,14 +98,10 @@ export async function runImplement(
     ctx.ui.notify("No task contract found. Run /finalize to create one.", "warning");
     return;
   }
-  // Legacy refusal: plain-string files predate the D/M/A allowlist, cannot be enforced — re-finalize first.
-  if (task.files.some((f) => typeof f === "string")) {
-    ctx.ui.notify(
-      "This task contract predates the authoritative D/M/A file allowlist: its " +
-        "files are plain strings. Re-run /discuss, then /finalize to re-save the " +
-        "contract with { path, status } entries, then run /implement again.",
-      "warning",
-    );
+  // Preflight: legacy plain-string files, stale run plan, missing scoped suites.
+  const refusal = await preflightImplement(state, ctx.cwd);
+  if (refusal) {
+    ctx.ui.notify(refusal, "warning");
     return;
   }
   const resuming = state.phase === "implementing";
