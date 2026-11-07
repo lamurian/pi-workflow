@@ -133,6 +133,21 @@ export interface WorkflowState {
    * to the user. Optional: absent until the first red refusal.
    */
   finalGateAttempts?: number;
+  /**
+   * One entry per successful runSaveTask call: operation, caller and
+   * timestamp. Optional: absent until the first save.
+   */
+  contractHistory?: ContractHistoryEntry[];
+}
+
+/** One recorded contract mutation by runSaveTask. */
+export interface ContractHistoryEntry {
+  /** save_task operation, e.g. "replace". */
+  operation: string;
+  /** Who invoked it. */
+  caller: "agent" | "orchestrator";
+  /** ISO timestamp. */
+  at: string;
 }
 
 /** One orchestrator test-gate suite verdict (T8). */

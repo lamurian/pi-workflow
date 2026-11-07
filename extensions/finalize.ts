@@ -1,62 +1,17 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { loadState, transitionTo, updateUi } from "./state.ts";
-import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
-import { checkTaskBreadth } from "./contract-breadth.ts";
-import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
-import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
-import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
-import { ensureTestTool } from "./test-tool-ensure.ts";
-import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
+import { loadState } from "./state.ts";
 import { runContractScan } from "./contract-scan.ts";
-import { renderEvidence } from "./test-scan-render.ts";
+import { runSaveTask } from "./save-task-core.ts";
 import { loadContent } from "./utils.ts";
 
 export { runContractScan };
-/** Tracked-path read budget: one git ls-tree, 5s covers cold caches. */
-const TRACKED_BUDGET_MS = 5000;
-/** Rejection text for the legacy files/behaviors save_task payload. */
-const LEGACY_PAYLOAD_REJECTION =
-  "save_task rejected: the legacy files/behaviors payload is not " +
-  "accepted — call save_task with the contract v2 payload " +
-  "{ title, instruction, done, sources, tests, tasks } where each " +
-  "sources/tests entry is { path, status?, tasks } and each tasks " +
-  "entry is { id, description, expectedOutput[], status? } (see content/finalize-prompt.md).";
-
-/**
- * Read the repo-relative paths tracked at HEAD (T10): the input the derived
- * v1 view needs to render a path M when tracked and A when untracked.
- *
- * @param pi  - ExtensionAPI reference (for exec access).
- * @param cwd - Repository working directory.
- * @returns The tracked path set; empty when git is unavailable (everything
- *          then renders as A).
- */
-async function readTrackedPaths(pi: ExtensionAPI, cwd: string): Promise<Set<string>> {
-  try {
-    const res = await pi.exec("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
-      cwd,
-      timeout: TRACKED_BUDGET_MS,
-    });
-    if (res.code !== 0) return new Set();
-    return new Set(
-      (res.stdout ?? "")
-        .split("\n")
-        .map((l) => l.trim().replace(/^\.\//, ""))
-        .filter(Boolean),
-    );
-  } catch {
-    return new Set();
-  }
-}
 
 /**
  * Finalize the discussion: steer the agent to draft the task contract.
  *
  * Valid only from the discussing phase. Loads finalize-prompt.md, appends
- * the optional engineer's note, and hands the prompt to the agent as a
- * steer. The agent drafts the contract and calls save_task; the extension
- * performs the phase transition there.
+ * the optional engineer's note, and hands the prompt to the agent as a steer.
  *
  * @param args - Optional note folded into the prompt as an Engineer's note.
  * @param pi   - ExtensionAPI reference.
@@ -86,17 +41,8 @@ export async function runFinalize(
 }
 
 /**
- * Register the `save_task` AI tool.
- *
- * The agent calls save_task to persist a drafted or revised contract v2
- * payload ({ title, instruction, done, sources, tests, tasks }). The
- * extension validates it deterministically, stores it directly as
- * `state.contractV2` (so no declared path is ever ownerless), derives the
- * v1 TaskContract view older consumers read into `state.task`, and
- * transitions the workflow to the finalizing phase. The legacy
- * files/behaviors payload is rejected with a reason naming the v2 fields.
- * Idempotent: safe to call again while already finalizing to update the
- * contract (done statuses are preserved by task id).
+ * Register the `save_task` AI tool: a thin adapter over runSaveTask
+ * (save-task-core.ts) with caller 'agent'.
  *
  * @param pi - ExtensionAPI reference.
  */
@@ -114,6 +60,9 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
         title: Type.String({ description: "Short task title" }),
         instruction: Type.String({ description: "What to implement" }),
         done: Type.Optional(Type.String({ description: "Definition of done" })),
+        operation: Type.Optional(
+          Type.String({ description: "Contract operation (default 'replace')" }),
+        ),
         sources: Type.Optional(
           Type.Array(Type.Unknown(), {
             description: "Implementation files: { path, status?, tasks }",
@@ -141,84 +90,15 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
 
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);
-      if (!state || (state.phase !== "discussing" && state.phase !== "finalizing")) {
-        return {
-          content: [
-            { type: "text", text: "save_task requires the discussing or finalizing phase." },
-          ],
-          details: {},
-          isError: true,
-        };
-      }
-      const raw = params as Record<string, unknown>;
-      const legacy = raw.files !== undefined || raw.behaviors !== undefined;
-      if (legacy || raw.sources === undefined || raw.tests === undefined || raw.tasks === undefined) {
-        return {
-          content: [{ type: "text", text: LEGACY_PAYLOAD_REJECTION }],
-          details: {},
-          isError: true,
-        };
-      }
-      const result = validateContract(raw);
-      if (!result.ok) {
-        return {
-          content: [{ type: "text", text: `save_task rejected: ${result.reason}` }],
-          details: {},
-          isError: true,
-        };
-      }
-      // T10: validated contract stored directly; done statuses preserved from the prior v2 contract by task id.
-      const preserved = preserveContractDoneStatuses(state.contractV2, result.contract);
-      // T1: per-task path cap — reject over-broad tasks before mutating state.
-      const workflow = await loadWorkflowConfig(ctx.cwd);
-      const tooBroad = checkTaskBreadth(preserved.contract, resolveMaxPathsPerTask(workflow));
-      if (tooBroad !== null) {
-        return { content: [{ type: "text", text: `save_task rejected: ${tooBroad}` }], details: {}, isError: true };
-      }
-      state.contractV2 = preserved.contract;
-      const tracked = await readTrackedPaths(pi, ctx.cwd);
-      state.task = deriveTaskContract(preserved.contract, tracked);
-      const behaviorWarnings = state.task.behaviors.flatMap(collectBehaviorWarnings);
-      // T3/T7: ensure the test tool after validation (orchestrator-owned file,
-      // never injected). Precedence: config -> external `test` -> detection -> none.
-      const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
-      const ensured = await ensureTestTool(pi, ctx.cwd, detection);
-      const { source, suites, fullSuites } = ensured;
-      state.testTool = { source, suites, fullSuites };
-      const scan = await runContractScan(pi, ctx.cwd, state.task.files);
-      const allWarnings = [...behaviorWarnings, ...(detection.warnings ?? []), ...(scan?.warnings ?? []), ...(await dirtyTreeSaveWarnings(pi, ctx.cwd, preserved.contract))];
-      const entering = state.phase === "discussing";
-      transitionTo(pi, state, "finalizing");
-      updateUi(state, ctx);
-      if (entering) {
-        ctx.ui.notify(
-          `Contract saved. Phase: finalizing — review the contract, run /implement when ready. ` +
-            `(warnings: ${allWarnings.length})`,
-          "info",
-        );
-      }
-      let text =
-        "Task saved. Phase: finalizing (read-only). " +
-        "Wait for the user to run /implement once the contract is approved.";
-      if (scan === null) {
-        text += "\n\nNote: scan unavailable — apply judgment from the discussion.";
-      } else if (scan.evidence.length > 0) {
-        const evidence = renderEvidence(scan.evidence).split("\n").map((l) => `- ${l}`).join("\n");
-        text += "\n\n## Test scan evidence (advisory)\n" + evidence;
-      }
-      // T3: echo the test-tool detection evidence line.
-      text += `\n${ensured.message}`;
-      if (preserved.preserved.length > 0) {
-        text += `\n\nPreserved done behaviors: ${preserved.preserved.join(", ")}`;
-      }
-      if (allWarnings.length > 0) {
-        text +=
-          "\n\nWarnings (advisory — the contract was saved):\n" +
-          allWarnings.map((w) => `warning: ${w}`).join("\n");
-      }
+      const res = await runSaveTask(state, params as Record<string, unknown>, {
+        caller: "agent",
+        pi,
+        ctx,
+      });
       return {
-        content: [{ type: "text", text }],
+        content: [{ type: "text", text: res.text }],
         details: {},
+        ...(res.ok ? {} : { isError: true }),
       };
     },
   });
