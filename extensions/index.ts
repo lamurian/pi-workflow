@@ -18,6 +18,7 @@ import { runApprove, runSteer, cleanupOrchestration } from "./hitl-pause.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerPrecommitCheckTool } from "./precommit-check.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
+import { registerWorkflowConfigTool } from "./workflow-config-tool.ts";
 import { getSkillsDir } from "./utils.ts";
 import { setupAutocomplete } from "./autocomplete.ts";
 import { handlePreCompact, handlePostCompact } from "./compaction.ts";
@@ -74,6 +75,7 @@ export default function (pi: ExtensionAPI): void {
   registerMarkTaskDoneTool(pi);
   registerCompleteImplementationTool(pi);
   registerPrecommitCheckTool(pi);
+  registerWorkflowConfigTool(pi);
 
   // Zero-token activity relay rendering (T2). Fire-and-forget: degrades to
   // unrendered (but persisted) entries when pi-tui is not resolvable.
