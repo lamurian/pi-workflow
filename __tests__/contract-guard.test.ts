@@ -848,10 +848,12 @@ describe("contract-guard file (T3)", () => {
       });
       try {
         const deadline = Date.now() + 3_000;
-        while (Date.now() < deadline && !existsSync(capture)) {
+        const complete = (): boolean =>
+          existsSync(capture) && readFileSync(capture, "utf8").endsWith("\n");
+        while (Date.now() < deadline && !complete()) {
           await new Promise((r) => setTimeout(r, 25));
         }
-        assert.ok(existsSync(capture), "the fake pi must observe its env");
+        assert.ok(complete(), "the fake pi must write the complete GUARD line");
         assert.equal(
           readFileSync(capture, "utf8").trim(),
           `GUARD:${join(dir, "guard.json")}`,
