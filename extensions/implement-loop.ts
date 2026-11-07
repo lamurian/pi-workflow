@@ -12,6 +12,7 @@ import { readTreeState } from "./git-ops.ts";
 import { buildDirtyTreeAdvisoryText, buildDirtyTreeHaltText, dirtyTreePreflight } from "./dirty-tree-check.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
+import { refreshTestExtensionAfterLanding } from "./test-extension-refresh.ts";
 import { buildEngineerNoteSection } from "./unit-task-text.ts";
 import { createDefaultUnitRunner } from "./unit-runner-default.ts";
 import { formatModelRef } from "./process-utils.ts";
@@ -136,7 +137,6 @@ export async function runOrchestratedImplement(
     deferredCommands: [],
     pendingManualChecks: [],
   };
-
   const attemptHistory: AttemptRecord[] = [];
 
   // T22: per-behavior attempt seconds live in duration-tracker.ts.
@@ -193,7 +193,6 @@ export async function runOrchestratedImplement(
     }
   }
 
-  const totalUnits = units.length;
   // Resume after a mustRunNow pause-halt: note attaches to the halted behavior only.
   let pendingNote: { behaviorId: string; note: string } | undefined;
   if (state.lastHalt?.pendingCommand) {
@@ -230,13 +229,15 @@ export async function runOrchestratedImplement(
       haltPrefix = previousHaltSection + "\n\n";
       previousHaltSection = "";
     }
-    const halted = await runBehaviorLoop(behavior, unitIndex, totalUnits, {
+    const landedBefore = landedCommits.length;
+    const halted = await runBehaviorLoop(behavior, unitIndex, units.length, {
       pi, ctx, state, task, runUnit, result, landedCommits, attemptHistory,
       findingsSection, recordFindings, noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt,
     });
     resumeTreeContext = "";
     tracker.record(behavior.id, attemptHistory);
     if (halted) return setSlow(halted);
+    if (landedCommits.length > landedBefore) await refreshTestExtensionAfterLanding(pi, cwd, state);
   }
   setSlow(result);
 
