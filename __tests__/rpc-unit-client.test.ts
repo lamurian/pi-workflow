@@ -378,22 +378,39 @@ function stubClient(stderr = "") {
 describe("runImplementerUnit soft deadline (T3)", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("steers exactly once at 750ms of a 1000ms budget; the hard kill still fires timedOut", async () => {
+  it("steers progress at 500ms and wraps up at 800ms of a 1000ms budget, each once", async () => {
     vi.useFakeTimers();
-    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const { runImplementerUnitWithClient, PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE } = await import(
+      "../extensions/implementer-runner.ts"
+    );
     const client = stubClient();
     const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
-    await vi.advanceTimersByTimeAsync(749);
-    assert.equal(client.steers.length, 0, "no steer before the 75% mark");
+    await vi.advanceTimersByTimeAsync(499);
+    assert.equal(client.steers.length, 0, "no steer before the 50% mark");
     await vi.advanceTimersByTimeAsync(1);
-    assert.equal(client.steers.length, 1, "one wrap-up steer at 750ms");
-    assert.match(client.steers[0]!, /status/, "the steer names the status field");
-    assert.match(client.steers[0]!, /partial/, "the steer asks for status partial");
-    await vi.advanceTimersByTimeAsync(251); // hard kill at 1000ms
+    assert.deepEqual(client.steers, [PROGRESS_STEER_MESSAGE], "progress steer at 500ms");
+    await vi.advanceTimersByTimeAsync(299);
+    assert.equal(client.steers.length, 1, "no wrap-up before the 80% mark");
+    await vi.advanceTimersByTimeAsync(1);
+    assert.deepEqual(client.steers, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 800ms");
+    assert.match(client.steers[1]!, /status/, "the steer names the status field");
+    assert.match(client.steers[1]!, /partial/, "the steer asks for status partial");
+    await vi.advanceTimersByTimeAsync(201); // hard kill at 1000ms
     const res = await promise;
     assert.equal(res.timedOut, true, "the hard kill still yields timedOut=true");
     assert.match(res.error ?? "", /timed out after 1000ms/);
-    assert.equal(client.steers.length, 1, "the steer fires exactly once");
+    assert.equal(client.steers.length, 2, "each steer fires exactly once");
+  });
+
+  it("does not steer when timeoutMs is 0", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 0 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    assert.equal(client.steers.length, 0, "no timers armed without a budget");
+    client.emitAssistant("done.\n```json\n{\"summary\": \"ok\"}\n```");
+    await promise;
   });
 
   it("does not steer when the report arrives before the soft deadline", async () => {

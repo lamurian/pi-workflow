@@ -17,7 +17,15 @@ export interface UnitTask {
 }
 
 /** Fraction of the per-unit time budget at which the wrap-up steer fires. */
-export const SOFT_DEADLINE_RATIO = 0.75;
+export const SOFT_DEADLINE_RATIO = 0.8;
+
+/** Fraction of the per-unit time budget at which the progress-check steer fires. */
+export const PROGRESS_CHECK_RATIO = 0.5;
+
+/** Progress-check steer delivered once at half the time budget. */
+export const PROGRESS_STEER_MESSAGE =
+  "progress check: half the time budget is used; focus on the remaining work " +
+  "and plan to emit the JSON report before the deadline";
 
 /**
  * Wrap-up steer delivered once when a unit nears its hard-kill deadline.
@@ -132,7 +140,7 @@ export async function runImplementerUnit(
  * fake-timer tests with an injected client. Arms two timers when
  * `timeoutMs > 0`:
  *
- * - a soft deadline at SOFT_DEADLINE_RATIO (75%) of the budget that
+ * - a soft deadline at SOFT_DEADLINE_RATIO (80%) of the budget that
  *   steers the unit once with WRAP_UP_STEER_MESSAGE so it can wrap up
  *   with a status-partial report before the kill;
  * - the hard kill at `timeoutMs` that SIGKILLs the child (timedOut=true).
@@ -206,7 +214,14 @@ export async function runImplementerUnitWithClient(
     client.kill();
   };
   const timer = timeoutMs > 0 ? setTimeout(killNow, timeoutMs) : undefined;
-  // Soft deadline: one wrap-up steer at 75% of the budget, before the hard kill.
+  // Progress check at 50%, then one wrap-up steer at 80%, before the hard kill.
+  const progressTimer =
+    timeoutMs > 0
+      ? setTimeout(
+          () => client.steer(PROGRESS_STEER_MESSAGE),
+          Math.floor(timeoutMs * PROGRESS_CHECK_RATIO),
+        )
+      : undefined;
   const softTimer =
     timeoutMs > 0
       ? setTimeout(
@@ -224,6 +239,7 @@ export async function runImplementerUnitWithClient(
   await waitDone;
   if (timer) clearTimeout(timer);
   if (softTimer) clearTimeout(softTimer);
+  if (progressTimer) clearTimeout(progressTimer);
   signal?.removeEventListener("abort", onAbort);
   unsubEvents();
   unsubExit();

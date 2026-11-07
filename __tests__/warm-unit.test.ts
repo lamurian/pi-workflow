@@ -287,7 +287,7 @@ describe("steerFixRound", () => {
     try {
       const warm = makeWarmClient();
       const round1 = steerFixRound(warm.client, "fix-1", undefined, 1_000);
-      await vi.advanceTimersByTimeAsync(750);
+      await vi.advanceTimersByTimeAsync(800);
       assert.deepEqual(
         warm.record.prompts,
         [{ message: "fix-1", streamingBehavior: "steer" }],
@@ -311,7 +311,7 @@ describe("steerFixRound", () => {
         ],
         "the round prompt itself",
       );
-      await vi.advanceTimersByTimeAsync(750);
+      await vi.advanceTimersByTimeAsync(800);
       assert.equal(warm.record.steers.length, 2, "the per-round wrap-up timer is rearmed for round 2");
       warm.emit(assistantLine(reportJson("round 2")));
       await round2;
