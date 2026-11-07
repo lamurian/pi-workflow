@@ -18,6 +18,9 @@ import { formatModelRef } from "./process-utils.ts";
 import { createHalt } from "./orchestrator-halt.ts";
 import { finishRun, type FinalGateDeps } from "./full-gate-fix.ts";
 import { runBehaviorLoop } from "./behavior-loop.ts";
+import { statSync } from "node:fs";
+import { join } from "node:path";
+import { buildSlowTasks, type SlowTask } from "./implement-report.ts";
 
 /** Result of one unit attempt: the parsed report plus failure diagnostics. */
 export type UnitAttempt = ImplementerReport & {
@@ -63,6 +66,7 @@ export interface OrchestratorResult {
   findings?: Finding[];
   diagnosis?: string;
   recommendation?: string;
+  slowTasks?: SlowTask[];
 }
 
 /**
@@ -135,6 +139,17 @@ export async function runOrchestratedImplement(
   };
 
   const attemptHistory: AttemptRecord[] = [];
+
+  // T22: accumulated attempt seconds per behavior across the run.
+  const durations: Record<string, number> = {};
+  const setSlow = (r: OrchestratorResult): OrchestratorResult => {
+    const sizeOf = (p: string): number => {
+      try { return statSync(join(cwd, p)).size; } catch { return 0; }
+    };
+    const slow = buildSlowTasks(durations, state.contractV2, sizeOf);
+    if (slow.length) { r.slowTasks = slow; result.slowTasks = slow; }
+    return r;
+  };
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
@@ -237,12 +252,15 @@ export async function runOrchestratedImplement(
       findingsSection, recordFindings, noteSection, taskPrefix, haltPrefix, resumeTreeContext, halt,
     });
     resumeTreeContext = "";
-    if (halted) return halted;
+    durations[behavior.id] = (durations[behavior.id] ?? 0) +
+      attemptHistory.reduce((sum, a) => sum + a.durationSec, 0);
+    if (halted) return setSlow(halted);
   }
+  setSlow(result);
 
   const refusal = evaluateCompletionGate(state);
   if (refusal) {
-    return halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`);
+    return setSlow(await halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`));
   }
-  return finishRun(gateDeps);
+  return setSlow(await finishRun(gateDeps));
 }

@@ -1,7 +1,68 @@
 import { formatTask } from "./task-contract.ts";
-import { renderHaltReport } from "./halt-report.ts";
+import { renderHaltReport, HALT_REPORT_CLOSING_LINE } from "./halt-report.ts";
 import type { OrchestratorResult } from "./implement-loop.ts";
 import type { TaskContract, WorkflowState } from "./state.ts";
+import type { ContractV2 } from "./contract-types.ts";
+
+/** Total attempt time above which a task counts as slow (7 minutes). */
+export const SLOW_TASK_THRESHOLD_SEC = 420;
+
+/** Calibration facts for one slow task. */
+export interface SlowTask {
+  taskId: string;
+  durationSec: number;
+  assertions: number;
+  paths: number;
+  ownedBytes: number;
+}
+
+/**
+ * Select tasks whose accumulated attempt durations exceed the threshold.
+ *
+ * @param durations - Total attempt seconds per task id.
+ * @param contract  - v2 contract (assertions and owned paths); optional.
+ * @param sizeOf    - Returns byte size of a repo-relative path (0 when missing).
+ * @returns Slow tasks with duration, assertion count, path count, owned bytes.
+ */
+export function buildSlowTasks(
+  durations: Record<string, number>,
+  contract: ContractV2 | undefined,
+  sizeOf: (path: string) => number,
+): SlowTask[] {
+  const out: SlowTask[] = [];
+  for (const [taskId, durationSec] of Object.entries(durations)) {
+    if (durationSec <= SLOW_TASK_THRESHOLD_SEC) continue;
+    const task = contract?.tasks.find((t) => t.id === taskId);
+    const owned = [...(contract?.sources ?? []), ...(contract?.tests ?? [])].filter((p) => p.tasks.includes(taskId));
+    out.push({
+      taskId,
+      durationSec,
+      assertions: task?.expectedOutput.length ?? 0,
+      paths: owned.length,
+      ownedBytes: owned.reduce((sum, p) => sum + sizeOf(p.path), 0),
+    });
+  }
+  return out;
+}
+
+/**
+ * Render the slow-task section lines (empty when none).
+ *
+ * @param slow - Slow tasks.
+ * @returns Markdown lines, starting with a blank line.
+ */
+export function renderSlowTasks(slow: SlowTask[] | undefined): string[] {
+  if (!slow?.length) return [];
+  const lines = ["", `Slow tasks (attempts over ${SLOW_TASK_THRESHOLD_SEC / 60} minutes in total):`];
+  for (const s of slow) {
+    const m = Math.floor(s.durationSec / 60);
+    const sec = s.durationSec % 60;
+    lines.push(
+      `- ${s.taskId}: ${m}m ${sec}s, ${s.assertions} assertions, ${s.paths} paths, ${s.ownedBytes} bytes owned`,
+    );
+  }
+  return lines;
+}
 
 /**
  * Compose the pinned completion report for a settled orchestration.
@@ -72,6 +133,7 @@ export function composeCompletionReport(
       lines.push(`- ${entry.command}${entry.reason ? ` (${entry.reason})` : ""}`);
     }
   }
+  lines.push(...renderSlowTasks(result.slowTasks));
   lines.push(
     "",
     "No action needed: relay this status to the user. Do not run tools or modify the working tree.",
@@ -100,7 +162,8 @@ export function composeCompletionReport(
  * @returns The markdown report string with the pinned shape.
  */
 export function composeHaltReport(result: OrchestratorResult): string {
-  return renderHaltReport({
+  const slow = renderSlowTasks(result.slowTasks);
+  const body = renderHaltReport({
     haltedOn: result.haltedOn,
     error: result.error,
     treeState: result.treeState,
@@ -113,6 +176,10 @@ export function composeHaltReport(result: OrchestratorResult): string {
     recommendation: result.recommendation,
     pendingCommand: result.pendingCommand,
   });
+  if (!slow.length) return body;
+  const at = body.lastIndexOf(HALT_REPORT_CLOSING_LINE);
+  if (at < 0) return body + "\n" + slow.join("\n");
+  return body.slice(0, at) + slow.slice(1).join("\n") + "\n\n" + body.slice(at);
 }
 
 /**
