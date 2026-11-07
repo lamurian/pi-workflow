@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { WorkflowState } from "./state.ts";
+import type { WorkflowState, Behavior, TaskContract } from "./state.ts";
 import { runSaveTask } from "./save-task-core.ts";
 
 /** Veto window for a runtime split proposal, in milliseconds. */
@@ -56,6 +56,34 @@ export async function splitOrHalt<R>(opts: RuntimeSplitOptions, haltText: string
     const res = await hooks.runChild(id);
     if (res !== undefined) return res;
   }
+  return undefined;
+}
+
+/**
+ * Run one split child against the CURRENT state.task (runSaveTask replaces it, so pre-split
+ * snapshots are stale). Skips children already done, marks the child done and persists on success.
+ *
+ * @param state   - Workflow state (state.task is read at call time).
+ * @param childId - Child behavior id.
+ * @param run     - Runs the child behavior with the current task contract.
+ * @param persist - Persists state after the child completes.
+ * @returns A halt result, or undefined when the child completed or was skipped.
+ */
+export async function runSplitChild<R>(
+  state: WorkflowState,
+  childId: string,
+  run: (child: Behavior, task: TaskContract) => Promise<R | undefined>,
+  persist: () => void,
+): Promise<R | undefined> {
+  const task = state.task;
+  const child = task?.behaviors.find((b) => b.id === childId);
+  if (!task || !child || child.status === "done") return undefined;
+  const res = await run(child, task);
+  if (res !== undefined) return res;
+  const current = state.task?.behaviors.find((b) => b.id === childId);
+  child.status = "done";
+  if (current) current.status = "done";
+  persist();
   return undefined;
 }
 

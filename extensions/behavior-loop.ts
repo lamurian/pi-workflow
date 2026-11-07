@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
-import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts"; import { splitOrHalt, type SplitTrigger } from "./split-planner.ts";
+import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts"; import { splitOrHalt, runSplitChild, type SplitTrigger } from "./split-planner.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
@@ -125,7 +125,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     } else await runFollowUp(taskText);
     return undefined;
   };
-  const trySplit = async (trigger: SplitTrigger, haltText: string) => { await shutdownWarmChild(liveChild); liveChild = undefined; return splitOrHalt({ pi, ctx, state, behaviorId: behavior.id, trigger }, haltText, { halt: (text) => halt(behavior.id, text), runChild: async (id) => { const c = state.task?.behaviors.find((b) => b.id === id); return c ? runBehaviorLoop(c, unitIndex, totalUnits, deps) : undefined; } }); }; // T24: runtime split; children, vetoes and rejections halt
+  const trySplit = async (trigger: SplitTrigger, haltText: string) => { await shutdownWarmChild(liveChild); liveChild = undefined; return splitOrHalt({ pi, ctx, state, behaviorId: behavior.id, trigger }, haltText, { halt: (text) => halt(behavior.id, text), runChild: (id) => runSplitChild(state, id, (c, t) => runBehaviorLoop(c, unitIndex, totalUnits, { ...deps, task: t }), () => saveState(pi, state)) }); }; // T24: runtime split; children, vetoes and rejections halt
   while (retry <= RETRY_BUDGET + 1) {
     // B2: cancellation checkpoint (top of loop) — /discuss cancelled the run while the unit attempt was in flight. Kill-induced child errors after the cancel surface here as attempts with an error; return immediately instead of retrying. No saveState, no lastHalt, no commit.
     if (isOrchestrationCancelled()) {

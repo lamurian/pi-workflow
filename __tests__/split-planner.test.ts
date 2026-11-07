@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { isSplitChild, parseSplitProposal, splitOrHalt, type RuntimeSplitOptions } from "../extensions/split-planner.ts";
+import { isSplitChild, parseSplitProposal, splitOrHalt, runSplitChild, type RuntimeSplitOptions } from "../extensions/split-planner.ts";
 
 const PROPOSAL = '```json\n{"tasks":[{"description":"a","expectedOutput":["x"],"paths":["a.ts"]},{"description":"b","expectedOutput":["y"],"paths":["b.ts"]}]}\n```';
 
@@ -70,6 +70,26 @@ describe("runtime split planner", () => {
     assert.equal(calls.length, 0);
     assert.equal(isSplitChild("T1.1"), true);
     assert.equal(isSplitChild("T1"), false);
+  });
+
+  it("runs split children once against the replaced state.task and persists done", async () => {
+    const state = { task: { behaviors: [{ id: "T1.1", status: "active" }, { id: "T1.2", status: "active" }] } } as never as { task: { behaviors: { id: string; status: string }[] } };
+    const ran: string[] = []; let saves = 0;
+    const run = async (c: { id: string }) => { ran.push(c.id); return undefined; };
+    for (const id of ["T1.1", "T1.2"]) await runSplitChild(state as never, id, run as never, () => saves++);
+    for (const id of ["T1.1", "T1.2"]) await runSplitChild(state as never, id, run as never, () => saves++);
+    assert.deepEqual(ran, ["T1.1", "T1.2"]);
+    assert.equal(saves, 2);
+    assert.ok(state.task.behaviors.every((b) => b.status === "done"));
+  });
+
+  it("a halt during child k leaves k onward active", async () => {
+    const state = { task: { behaviors: [{ id: "T1.1", status: "active" }, { id: "T1.2", status: "active" }, { id: "T1.3", status: "active" }] } } as never as { task: { behaviors: { id: string; status: string }[] } };
+    const run = async (c: { id: string }) => (c.id === "T1.2" ? "halt" : undefined);
+    let res: unknown;
+    for (const id of ["T1.1", "T1.2", "T1.3"]) { res = await runSplitChild(state as never, id, run as never, () => {}); if (res) break; }
+    assert.equal(res, "halt");
+    assert.deepEqual(state.task.behaviors.filter((b) => b.status === "active").map((b) => b.id), ["T1.2", "T1.3"]);
   });
 
   it("parses the last json block", () => {
