@@ -65,6 +65,8 @@ export function getImplementerTools(
  *                       as `--model <ref>`; omitted when absent.
  * @param thinkingFloor - Optional escalation floor for `--thinking`; the
  *                       effective level is max(env base, floor).
+ * @param runCommands - T19: the task's pinned command names; when non-empty
+ *                       `run` is appended to `--tools`, otherwise it never is.
  * @returns Array of CLI arguments for the implementer subprocess.
  */
 export function buildImplementerArgs(
@@ -72,12 +74,14 @@ export function buildImplementerArgs(
   testExtPath?: string,
   modelRef?: string,
   thinkingFloor?: string,
+  runCommands: readonly string[] = [],
 ): string[] {
   const tools = getImplementerTools();
-  const granted =
-    testExtPath && !tools.split(",").some((name) => name.trim() === "test")
-      ? `${tools},test`
-      : tools;
+  const names = tools.split(",").map((n) => n.trim()).filter((n) => n !== "run");
+  if (testExtPath && !names.includes("test")) names.push("test");
+  // T19: run is granted only when the unit's task lists pinned commands.
+  if (runCommands.length > 0) names.push("run");
+  const granted = names.join(",");
   const args: string[] = [
     "--mode", "rpc",
     "--no-session",

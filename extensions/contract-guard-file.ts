@@ -19,6 +19,7 @@ import { WORKFLOW_RUNTIME_DIR, type DeclaredFile } from "./contract-guard-core.t
 import { deriveAllowlist, deriveUnitScope } from "./contract-derive.ts";
 import type { ContractV2 } from "./state.ts";
 import type { TestSuite } from "./test-tool-detect.ts";
+import type { RunPlan } from "./run-plan.ts";
 
 /** v2 slice options for one unit spawn (T5). */
 export interface UnitPayloadOptions {
@@ -35,6 +36,30 @@ export interface UnitPayloadOptions {
    * and D-status rules still block).
    */
   ownsAll?: boolean;
+  /** T19: pinned run plan (state.runPlan); supplies argv for the task's commands. */
+  runPlan?: RunPlan;
+}
+
+/**
+ * Resolve the pinned commands for one task from the run plan.
+ *
+ * @param contract - The v2 contract (task.commands lists names).
+ * @param taskId   - The unit's task id.
+ * @param runPlan  - The pinned run plan (state.runPlan).
+ * @returns Map of name to argv for exactly the task's listed commands present in the plan.
+ */
+export function taskCommands(
+  contract: ContractV2 | undefined,
+  taskId: string | undefined,
+  runPlan: RunPlan | undefined,
+): Record<string, string[]> {
+  const names = contract?.tasks.find((t) => t.id === taskId)?.commands ?? [];
+  const out: Record<string, string[]> = {};
+  for (const name of names) {
+    const argv = runPlan?.commands[name];
+    if (argv) out[name] = [...argv];
+  }
+  return out;
 }
 
 /**
@@ -137,6 +162,7 @@ export async function writeContractGuardFile(
     contract && taskId !== undefined && slice
       ? {
           ...base,
+          commands: taskCommands(contract, taskId, options.runPlan),
           allowlist: deriveAllowlist(contract),
           unit: {
             id: taskId,
@@ -145,6 +171,7 @@ export async function writeContractGuardFile(
             testFiles: slice.testFiles,
             packages: slice.packages,
             testSuites: [...(options.testSuites ?? [])],
+            commands: Object.keys(taskCommands(contract, taskId, options.runPlan)),
           },
         }
       : { ...base, files };

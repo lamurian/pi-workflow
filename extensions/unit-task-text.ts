@@ -164,6 +164,9 @@ function buildSliceTask(
     options.preloadCwd
       ? buildContextPreload([...scope.sources, ...scope.tests], options.preloadCwd)
       : "",
+    unit?.commands && unit.commands.length > 0
+      ? `## Run tool\nCall the \`run\` tool with one of these pinned commands: ${unit.commands.join(", ")}\n`
+      : "",
     "## Verification",
     sliceVerificationLine(scope, behavior, options.testTool),
     "End with the JSON report block (summary, suggestedCommit) as instructed.",
