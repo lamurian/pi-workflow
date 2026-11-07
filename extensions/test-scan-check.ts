@@ -10,6 +10,9 @@ export type ScanWarningKind =
   | "declared-add-exists"
   | "no-evidence";
 
+/** Max advisory warning lines before the rest collapse into one trailer. */
+export const MAX_WARNING_LINES = 30;
+
 /** Evidence + warnings for one contract. */
 export interface CrossCheckResult {
   /** Per-entry evidence lines naming method + confidence, or "unverified". */
@@ -99,5 +102,11 @@ export function crossCheck(
     );
   }
 
+  if (warnings.length > MAX_WARNING_LINES) {
+    const omitted = warnings.length - (MAX_WARNING_LINES - 1);
+    const kept = warnings.slice(0, MAX_WARNING_LINES - 1);
+    kept.push(`… omitted ${omitted} more warnings (capped at ${MAX_WARNING_LINES} lines)`);
+    return { evidence, warnings: kept };
+  }
   return { evidence, warnings };
 }

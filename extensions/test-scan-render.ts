@@ -113,17 +113,15 @@ function applyGlobalCap(lines: string[]): string {
     else if (parsed.confidence === "low") low.push(raw);
     else other.push(raw);
   }
-  const budget = Math.max(0, MAX_EVIDENCE_LINES - high.length - other.length);
-  const keptLow = low.slice(0, budget);
-  const omitted = low.length - keptLow.length;
-  const out = [...high, ...other, ...keptLow];
-  if (omitted > 0) {
-    out.push(
-      `… omitted ${omitted} [basename, low] matches (capped at ${MAX_EVIDENCE_LINES} lines; ` +
-        `grep the sources instead of enumerating tests)`,
-    );
-  }
-  return out.join("\n");
+  // Reserve one line for the trailer; high first, then free-form, then low.
+  const ordered = [...high, ...other, ...low];
+  const kept = ordered.slice(0, MAX_EVIDENCE_LINES - 1);
+  const omitted = ordered.length - kept.length;
+  kept.push(
+    `… omitted ${omitted} evidence lines (capped at ${MAX_EVIDENCE_LINES} lines; ` +
+      `low-confidence [basename, low] dropped first; grep the sources instead of enumerating tests)`,
+  );
+  return kept.join("\n");
 }
 
 /**

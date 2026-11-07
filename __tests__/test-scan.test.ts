@@ -8,7 +8,7 @@ import {
   buildImportRegex,
 } from "../extensions/test-scan-profiles.ts";
 import { deriveMatches } from "../extensions/test-scan-derive.ts";
-import { crossCheck } from "../extensions/test-scan-check.ts";
+import { crossCheck, MAX_WARNING_LINES } from "../extensions/test-scan-check.ts";
 import {
   renderEvidence,
   BASENAME_FANOUT_CAP,
@@ -393,7 +393,7 @@ describe("renderEvidence global line cap (MAX_EVIDENCE_LINES)", () => {
     });
   }
 
-  it("keeps all high-confidence lines, adds no low-confidence past the cap, one trailer", () => {
+  it("bounds output at the cap even when high-confidence lines exceed it", () => {
     // 2,000 lines: 200 high-confidence + 1,800 low-confidence.
     const high = Array.from(
       { length: 200 },
@@ -405,16 +405,10 @@ describe("renderEvidence global line cap (MAX_EVIDENCE_LINES)", () => {
     const trailer = lines[lines.length - 1]!;
     const kept = lines.slice(0, -1);
     assert.match(trailer, /omitted/, "last line must be the omission trailer");
-    assert.match(trailer, /1800/, "trailer must name the omitted count");
-    assert.match(trailer, /\[basename, low\]/, "trailer must name what was omitted");
-
-    // High-confidence lines are never dropped: all 200 present, stable order.
-    const keptHigh = kept.filter((l) => /\[structural, high\]/.test(l));
-    assert.equal(keptHigh.length, 200, "all 200 high-confidence lines must be present");
-    assert.deepEqual(keptHigh, high, "high-confidence lines must keep stable order");
-    // No low-confidence lines admitted: the cap is already exceeded by high lines.
-    assert.equal(kept.length, 200, "no low-confidence line may displace a high one");
-    assert.equal(lines.length, 201, "exactly high lines plus one trailer");
+    assert.match(trailer, /1851/, "trailer must name the omitted count");
+    assert.equal(lines.filter((l) => /omitted/.test(l)).length, 1, "one trailer");
+    assert.equal(lines.length, MAX_EVIDENCE_LINES, "never more than the cap");
+    assert.deepEqual(kept, high.slice(0, MAX_EVIDENCE_LINES - 1), "high lines first, stable");
   });
 
   it("fills low-confidence lines up to the cap when high lines leave budget", () => {
@@ -425,21 +419,33 @@ describe("renderEvidence global line cap (MAX_EVIDENCE_LINES)", () => {
     const evidence = [...high, ...lowFanOut(1800)];
     const lines = renderEvidence(evidence).split("\n");
 
-    assert.equal(lines.length, MAX_EVIDENCE_LINES + 1, "150 match lines plus one trailer");
+    assert.equal(lines.length, MAX_EVIDENCE_LINES, "149 match lines plus one trailer");
     const trailer = lines[lines.length - 1]!;
     assert.match(trailer, /omitted/);
-    assert.match(trailer, /1690/, "1,800 low lines minus the 110 admitted");
+    assert.match(trailer, /1691/, "1,800 low lines minus the 109 admitted");
 
     const kept = lines.slice(0, -1);
     const keptHigh = kept.filter((l) => /\[import-path, high\]/.test(l));
     assert.deepEqual(keptHigh, high, "all 40 high-confidence lines first, stable order");
     const keptLow = kept.filter((l) => /\[basename, low\]/.test(l));
-    assert.equal(keptLow.length, 110, "low-confidence fills exactly the remaining budget");
+    assert.equal(keptLow.length, 109, "low-confidence fills exactly the remaining budget");
     assert.deepEqual(
       keptLow,
-      evidence.filter((l) => /\[basename, low\]/.test(l)).slice(0, 110),
+      evidence.filter((l) => /\[basename, low\]/.test(l)).slice(0, 109),
       "admitted low lines keep stable order",
     );
+  });
+
+  it("collapses crossCheck warnings beyond the cap into one trailer", () => {
+    const n = MAX_WARNING_LINES + 20;
+    const files = Array.from({ length: n }, (_, i) => ({ path: `src/m${i}.ts`, status: "M" as const }));
+    const r = crossCheck(files, new Map(), new Set());
+    // n declared-not-found + 1 no-evidence.
+    assert.equal(r.warnings.length, MAX_WARNING_LINES);
+    const trailer = r.warnings[r.warnings.length - 1]!;
+    assert.match(trailer, /omitted/);
+    assert.match(trailer, new RegExp(`\\b${n + 1 - (MAX_WARNING_LINES - 1)}\\b`));
+    assert.equal(r.warnings.filter((w) => /omitted/.test(w)).length, 1);
   });
 
   it("leaves rendered evidence under the cap untouched", () => {
