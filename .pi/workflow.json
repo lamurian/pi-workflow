@@ -1,0 +1,5 @@
+{
+  "finalize": {
+    "maxTaskBytes": 262144
+  }
+}
