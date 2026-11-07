@@ -74,6 +74,11 @@ const VALID = {
   ],
 };
 
+/** T1 as a manual task (no tests refs): assertions must start with 'inspect:'. */
+const MANUAL_TASKS = [
+  { id: "T1", description: "x", expectedOutput: ["inspect: returns x"], status: "active" },
+];
+
 describe("save_task", () => {
   it("transitions discussing → finalizing on a valid payload (T2)", async () => {
     const pi = mockPi();
@@ -362,7 +367,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, tests: [] },
+      { ...VALID, tests: [], tasks: MANUAL_TASKS },
       undefined,
       undefined,
       ctx,
@@ -461,7 +466,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, sources: [{ path: "src/newfeature.ts", tasks: ["T1"] }], tests: [] },
+      { ...VALID, sources: [{ path: "src/newfeature.ts", tasks: ["T1"] }], tests: [], tasks: MANUAL_TASKS },
       undefined,
       undefined,
       ctx,
@@ -495,7 +500,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, sources: [{ path: "src/a.ts", tasks: ["T1"] }], tests: [] },
+      { ...VALID, sources: [{ path: "src/a.ts", tasks: ["T1"] }], tests: [], tasks: MANUAL_TASKS },
       undefined,
       undefined,
       ctx,
@@ -525,7 +530,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, sources: [{ path: "src/messages/en/research.json", tasks: ["T1"] }], tests: [] },
+      { ...VALID, sources: [{ path: "src/messages/en/research.json", tasks: ["T1"] }], tests: [], tasks: MANUAL_TASKS },
       undefined,
       undefined,
       ctx,
@@ -574,7 +579,7 @@ describe("save_task scan wiring (T3)", () => {
 
     const res = await getSaveTask(pi).execute(
       "c1",
-      { ...VALID, sources: Object.keys(files).filter((f) => f.startsWith("src/")).map((f) => ({ path: f, tasks: ["T1"] as string[] })), tests: [] },
+      { ...VALID, sources: Object.keys(files).filter((f) => f.startsWith("src/")).map((f) => ({ path: f, tasks: ["T1"] as string[] })), tests: [], tasks: MANUAL_TASKS },
       undefined,
       undefined,
       ctx,
