@@ -26,6 +26,9 @@ export interface DeclaredFile {
 /** Repo-relative path of the orchestrator-owned generated test extension. */
 export const TEST_EXTENSION_PATH = ".pi/extensions/test.ts";
 
+/** Run-configuration files units may never mutate (T5). */
+export const RUN_CONFIG_PATHS: readonly string[] = [".pi/workflow.json", ".pi/sandbox.json"];
+
 /**
  * Repo-relative runtime dir for the per-spawn payload. The folder carries its
  * own `.gitignore` (`*`), so the payload never reaches the staged diff.
@@ -181,6 +184,13 @@ export function checkToolAction(input: {
         `there). ${input.action} is never allowed on them from a unit, ` +
         `declared or not.`,
     };
+  }
+  // Run-configuration files (T5): never mutable from a unit, declared or not.
+  if (RUN_CONFIG_PATHS.includes(norm.path)) {
+    return { allowed: false, reason:
+        `Blocked: ${norm.path} is a run-configuration file — ${input.action} ` +
+        `is never allowed on it from a unit, declared or not. Change run ` +
+        `configuration via update_workflow_config in the discussing phase.` };
   }
   const list = formatDeclaredList(input.files);
   let declared: DeclaredFile | undefined;
