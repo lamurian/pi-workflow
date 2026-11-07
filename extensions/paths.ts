@@ -2,7 +2,14 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { SlopConfig } from "./slop-config.ts";
+import type { WorkflowConfig } from "./workflow-config-schema.ts";
+
+export type {
+  BrainstormConfig,
+  ImplementConfig,
+  FinalizeConfig,
+  WorkflowConfig,
+} from "./workflow-config-schema.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -56,83 +63,6 @@ export const DEFAULT_DIRECTORIES: DirectoriesConfig = {
 export const ARCHIVE_SUBDIR = ".archive";
 
 // ── Workflow Configuration ────────────────────────────────────────────────────
-
-/** Brainstorming behavior configuration. */
-export interface BrainstormConfig {
-  /**
-   * Skip the questionnaire about pre-commit, pre-push, and env management.
-   * When true, the brainstorming prompt omits the questionnaire section and
-   * auto-detection of existing hooks is skipped.
-   * @default false
-   */
-  skipQuestionnaire?: boolean;
-  /**
-   * Topics to skip during the questionnaire.
-   * Only meaningful when `skipQuestionnaire` is false.
-   * Supported values: "pre-commit", "pre-push", "env-management".
-   * @default []
-   */
-  skipTopics?: string[];
-  /**
-   * Skip the full ADR → Spec → Plan ceremony for small changes.
-   * When true, brainstorming goes straight to implementation.
-   * @default false
-   */
-  skipCeremony?: boolean;
-}
-
-/** Implementation (TDD) behavior configuration. */
-export interface ImplementConfig {
-  /**
-   * Enforce test-driven development: require a failing test before implementation.
-   * @default true
-   */
-  enforceTdd?: boolean;
-  /**
-   * Custom test command override. If set, overrides auto-detection.
-   * @example "npm run test:ci"
-   */
-  testCommand?: string;
-  /**
-   * Test command overrides as argv arrays: when set (non-empty after
-   * validation), they are used as-is and manifest detection is skipped
-   * entirely (suite source "config").
-   * @example [["npm", "run", "test:ci"]]
-   */
-  testCommands?: string[][];
-  /**
-   * Suite config: scoped entries are argv or {argv, scope?, cwd?}; full
-   * entries are argv or {argv, cwd?}. cwd is repo-relative.
-   */
-  tests?: {
-    scoped?: Array<string[] | { argv: string[]; scope?: "files" | "packages" | "full"; cwd?: string }>;
-    full?: Array<string[] | { argv: string[]; cwd?: string }>;
-  };
-  /**
-   * Slop gate configuration.
-   * Partial values are accepted; missing or invalid fields fall back to
-   * defaults via `resolveSlopConfig`.
-   */
-  slop?: Partial<SlopConfig>;
-}
-
-/** Finalize behavior configuration. */
-export interface FinalizeConfig {
-  /**
-   * Per-task path cap: a task may own at most this many distinct paths
-   * across `sources` and `tests`; save_task rejects broader contracts.
-   * Non-positive or non-integer values fall back to the default.
-   * @default 10
-   */
-  maxPathsPerTask?: number;
-}
-
-/** Top-level workflow configuration from workflow.json. */
-export interface WorkflowConfig {
-  brainstorm?: BrainstormConfig;
-  implement?: ImplementConfig;
-  finalize?: FinalizeConfig;
-}
 
 /** Default per-task path cap at finalize when workflow.json sets none. */
 export const DEFAULT_MAX_PATHS_PER_TASK = 10;
