@@ -256,9 +256,9 @@ describe("getScoutTimeoutMs", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("getImplementerTimeoutMs (T8)", () => {
-  it("defaults to 900000 — implementer units are far heavier than scouts", async () => {
+  it("defaults to 600000 for every task kind", async () => {
     const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
-    assert.equal(getImplementerTimeoutMs({}), 900_000);
+    assert.equal(getImplementerTimeoutMs({}), 600_000);
   });
 
   it("honors PI_IMPLEMENT_TIMEOUT_MS when set", async () => {
@@ -273,18 +273,19 @@ describe("getImplementerTimeoutMs (T8)", () => {
     const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(
       getImplementerTimeoutMs({ PI_EXPLORE_TIMEOUT_MS: "1000" }),
-      900_000,
+      600_000,
       "the scout budget must not leak into implementer units",
     );
   });
 
   it("falls back to the default for invalid values", async () => {
     const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
-    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 900_000);
-    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 900_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }), 600_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "-1" }), 600_000);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "0" }), 600_000);
   });
 
-  it("retry text and unit prompt say the 900 s default", async () => {
+  it("retry text says the 600 s default", async () => {
     const { buildRetryTask } = await import("../extensions/unit-task-text.ts");
     const { loadContent } = await import("../extensions/utils.ts");
     const task: import("../extensions/state.ts").TaskContract = {
@@ -308,7 +309,11 @@ describe("getImplementerTimeoutMs (T8)", () => {
       { summary: "s", timedOut: true },
       1,
     );
-    assert.match(retryText, /900 s default/, "retry text names the 900 s default");
+    assert.match(
+      retryText,
+      /PI_IMPLEMENT_TIMEOUT_MS, 600 s default/,
+      "retry text names the 600 s default",
+    );
     const prompt = await loadContent("unit-prompt.md");
     assert.match(prompt, /900 s default/, "unit prompt names the 900 s default");
   });

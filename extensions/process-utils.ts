@@ -96,7 +96,7 @@ export function getPiInvocation(args: string[]): { command: string; args: string
  * read the codebase, write code, and self-check — far heavier than scouts,
  * which is why they get a dedicated budget instead of the scout timeout.
  */
-const DEFAULT_IMPLEMENT_TIMEOUT_MS = 900_000;
+const DEFAULT_IMPLEMENT_TIMEOUT_MS = 600_000;
 
 /**
  * Resolve the per-implementer-unit timeout budget, honoring the
