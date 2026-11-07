@@ -13,6 +13,7 @@ import { ensureTestTool } from "./test-tool-ensure.ts";
 import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
 import { runContractScan } from "./contract-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
+import { buildRunPlan, renderRunPlan } from "./run-plan.ts";
 import { diffScanDigest, renderScanDiff, scanDigest, writeScanReport } from "./scan-report.ts";
 
 /** Supported save_task operations. */
@@ -126,6 +127,8 @@ export async function runSaveTask(
   const ensured = await ensureTestTool(pi, ctx.cwd, detection);
   const { source, suites, fullSuites } = ensured;
   state.testTool = { source, suites, fullSuites };
+  state.runPlan = await buildRunPlan(ctx.cwd, suites, fullSuites, workflow?.implement?.commands);
+  const planText = "\n\n" + renderRunPlan(state.runPlan);
   const scan = await runContractScan(pi, ctx.cwd, state.task.files);
   const allWarnings = [
     ...behaviorWarnings,
@@ -162,6 +165,7 @@ export async function runSaveTask(
       text += `\n\nPreserved done behaviors: ${preserved.preserved.join(", ")}`;
     }
     text += "\n\n" + renderScanDiff(diffScanDigest(prevDigest, digest));
+    text += planText;
     return { ok: true, text };
   }
   if (scan === null) {
@@ -179,5 +183,6 @@ export async function runSaveTask(
       "\n\nWarnings (advisory — the contract was saved):\n" +
       allWarnings.map((w) => `warning: ${w}`).join("\n");
   }
+  text += planText;
   return { ok: true, text };
 }

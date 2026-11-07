@@ -5,6 +5,7 @@ import type { AttemptRecord } from "./halt-report.ts";
 import type { Finding } from "./findings-ledger.ts";
 import type { TestSuite, TestSuiteSource } from "./test-tool-detect.ts";
 import type { ContractV2, TaskContract } from "./contract-types.ts";
+import type { RunPlan } from "./run-plan.ts";
 
 /** A sandbox-blocked command the user must run before a unit can proceed. */
 export interface PendingCommand {
@@ -143,6 +144,11 @@ export interface WorkflowState {
    * to report only changes on re-save. Optional: absent before first save.
    */
   scanDigest?: string[];
+  /**
+   * Pinned run plan resolved by save_task: scoped/full suites, declared
+   * commands and the project config hash. Optional: absent before first save.
+   */
+  runPlan?: RunPlan;
 }
 
 /** One recorded contract mutation by runSaveTask. */
