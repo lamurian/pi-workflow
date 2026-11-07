@@ -78,6 +78,21 @@ describe("extractFailingPaths (T7)", () => {
     assert.deepEqual(extractFailingPaths(redSuite("FAIL\t...")), []);
   });
 
+  it("extracts the test path from a vitest ❯ path:line:col frame", () => {
+    const tail = "AssertionError: expected 1 to be 2\n ❯ __tests__/foo.test.ts:12:5\n";
+    assert.deepEqual(extractFailingPaths(redSuite(tail)), ["__tests__/foo.test.ts"]);
+    assert.deepEqual(
+      extractFailingPaths(redSuite(" ❯ src/b.spec.ts:3:1", "web")),
+      ["web/src/b.spec.ts"],
+    );
+  });
+
+  it("ignores a ❯ frame pointing at a non-test source file", () => {
+    const tail = " ❯ extensions/foo.ts:10:3\n ❯ __tests__/foo.test.ts:4:2";
+    assert.deepEqual(extractFailingPaths(redSuite(tail)), ["__tests__/foo.test.ts"]);
+    assert.deepEqual(extractFailingPaths(redSuite(" ❯ src/a.ts:1:1")), []);
+  });
+
   it("deduplicates paths reported more than once in one tail", () => {
     const tail =
       "FAIL  src/a.test.ts > suite > test\nFAIL  src/a.test.ts > other";

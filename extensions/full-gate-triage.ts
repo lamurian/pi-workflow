@@ -75,6 +75,12 @@ export function extractFailingPaths(suite: GateSuiteResult): string[] {
     // A token without a file extension is a go package dir.
     if (!/\.[A-Za-z0-9]+$/.test(normalizeToken(token))) packages.push(full);
   }
+  // vitest stack frames: `❯ path:line:col`, test files only.
+  for (const m of suite.tail.matchAll(/❯[ \t]+(\S+?):\d+:\d+/g)) {
+    const rel = normalizeToken(m[1] ?? "");
+    if (!/\.(test|spec)\.[cm]?[jt]sx?$/.test(rel)) continue;
+    paths.push(posix.join(dir, rel));
+  }
   // go `--- FAIL:` blocks: indented `file:line:` detail refs after the header.
   let inBlock = false;
   for (const line of suite.tail.split("\n")) {
