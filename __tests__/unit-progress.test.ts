@@ -128,14 +128,14 @@ describe("unit-progress: pure classification", () => {
     assert.equal(isPartialAttempt({ missingReport: true }), false);
   });
 
-  it("classifyProgress is true when the fingerprint changed or new findings landed", () => {
+  it("classifyProgress is true only when the fingerprint changed", () => {
     assert.equal(
       classifyProgress({ fingerprintBefore: "a", fingerprintAfter: "b", newFindings: false }),
       true,
     );
     assert.equal(
       classifyProgress({ fingerprintBefore: "a", fingerprintAfter: "a", newFindings: true }),
-      true,
+      false,
     );
     assert.equal(
       classifyProgress({ fingerprintBefore: "a", fingerprintAfter: "a", newFindings: false }),

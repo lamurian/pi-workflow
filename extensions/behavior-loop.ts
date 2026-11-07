@@ -102,7 +102,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   };
   const runRetry = async (taskText: string) => {
     // T2: escalate thinking across retry spawns (fresh spawns only).
-    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText, retry === 1 ? "medium" : "high"); retry++;
+    ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText, attempt.timedOut ? undefined : retry === 1 ? "medium" : "high"); retry++; // T14: timeouts never escalate thinking
   };
   /**
    * One fix-forward round: warm-steer the live test-kind child below the cap, else fresh-spawn.

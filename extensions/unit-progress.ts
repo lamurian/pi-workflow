@@ -79,8 +79,8 @@ export function computeTreeFingerprint(statusShort: string, diffStat: string): s
 /**
  * Classify whether a partial/timed-out attempt made progress.
  *
- * Progress means the tree fingerprint moved since before the attempt or
- * new findings were appended to the shared ledger during it.
+ * Progress means the tree fingerprint moved since before the attempt.
+ * New findings alone are not progress (T14); the flag is accepted but ignored.
  *
  * @param input - Fingerprints before/after the attempt and the new-findings flag.
  * @returns True when the attempt progressed.
@@ -90,7 +90,7 @@ export function classifyProgress(input: {
   fingerprintAfter: string;
   newFindings: boolean;
 }): boolean {
-  return input.fingerprintBefore !== input.fingerprintAfter || input.newFindings;
+  return input.fingerprintBefore !== input.fingerprintAfter;
 }
 
 /**
