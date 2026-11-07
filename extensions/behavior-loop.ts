@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
-import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts";
+import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts"; import { splitOrHalt, type SplitTrigger } from "./split-planner.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
@@ -125,14 +125,14 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     } else await runFollowUp(taskText);
     return undefined;
   };
-
+  const trySplit = async (trigger: SplitTrigger, haltText: string) => { await shutdownWarmChild(liveChild); liveChild = undefined; return splitOrHalt({ pi, ctx, state, behaviorId: behavior.id, trigger }, haltText, { halt: (text) => halt(behavior.id, text), runChild: async (id) => { const c = state.task?.behaviors.find((b) => b.id === id); return c ? runBehaviorLoop(c, unitIndex, totalUnits, deps) : undefined; } }); }; // T24: runtime split; children, vetoes and rejections halt
   while (retry <= RETRY_BUDGET + 1) {
     // B2: cancellation checkpoint (top of loop) — /discuss cancelled the run while the unit attempt was in flight. Kill-induced child errors after the cancel surface here as attempts with an error; return immediately instead of retrying. No saveState, no lastHalt, no commit.
     if (isOrchestrationCancelled()) {
       result.cancelled = true; ctx.ui.setStatus("implement", undefined);
       return result;
     }
-    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("blocked"); return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
+    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("blocked"); if (attempt.blockedReason === "too-large") { const r = await trySplit("too-large", blockedText); if (r) return r; behavior.status = "done"; return undefined; } return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
       const progressed = attemptProgress;
@@ -142,7 +142,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         // T7: repeated identical timeouts/partial reports waste hours — halt with an actionable diagnosis instead of burning retries.
         return haltWithChild(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
       }
-      if (shouldHaltOnTimeout(timeoutStreak)) return haltWithChild(behavior.id, buildTimeoutHaltError(behavior.id, timeoutStreak)); // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
+      if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; return undefined; } // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
