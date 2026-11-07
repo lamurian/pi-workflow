@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
-import { crossOwnershipHalt } from "./cross-ownership.ts";
+import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts";
 import type { UnitTask } from "./implementer-runner.ts";
@@ -132,6 +132,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       result.cancelled = true; ctx.ui.setStatus("implement", undefined);
       return result;
     }
+    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("blocked"); return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
       const progressed = attemptProgress;

@@ -26,7 +26,9 @@ export interface ImplementerReport {
   /** Commands the sandbox blocked, classified by urgency by the unit. */
   blockedCommands?: BlockedCommand[];
   /** Completion state: "partial" when wrapping up unfinished work, "complete" when done. */
-  status?: "complete" | "partial";
+  status?: "complete" | "partial" | "blocked";
+  /** Why the unit is blocked; only set with status "blocked". */
+  blockedReason?: "capability" | "too-large";
   /** Short reusable facts (file paths, signatures, verified tool behavior) for later units. */
   findings?: string[];
   /** What a follow-up unit should do next after a partial wrap-up. */
@@ -192,8 +194,8 @@ function parseBlockedCommands(raw: unknown): BlockedCommand[] | undefined {
  * @param raw - The unparsed `status` value from the JSON block.
  * @returns The validated status, or undefined when absent or invalid.
  */
-function parseReportStatus(raw: unknown): "complete" | "partial" | undefined {
-  return raw === "complete" || raw === "partial" ? raw : undefined;
+function parseReportStatus(raw: unknown): "complete" | "partial" | "blocked" | undefined {
+  return raw === "complete" || raw === "partial" || raw === "blocked" ? raw : undefined;
 }
 
 /**
@@ -240,6 +242,9 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
           ...(blockedCommands ? { blockedCommands } : {}),
           ...(status ? { status } : {}),
           ...(findings ? { findings } : {}),
+          ...(parsed.blockedReason === "capability" || parsed.blockedReason === "too-large"
+            ? { blockedReason: parsed.blockedReason }
+            : {}),
           ...(typeof parsed.nextSteps === "string" ? { nextSteps: parsed.nextSteps } : {}),
           ...(typeof parsed.alreadySatisfied === "boolean"
             ? { alreadySatisfied: parsed.alreadySatisfied }
