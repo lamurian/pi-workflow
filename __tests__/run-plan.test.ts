@@ -37,7 +37,7 @@ const payload = {
   done: "tests pass",
   sources: [{ path: "src/a.rs", tasks: ["T1"] }],
   tests: [],
-  tasks: [{ id: "T1", description: "x", expectedOutput: ["returns x"] }],
+  tasks: [{ id: "T1", description: "x", expectedOutput: ["inspect: returns x"] }],
 };
 
 describe("run plan", () => {

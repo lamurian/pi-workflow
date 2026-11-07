@@ -37,7 +37,7 @@ const payload = (srcPath: string) => ({
   done: "tests pass",
   sources: [{ path: srcPath, tasks: ["T1"] }],
   tests: [],
-  tasks: [{ id: "T1", description: "x", expectedOutput: ["returns x"] }],
+  tasks: [{ id: "T1", description: "x", expectedOutput: ["inspect: returns x"] }],
 });
 
 describe("scan report", () => {

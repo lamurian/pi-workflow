@@ -274,7 +274,9 @@ describe("save_task", () => {
     const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
 
     assert.equal(res.isError, true);
-    assert.match(res.content[0].text, /discussing or finalizing/);
+    assert.match(res.content[0].text, /save_task rule violation/);
+    assert.match(res.content[0].text, /discussing: replace/);
+    assert.match(res.content[0].text, /finalizing: replace/);
   });
 
   it("does not touch the active toolset (T1)", async () => {
