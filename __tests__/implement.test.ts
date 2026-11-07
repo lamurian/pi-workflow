@@ -3604,7 +3604,7 @@ describe("T8: orchestrator test gates", () => {
           goFailuresLeft--;
           return {
             stdout: "",
-            stderr: "--- FAIL: TestFoo (0.00s)\nFAIL\tpkg/foo",
+            stderr: "--- FAIL: TestFoo (0.00s)\n    foo_test.go:12: boom\nFAIL\tpkg/foo",
             code: 1,
             killed: false,
           };
@@ -3664,7 +3664,9 @@ describe("T8: orchestrator test gates", () => {
   });
 
   it("scopeGateRedSteersFixForward: a red scope gate keeps the task open and steers a fix-forward attempt through the retry path instead of marking it done", async () => {
-    const { pi, execLog } = piWithGateExec(1); // first gate run red, second green
+    // Twice-red with an owned failing path (pkg/foo/foo_test.go): the retry
+    // classifies it owned, the gate stays red, and fix-forward still steers.
+    const { pi, execLog } = piWithGateExec(2); // first gate: red, red on re-run; after the fix: green
     const state = gatedState();
     const ctx = ctxWithState(state);
     const calls: string[] = [];
