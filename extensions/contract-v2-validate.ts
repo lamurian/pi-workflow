@@ -148,12 +148,8 @@ export function validateContract(raw: unknown): ContractV2Validation {
   ] as const) {
     for (const e of entries) {
       if (e.status === "D" && e.tasks.length === 0) {
-        return {
-          ok: false,
-          reason:
-            `D entry with empty tasks: ${list} entry ${e.path} is declared D ` +
-            `but names no owning task`,
-        };
+        const reason = `D entry with empty tasks: ${list} entry ${e.path} is declared D but names no owning task`;
+        return { ok: false, reason };
       }
     }
   }
@@ -173,7 +169,12 @@ export function validateContract(raw: unknown): ContractV2Validation {
       };
     }
     seenIds.add(parsed.task.id);
-    tasks.push(parsed.task);
+    const rawCommands = (c.tasks[i] as Record<string, unknown>).commands;
+    if (rawCommands === undefined) { tasks.push(parsed.task); continue; }
+    if (!Array.isArray(rawCommands) || !rawCommands.every((n) => typeof n === "string" && n.trim() !== "")) {
+      return { ok: false, reason: `tasks[${i}].commands must be an array of command name strings` };
+    }
+    tasks.push({ ...parsed.task, commands: [...(rawCommands as string[])] });
   }
 
   // Every taskRef resolves to a declared task id.

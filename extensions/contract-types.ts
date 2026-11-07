@@ -75,6 +75,8 @@ export interface TaskUnit {
   expectedOutput: string[];
   /** Lifecycle status. */
   status: TaskStatus;
+  /** Command names the task needs; each must be declared in implement.commands. */
+  commands?: string[];
 }
 
 /** The normalized v2 contract: the path lists are the single source of truth. */

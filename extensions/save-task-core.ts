@@ -117,6 +117,17 @@ export async function runSaveTask(
   if (!result.ok) return fail(`save_task rejected: ${result.reason}`);
   const preserved = preserveContractDoneStatuses(state.contractV2, result.contract);
   const workflow = await loadWorkflowConfig(ctx.cwd);
+  const declared = workflow?.implement?.commands ?? {};
+  for (const t of preserved.contract.tasks) {
+    for (const name of t.commands ?? []) {
+      if (!Object.prototype.hasOwnProperty.call(declared, name)) {
+        return fail(
+          `save_task rejected: task ${t.id} lists command '${name}' which is not declared ` +
+            `in .pi/workflow.json implement.commands — declare it via update_workflow_config first.`,
+        );
+      }
+    }
+  }
   const tooBroad = checkTaskBreadth(preserved.contract, resolveMaxPathsPerTask(workflow));
   if (tooBroad !== null) return fail(`save_task rejected: ${tooBroad}`);
   state.contractV2 = preserved.contract;
