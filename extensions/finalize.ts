@@ -1,28 +1,18 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { loadState, transitionTo, updateUi } from "./state.ts";
-import type { FileEntry } from "./state.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
 import { checkTaskBreadth } from "./contract-breadth.ts";
 import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
 import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
 import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
 import { ensureTestTool } from "./test-tool-ensure.ts";
-import { isTestPath } from "./test-scan-profiles.ts";
-import { deriveMatches, type DeriveResult } from "./test-scan-derive.ts";
 import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
-import { crossCheck } from "./test-scan-check.ts";
+import { runContractScan } from "./contract-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { loadContent } from "./utils.ts";
 
-/** Fixed find excludes for the contract scan. */
-const SCAN_EXCLUDES = ["node_modules", ".git", "dist", "build", "coverage", ".venv", "vendor"];
-/** Scan exec budget: enumerate + read is local I/O, 5s covers cold caches. */
-const SCAN_BUDGET_MS = 5000;
-/** Per-file size cap for JS-side reads; larger files are skipped, not fatal. */
-const MAX_SCAN_FILE_BYTES = 256 * 1024;
+export { runContractScan };
 /** Tracked-path read budget: one git ls-tree, 5s covers cold caches. */
 const TRACKED_BUDGET_MS = 5000;
 /** Rejection text for the legacy files/behaviors save_task payload. */
@@ -32,19 +22,6 @@ const LEGACY_PAYLOAD_REJECTION =
   "{ title, instruction, done, sources, tests, tasks } where each " +
   "sources/tests entry is { path, status?, tasks } and each tasks " +
   "entry is { id, description, expectedOutput[], status? } (see content/finalize-prompt.md).";
-
-/** Read a file JS-side with size cap and binary sniffing; null when skipped. */
-function readCapped(full: string): string | null {
-  try {
-    const stat = statSync(full);
-    if (!stat.isFile() || stat.size > MAX_SCAN_FILE_BYTES) return null;
-    const buf = readFileSync(full);
-    if (buf.subarray(0, 1024).includes(0)) return null; // binary sniff
-    return buf.toString("utf8");
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Read the repo-relative paths tracked at HEAD (T10): the input the derived
@@ -70,53 +47,6 @@ async function readTrackedPaths(pi: ExtensionAPI, cwd: string): Promise<Set<stri
     );
   } catch {
     return new Set();
-  }
-}
-
-/**
- * Run the deterministic contract scan for a drafted contract.
- *
- * Enumerates files via `find` (fixed excludes), reads matched test files and
- * contract entries JS-side (size caps, binary sniff), derives per-entry
- * findings with the matched language profile, and cross-checks them against
- * the declared files. Pure decision logic lives in the test-scan modules.
- *
- * @param pi    - ExtensionAPI reference (for exec access).
- * @param cwd   - Working directory to scan.
- * @param files - The contract's declared file entries ({ path, status }).
- * @returns Evidence + advisory warnings, or null when the scan is unavailable
- *          (exec failure, non-zero exit, empty listing) — callers degrade to
- *          "scan unavailable" without blocking the save.
- */
-export async function runContractScan(
-  pi: ExtensionAPI,
-  cwd: string,
-  files: readonly FileEntry[],
-): Promise<{ evidence: string[]; warnings: string[] } | null> {
-  try {
-    const findArgs = [".", "-type", "f"];
-    for (const ex of SCAN_EXCLUDES) findArgs.push("-not", "-path", `*/${ex}/*`);
-    const res = await pi.exec("find", findArgs, { cwd, timeout: SCAN_BUDGET_MS });
-    if (res.code !== 0) return null;
-    const listing = (res.stdout ?? "")
-      .split("\n")
-      .map((l) => l.trim().replace(/^\.\//, ""))
-      .filter(Boolean);
-    if (listing.length === 0) return null;
-    const onDisk = new Set(listing);
-    const paths = files.map((f) => f.path);
-    const contents = new Map<string, string>();
-    for (const p of listing) {
-      if (!isTestPath(p) && !paths.includes(p)) continue;
-      const text = readCapped(join(cwd, p));
-      if (text !== null) contents.set(p, text);
-    }
-    const findings = new Map<string, DeriveResult>();
-    for (const f of files) findings.set(f.path, deriveMatches(f.path, contents));
-    const result = crossCheck(files, findings, onDisk);
-    return { evidence: result.evidence, warnings: result.warnings };
-  } catch {
-    return null;
   }
 }
 

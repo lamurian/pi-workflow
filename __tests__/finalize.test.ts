@@ -393,7 +393,7 @@ describe("save_task scan wiring (T3)", () => {
     assert.match(res.content[0].text, /scan unavailable — apply judgment from the discussion/);
   });
 
-  it("degrades to scan unavailable when the find listing is empty", async () => {
+  it("degrades to scan unavailable when the git listing is empty", async () => {
     const pi = mockPi(DEFAULT_ACTIVE_TOOLS, execReturning(""));
     registerSaveTaskTool(pi);
     const s = discussingState();
@@ -406,7 +406,7 @@ describe("save_task scan wiring (T3)", () => {
     assert.match(res.content[0].text, /scan unavailable/);
   });
 
-  it("degrades to scan unavailable when find exits non-zero", async () => {
+  it("degrades to scan unavailable when git ls-files exits non-zero", async () => {
     // Regression for the ExecResult.code fix: a non-zero code must yield
     // null (scan unavailable) even when stdout carries a listing.
     const listing = ["./src/a.ts"].join("\n") + "\n";
@@ -485,8 +485,8 @@ describe("save_task scan wiring (T3)", () => {
     const listing = ["./src/a.ts", "./tests/flows.test.ts"].join("\n") + "\n";
     // git reports nothing tracked: every declared path derives A, and an A
     // entry that exists on disk is the declared-add-exists case.
-    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async (cmd: string) => {
-      if (cmd === "git") return { stdout: "", stderr: "", code: 0, killed: false };
+    const pi = mockPi(DEFAULT_ACTIVE_TOOLS, async (cmd: string, args: string[] = []) => {
+      if (cmd === "git" && args[0] !== "ls-files") return { stdout: "", stderr: "", code: 0, killed: false };
       return { stdout: listing, stderr: "", code: 0, killed: false };
     });
     registerSaveTaskTool(pi);
@@ -606,10 +606,10 @@ describe("save_task test-tool ensure wiring (T3)", () => {
     return dir;
   }
 
-  /** git ls-files exits 1 (untracked -> A); find returns the given listing. */
+  /** git ls-tree exits 1 (untracked -> A); git ls-files returns the given listing. */
   function execForEnsure(listing: string): ExtensionAPI["exec"] {
-    return async (cmd: string) => {
-      if (cmd === "git") {
+    return async (cmd: string, args: string[] = []) => {
+      if (cmd === "git" && args[0] !== "ls-files") {
         return { stdout: "", stderr: "error: pathspec did not match", code: 1, killed: false };
       }
       return { stdout: listing, stderr: "", code: 0, killed: false };
@@ -1177,7 +1177,7 @@ describe("save_task dirty-tree advisory warning (T6)", () => {
       if (cmd === "git" && args[0] === "ls-tree") {
         return ok("src/a.ts\nsrc/other.ts\ntests/a.test.ts\n");
       }
-      if (cmd === "find") return ok("./src/a.ts\n./src/other.ts\n./tests/a.test.ts\n");
+      if (cmd === "git" && args[0] === "ls-files") return ok("./src/a.ts\n./src/other.ts\n./tests/a.test.ts\n");
       return ok();
     });
     registerSaveTaskTool(pi);
