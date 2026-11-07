@@ -1039,7 +1039,7 @@ describe("save_task contract v2 (T10)", () => {
       tests: [{ path: "tests/b.test.ts", tasks: ["T1"] }],
       tasks: [
         { id: "T1", description: "d1", expectedOutput: ["e1", "e2"], status: "active" },
-        { id: "T2", description: "d2", expectedOutput: ["manual step"], status: "active" },
+        { id: "T2", description: "d2", expectedOutput: ["inspect: manual step"], status: "active" },
       ],
     };
 
@@ -1124,7 +1124,7 @@ describe("save_task per-task path cap (T1)", () => {
     const ctx = ctxWithState(s);
     const draft = {
       ...VALID_V2,
-      sources: Array.from({ length: 11 }, (_, i) => ({ path: `src/p${i}.ts`, tasks: ["T1"] })),
+      sources: Array.from({ length: 6 }, (_, i) => ({ path: `src/p${i}.ts`, tasks: ["T1"] })),
     };
 
     const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
@@ -1132,7 +1132,7 @@ describe("save_task per-task path cap (T1)", () => {
     assert.equal(res.isError, true);
     assert.match(res.content[0].text, /save_task rejected: task too broad/);
     assert.match(res.content[0].text, /\bT1\b/);
-    assert.match(res.content[0].text, /\blimit 10\b/);
+    assert.match(res.content[0].text, /\blimit 5\b/);
     assert.deepEqual(s.contractV2, VALID_V2, "prior contract must stay untouched");
     assert.equal(s.phase, "discussing", "phase must stay unchanged on rejection");
     assert.equal(s.task, undefined, "no v1 view is derived on rejection");
@@ -1160,11 +1160,48 @@ describe("save_task per-task path cap (T1)", () => {
 });
 
 describe("finalize-prompt.md task-too-broad invariant (T1)", () => {
-  it("lists the invariant with the finalize.maxPathsPerTask setting and default 10", async () => {
+  it("lists the invariant with the finalize.maxPathsPerTask setting and default 5", async () => {
     const content = await loadContent("finalize-prompt.md");
     assert.match(content, /task too broad/);
     assert.match(content, /finalize\.maxPathsPerTask/);
-    assert.match(content, /default 10/);
+    assert.match(content, /default 5/);
+  });
+
+  it("documents sizing limits, 10-minute target, operation split, commands and per-test-file evidence (T21)", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /maxAssertionsPerTask/);
+    assert.match(content, /default 3/);
+    assert.match(content, /maxManualAssertions/);
+    assert.match(content, /default 2/);
+    assert.match(content, /maxTaskBytes/);
+    assert.match(content, /10-minute/);
+    assert.match(content, /split by operation/i);
+    assert.match(content, /declare the commands/i);
+    assert.match(content, /per test file/i);
+  });
+});
+
+describe("save_task manual assertion prefix (T21)", () => {
+  it("rejects a manual task assertion that does not start with 'inspect:'", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const draft = {
+      ...VALID_V2,
+      sources: [...VALID_V2.sources, { path: "docs/x.md", tasks: ["T2"] }],
+      tasks: [
+        ...VALID_V2.tasks,
+        { id: "T2", description: "m", expectedOutput: ["docs updated"], status: "active" },
+      ],
+    };
+
+    const res = await getSaveTask(pi).execute("c1", draft, undefined, undefined, ctx);
+
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /inspect:/);
+    assert.match(res.content[0].text, /\bT2\b/);
+    assert.equal(s.phase, "discussing");
   });
 });
 
@@ -1197,7 +1234,7 @@ describe("save_task dirty-tree advisory warning (T6)", () => {
         tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
         tasks: [
           { id: "T1", description: "first", expectedOutput: ["e1"], status: "active" },
-          { id: "T2", description: "second", expectedOutput: ["e2"], status: "active" },
+          { id: "T2", description: "second", expectedOutput: ["inspect: e2"], status: "active" },
         ],
       },
       undefined,

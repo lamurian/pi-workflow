@@ -65,7 +65,7 @@ export const ARCHIVE_SUBDIR = ".archive";
 // ── Workflow Configuration ────────────────────────────────────────────────────
 
 /** Default per-task path cap at finalize when workflow.json sets none. */
-export const DEFAULT_MAX_PATHS_PER_TASK = 10;
+export const DEFAULT_MAX_PATHS_PER_TASK = 5;
 
 const DEFAULT_WORKFLOW: WorkflowConfig = {
   brainstorm: {
@@ -86,7 +86,7 @@ const DEFAULT_WORKFLOW: WorkflowConfig = {
  *
  * @param config - The merged workflow configuration.
  * @returns `config.finalize.maxPathsPerTask` when it is a positive integer;
- *          otherwise DEFAULT_MAX_PATHS_PER_TASK (10) — non-positive and
+ *          otherwise DEFAULT_MAX_PATHS_PER_TASK (5) — non-positive and
  *          non-integer values fall back to the default.
  */
 export function resolveMaxPathsPerTask(config: WorkflowConfig): number {

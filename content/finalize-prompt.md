@@ -37,7 +37,24 @@ Each rejection below names the invariant; fix the contract and call `save_task` 
 - **D entry with empty tasks** — every `status: "D"` entry names at least one owning task;
 - **empty expectedOutput** — every task lists at least one assertion;
 - **duplicate task id** — task ids are unique;
-- **task too broad** — a task may own at most `finalize.maxPathsPerTask` paths (default 10) across `sources` and `tests`; the cap counts distinct paths for every task whose status is not `done` (a shared path counts for each owner, `D` entries count), and save_task rejects naming each over-limit task, its count and the limit.
+- **task too broad** — a task may own at most `finalize.maxPathsPerTask` paths (default 5) across `sources` and `tests`; the cap counts distinct paths for every task whose status is not `done` (a shared path counts for each owner, `D` entries count), and save_task rejects naming each over-limit task, its count and the limit.
+
+## Task sizing (save_task rejects — blocking)
+
+Size every task so a unit finishes it in about 10 minutes (the 10-minute target). Limits, all set under `finalize` in workflow.json:
+
+- `maxPathsPerTask` — default 5 paths per task;
+- `maxAssertionsPerTask` — default 3 assertions per tested task;
+- `maxManualAssertions` — default 2 assertions per manual task;
+- `maxTaskBytes` — default 98304 bytes of owned files per task.
+
+Every manual-task assertion must start with `inspect:` and say how it is verified.
+
+Fixing a size rejection: split by operation — one task per operation (add, migrate, remove, rewire) instead of one task doing everything. Do not just merge assertions into longer lines.
+
+Generated output: when a task produces or checks generated or bulk output (every/each/all rows, files, entries), declare the commands that generate or check it in the task's `commands` instead of hand-listing the output.
+
+Evidence: classify scan evidence per test file — one classification for each test file, not one per match.
 
 Advisory only, never blocking: a task with no path refs (pure-manual), overlapping refs on shared files, and an `A`/`M` status that disagrees with git — status is display-only.
 

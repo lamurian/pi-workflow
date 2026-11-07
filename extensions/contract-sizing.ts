@@ -65,6 +65,14 @@ export function checkTaskSizing(
     if (t.status === "done") continue;
     const manual = !contract.tests.some((e) => e.tasks.includes(t.id));
     const limit = manual ? limits.maxManualAssertions : limits.maxAssertionsPerTask;
+    if (manual) {
+      const bad = t.expectedOutput.find((e) => !e.startsWith("inspect:"));
+      if (bad !== undefined) {
+        problems.push(
+          `manual assertion: ${t.id} expectedOutput "${bad}" must start with 'inspect:' and say how it is verified`,
+        );
+      }
+    }
     const count = t.expectedOutput.length;
     if (count > limit) {
       problems.push(

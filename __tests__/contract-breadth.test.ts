@@ -121,8 +121,8 @@ describe("maxPathsPerTask resolution (T1)", () => {
     return resolveMaxPathsPerTask(config);
   }
 
-  it("the resolved limit defaults to 10 when workflow.json sets no finalize.maxPathsPerTask", async () => {
-    assert.equal(await resolveLimit({}), 10);
+  it("the resolved limit defaults to 5 when workflow.json sets no finalize.maxPathsPerTask", async () => {
+    assert.equal(await resolveLimit({}), 5);
   });
 
   it("a finalize.maxPathsPerTask value from workflow.json overrides the default", async () => {
@@ -132,12 +132,12 @@ describe("maxPathsPerTask resolution (T1)", () => {
     assert.equal(await resolveLimit(files), 4);
   });
 
-  it("an invalid maxPathsPerTask (0, negative, non-integer) falls back to 10", async () => {
+  it("an invalid maxPathsPerTask (0, negative, non-integer) falls back to 5", async () => {
     for (const bad of [0, -3, 2.5]) {
       const files = {
         ".pi/workflow.json": JSON.stringify({ finalize: { maxPathsPerTask: bad } }),
       };
-      assert.equal(await resolveLimit(files), 10, `value ${bad} must fall back to 10`);
+      assert.equal(await resolveLimit(files), 5, `value ${bad} must fall back to 5`);
     }
   });
 });
