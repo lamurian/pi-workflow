@@ -12,6 +12,7 @@ import type { ContractV2, GateResult, GateSuiteResult, WorkflowState } from "./s
 import { deriveUnitScope } from "./contract-derive.ts";
 import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "./test-extension-constants.ts";
 import { isFilterableSuite } from "./test-extension-template.ts";
+import { retryRedSuite } from "./gate-retry.ts";
 
 /** Result of one orchestrator-run gate: per-suite verdicts plus overall pass. */
 export interface TestGateRun {
@@ -164,19 +165,35 @@ export async function runTaskScopeGate(
   const runs = routeSuites([...suites], scope.testFiles.map((path) => ({ path })));
   const timeout = gateTimeoutMs();
   const results: GateSuiteResult[] = [];
+  const notes: string[] = [];
   for (const run of runs) {
     if (run.skipped) {
       results.push({ label: run.suite.label, passed: true, tail: SKIPPED_TAIL });
       continue;
     }
     const suiteCwd = run.suite.cwd ? join(cwd, run.suite.cwd) : cwd;
-    results.push(await execGateSuite(pi, suiteCwd, run.suite, run.argv, timeout));
+    const exec = () => execGateSuite(pi, suiteCwd, run.suite, run.argv, timeout);
+    const first = await exec();
+    if (first.passed) {
+      results.push(first);
+      continue;
+    }
+    const cwdRel = run.suite.cwd && run.suite.cwd !== "." ? run.suite.cwd : undefined;
+    const withCwd = (r: GateSuiteResult): GateSuiteResult => (cwdRel ? { ...r, cwd: cwdRel } : r);
+    const outcome = await retryRedSuite(
+      withCwd(first),
+      async () => withCwd(await exec()),
+      scope.testFiles,
+    );
+    results.push(outcome.result);
+    if (outcome.note) notes.push(outcome.note);
   }
   return {
     behaviorId,
     scope: [...scope.testFiles],
     passed: results.every((r) => r.passed),
     suites: results,
+    ...(notes.length > 0 ? { notes } : {}),
     at: new Date().toISOString(),
   };
 }

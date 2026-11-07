@@ -187,6 +187,8 @@ export interface GateResult {
   passed: boolean;
   /** Per-suite verdicts with output tails. */
   suites: GateSuiteResult[];
+  /** Retry notes (flaky / deferred foreign failures). */
+  notes?: string[];
   /** ISO timestamp of the gate run. */
   at: string;
 }
