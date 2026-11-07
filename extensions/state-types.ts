@@ -138,6 +138,11 @@ export interface WorkflowState {
    * timestamp. Optional: absent until the first save.
    */
   contractHistory?: ContractHistoryEntry[];
+  /**
+   * Evidence/warning digest lines from the previous save_task scan, used
+   * to report only changes on re-save. Optional: absent before first save.
+   */
+  scanDigest?: string[];
 }
 
 /** One recorded contract mutation by runSaveTask. */

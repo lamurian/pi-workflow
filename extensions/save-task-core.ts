@@ -13,6 +13,7 @@ import { ensureTestTool } from "./test-tool-ensure.ts";
 import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
 import { runContractScan } from "./contract-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
+import { diffScanDigest, renderScanDiff, scanDigest, writeScanReport } from "./scan-report.ts";
 
 /** Supported save_task operations. */
 export type SaveTaskOperation = "replace";
@@ -146,9 +147,23 @@ export async function runSaveTask(
       "info",
     );
   }
+  const prevDigest = state.scanDigest;
+  const digest = scanDigest(scan?.evidence ?? [], allWarnings);
+  state.scanDigest = digest;
+  const reportPath = await writeScanReport(ctx.cwd, scan?.evidence ?? [], allWarnings);
   let text =
     "Task saved. Phase: finalizing (read-only). " +
     "Wait for the user to run /implement once the contract is approved.";
+  if (reportPath !== null) text += `\nFull scan report (uncapped): ${reportPath}`;
+  if (prevDigest !== undefined) {
+    if (scan === null) text += "\n\nNote: scan unavailable — apply judgment from the discussion.";
+    text += `\n${ensured.message}`;
+    if (preserved.preserved.length > 0) {
+      text += `\n\nPreserved done behaviors: ${preserved.preserved.join(", ")}`;
+    }
+    text += "\n\n" + renderScanDiff(diffScanDigest(prevDigest, digest));
+    return { ok: true, text };
+  }
   if (scan === null) {
     text += "\n\nNote: scan unavailable — apply judgment from the discussion.";
   } else if (scan.evidence.length > 0) {
