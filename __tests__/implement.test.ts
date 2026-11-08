@@ -3844,6 +3844,8 @@ describe("T7: orchestrator final gate", () => {
   /**
    * Exec mock: git commits advance HEAD; every npm call shifts the next
    * queued result (scope-gate runs included), defaulting to green.
+   * R2a: each red final-gate suite re-runs once in-gate, so every red
+   * entry must be listed twice (the run and its in-gate retry).
    */
   function piWithNpmQueue(results: NpmResult[]) {
     const pi = mockPi();
@@ -3928,7 +3930,7 @@ describe("T7: orchestrator final gate", () => {
   });
 
   it("runs exactly one FULL-GATE fix unit with tails, landed commits and failing-test owners, commits its work and re-runs the gate", async () => {
-    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, GREEN]);
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, RED_DECLARED, GREEN]);
     const state = finalGateState();
     const ctx = ctxWithState(state);
     const units: Array<{ id: string; taskText: string }> = [];
@@ -3972,15 +3974,21 @@ describe("T7: orchestrator final gate", () => {
     assert.equal(commits[1]!.args[2], "fix(final): repair the failing test");
     assert.equal(
       execLog.filter((e) => e.cmd === "npm").length,
-      3,
-      "scope gate, red final gate, then the re-run final gate",
+      4,
+      "scope gate, red final gate run + its in-gate retry, then the post-fix re-run final gate",
     );
     assert.equal(state.finalGate?.passed, true, "the re-run final gate is green");
     assert.equal(state.phase, "idle");
   });
 
   it("halts with the full-gate report when the final gate stays red after the fix round", async () => {
-    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, RED_DECLARED]);
+    const { pi, execLog } = piWithNpmQueue([
+      GREEN,
+      RED_DECLARED,
+      RED_DECLARED,
+      RED_DECLARED,
+      RED_DECLARED,
+    ]);
     const state = finalGateState();
     const ctx = ctxWithState(state);
     const spawns: string[] = [];
@@ -4006,7 +4014,11 @@ describe("T7: orchestrator final gate", () => {
       1,
       "exactly one fix round runs before the halt",
     );
-    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 3, "no third gate round");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      5,
+      "scope gate + both red gate visits (run + in-gate retry each); no third visit",
+    );
     assert.equal(state.phase, "implementing", "the halt keeps the resume phase");
   });
 
@@ -4016,7 +4028,7 @@ describe("T7: orchestrator final gate", () => {
       stdout: "",
       stderr: "FAIL  secrets/hidden.test.ts > suite > test",
     };
-    const { pi, execLog } = piWithNpmQueue([GREEN, RED_UNDECLARED]);
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_UNDECLARED, RED_UNDECLARED]);
     const state = finalGateState();
     const ctx = ctxWithState(state);
     const spawns: string[] = [];
@@ -4032,7 +4044,11 @@ describe("T7: orchestrator final gate", () => {
     assert.match(result.error ?? "", /__tests__\/a\.test\.ts|no fix/, "the triage report renders");
     assert.match(result.error ?? "", /\/discuss -> \/finalize -> \/implement/, "the contract-change steer");
     assert.deepEqual(spawns, ["T1"], "no fix round runs for an undeclared failing test");
-    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 2, "the gate ran once and never re-ran");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      3,
+      "the gate visit ran its run + in-gate retry and never re-ran",
+    );
   });
 
   it("halts without a fix round when a red suite yields no parseable failing test path", async () => {
@@ -4041,7 +4057,7 @@ describe("T7: orchestrator final gate", () => {
       stdout: "",
       stderr: "worker crashed before reporting any test",
     };
-    const { pi } = piWithNpmQueue([GREEN, RED_UNPARSEABLE]);
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_UNPARSEABLE, RED_UNPARSEABLE]);
     const state = finalGateState();
     const ctx = ctxWithState(state);
     const spawns: string[] = [];
@@ -4057,10 +4073,15 @@ describe("T7: orchestrator final gate", () => {
     assert.match(result.error ?? "", /javascript \(npm run test\)/, "the red suite label is named");
     assert.match(result.error ?? "", /\/discuss -> \/finalize -> \/implement/);
     assert.deepEqual(spawns, ["T1"], "no fix round runs on unparseable output");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      3,
+      "the gate visit ran its run + in-gate retry and never re-ran",
+    );
   });
 
   it("halts with the requested paths when the fix unit is blocked on an undeclared path", async () => {
-    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED]);
+    const { pi, execLog } = piWithNpmQueue([GREEN, RED_DECLARED, RED_DECLARED]);
     const state = finalGateState();
     const ctx = ctxWithState(state);
     const spawns: string[] = [];
@@ -4084,7 +4105,11 @@ describe("T7: orchestrator final gate", () => {
       1,
       "no fix commit lands when the unit is blocked",
     );
-    assert.equal(execLog.filter((e) => e.cmd === "npm").length, 2, "no gate re-run after a blocked fix unit");
+    assert.equal(
+      execLog.filter((e) => e.cmd === "npm").length,
+      3,
+      "scope gate + the red gate visit (run + in-gate retry); no post-fix gate re-run after a blocked fix unit",
+    );
   });
 });
 
