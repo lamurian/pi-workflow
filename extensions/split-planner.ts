@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState, Behavior, TaskContract } from "./state.ts";
 import { runSaveTask } from "./save-task-core.ts";
+import { setTaskStatus } from "./task-status.ts";
 
 /** Veto window for a runtime split proposal, in milliseconds. */
 export const SPLIT_VETO_MS = 60_000;
@@ -82,9 +83,8 @@ export async function runSplitChild<R>(
   if (!task || !child || child.status === "done") return undefined;
   const res = await run(child, task);
   if (res !== undefined) return res;
-  const current = state.task?.behaviors.find((b) => b.id === childId);
   child.status = "done";
-  if (current) current.status = "done";
+  setTaskStatus(state, childId, "done");
   persist();
   return undefined;
 }

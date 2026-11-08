@@ -139,6 +139,12 @@ describe("runtime split planner", () => {
     assert.deepEqual(state.task.behaviors.filter((b) => b.status === "active").map((b) => b.id), ["T1.2", "T1.3"]);
   });
 
+  it("runSplitChild marks a completed child done in state.contractV2", async () => {
+    const state = { task: { behaviors: [{ id: "T1.1", status: "active" }] }, contractV2: { tasks: [{ id: "T1.1", status: "active" }] } } as never as { contractV2: { tasks: { id: string; status: string }[] } };
+    await runSplitChild(state as never, "T1.1", (async () => undefined) as never, () => {});
+    assert.equal(state.contractV2.tasks[0].status, "done");
+  });
+
   it("parses the last json block", () => {
     assert.equal(parseSplitProposal(PROPOSAL)?.length, 2);
     assert.equal(parseSplitProposal("nope"), undefined);
