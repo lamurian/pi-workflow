@@ -41,7 +41,9 @@ export interface SplitOrHaltHooks<R> {
 
 /**
  * Try a runtime split; on success run every child in order, otherwise halt
- * with the existing unit-too-large text. Split children halt without splitting.
+ * with the existing unit-too-large text plus a final line naming the
+ * runRuntimeSplit reason (`Runtime split not applied: <reason>`). Split
+ * children halt without splitting.
  *
  * @param opts     - Runtime split options.
  * @param haltText - The existing halt text used on veto/rejection.
@@ -51,7 +53,7 @@ export interface SplitOrHaltHooks<R> {
 export async function splitOrHalt<R>(opts: RuntimeSplitOptions, haltText: string, hooks: SplitOrHaltHooks<R>): Promise<R | undefined> {
   if (isSplitChild(opts.behaviorId)) return hooks.halt(haltText);
   const split = await runRuntimeSplit(opts);
-  if (!split.applied) return hooks.halt(haltText);
+  if (!split.applied) return hooks.halt(`${haltText}\nRuntime split not applied: ${split.reason ?? "unknown"}`);
   for (const id of split.childIds) {
     const res = await hooks.runChild(id);
     if (res !== undefined) return res;
@@ -149,9 +151,12 @@ async function defaultPlanner(pi: ExtensionAPI, cwd: string, taskText: string): 
 
 /**
  * Plan, dry-run, offer a timed veto, then apply a runtime split of one task.
+ * The veto window is non-blocking: a throwing confirm counts as no veto and a
+ * confirm that resolves after its timeout without an answer proceeds.
  *
  * @param opts - State, ids, trigger and optional injected planner.
- * @returns Whether the split was applied, with the child ids.
+ * @returns Whether the split was applied, with the child ids and, on failure,
+ *          the reason the split was not applied.
  */
 export async function runRuntimeSplit(opts: RuntimeSplitOptions): Promise<RuntimeSplitResult> {
   const { pi, ctx, state, behaviorId, trigger } = opts;
@@ -171,7 +176,12 @@ export async function runRuntimeSplit(opts: RuntimeSplitOptions): Promise<Runtim
   if (!dry.ok) return { applied: false, childIds: [], reason: dry.text };
   const vetoMs = opts.vetoMs ?? SPLIT_VETO_MS;
   const notice = `Split ${behaviorId} into ${tasks.length} tasks; applying in ${Math.round(vetoMs / 1000)}s unless vetoed.`;
-  const vetoed = await ctx.ui.confirm("Veto split?", notice, { timeout: vetoMs });
+  let vetoed = false;
+  try {
+    vetoed = Boolean(await ctx.ui.confirm("Veto split?", notice, { timeout: vetoMs }));
+  } catch {
+    vetoed = false; // UI failure or timeout without an answer: proceed with the split.
+  }
   if (vetoed) return { applied: false, childIds: [], reason: "vetoed" };
   const applied = await save(state, payload, { pi, ctx, caller: "orchestrator" });
   if (!applied.ok) return { applied: false, childIds: [], reason: applied.text };

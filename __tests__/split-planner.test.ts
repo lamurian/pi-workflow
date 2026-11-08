@@ -4,7 +4,17 @@ import { isSplitChild, parseSplitProposal, splitOrHalt, runSplitChild, type Runt
 
 const PROPOSAL = '```json\n{"tasks":[{"description":"a","expectedOutput":["x"],"paths":["a.ts"]},{"description":"b","expectedOutput":["y"],"paths":["b.ts"]}]}\n```';
 
-function setup(opts: { vetoed?: boolean; saveOk?: boolean; behaviorId?: string } = {}) {
+function setup(
+  opts: {
+    vetoed?: boolean;
+    saveOk?: boolean;
+    behaviorId?: string;
+    /** Injected confirm behavior (throw / resolve with no answer). */
+    confirm?: () => Promise<boolean | undefined>;
+    /** Injected planner behavior (throw / return unparseable output). */
+    planner?: () => Promise<string>;
+  } = {},
+) {
   const calls: { payload: Record<string, unknown>; caller: string; dry: boolean }[] = [];
   const confirms: { timeout?: number }[] = [];
   const state = { phase: "implementing", task: { behaviors: [{ id: "T1" }] }, contractV2: { tasks: [{ id: "T1" }] } } as never;
@@ -12,7 +22,11 @@ function setup(opts: { vetoed?: boolean; saveOk?: boolean; behaviorId?: string }
     cwd: "/tmp",
     ui: {
       notify: () => {},
-      confirm: async (_t: string, _m: string, o?: { timeout?: number }) => { confirms.push(o ?? {}); return opts.vetoed ?? false; },
+      confirm: async (_t: string, _m: string, o?: { timeout?: number }) => {
+        confirms.push(o ?? {});
+        if (opts.confirm) return opts.confirm();
+        return opts.vetoed ?? false;
+      },
     },
   } as never;
   const save = async (s: { task: { behaviors: { id: string }[] } }, payload: Record<string, unknown>, o: { caller: string }) => {
@@ -23,7 +37,7 @@ function setup(opts: { vetoed?: boolean; saveOk?: boolean; behaviorId?: string }
   };
   const options: RuntimeSplitOptions = {
     pi: {} as never, ctx, state, behaviorId: opts.behaviorId ?? "T1", trigger: "timeout",
-    planner: async () => PROPOSAL, save: save as never,
+    planner: opts.planner ?? (async () => PROPOSAL), save: save as never,
   };
   return { calls, confirms, options };
 }
@@ -50,17 +64,50 @@ describe("runtime split planner", () => {
     assert.deepEqual(ran, ["T1.1", "T1.2"]);
   });
 
-  it("halts with the existing text on veto", async () => {
+  it("appends the veto reason to the halt text on veto", async () => {
     const { calls, options } = setup({ vetoed: true });
     const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
-    assert.equal(res, "too large");
+    assert.equal(res, "too large\nRuntime split not applied: vetoed");
     assert.equal(calls.length, 1);
   });
 
-  it("halts with the existing text when the proposal is rejected", async () => {
+  it("appends the save_task rejection text to the halt text when the proposal is rejected", async () => {
     const { options } = setup({ saveOk: false });
     const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
-    assert.equal(res, "too large");
+    assert.equal(res, "too large\nRuntime split not applied: rejected");
+  });
+
+  it("appends the underlying planner error when the planner fails", async () => {
+    const { options } = setup({ planner: async () => { throw new Error("boom"); } });
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
+    assert.equal(res, "too large\nRuntime split not applied: planner failed: Error: boom");
+  });
+
+  it("appends the missing-proposal reason when the planner returns no proposal", async () => {
+    const { options } = setup({ planner: async () => "not a proposal" });
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
+    assert.equal(res, "too large\nRuntime split not applied: planner returned no proposal");
+  });
+
+  it("a throwing confirm is treated as no veto and the split proceeds", async () => {
+    const { options } = setup({ confirm: async () => { throw new Error("ui down"); } });
+    const ran: string[] = [];
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async (id) => { ran.push(id); return undefined; } });
+    assert.equal(res, undefined);
+    assert.deepEqual(ran, ["T1.1", "T1.2"]);
+  });
+
+  it("a confirm resolving after its timeout with no answer proceeds with the split", async () => {
+    const { options } = setup({
+      confirm: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        return undefined;
+      },
+    });
+    const ran: string[] = [];
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async (id) => { ran.push(id); return undefined; } });
+    assert.equal(res, undefined);
+    assert.deepEqual(ran, ["T1.1", "T1.2"]);
   });
 
   it("a split child halts instead of splitting again", async () => {
