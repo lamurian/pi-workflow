@@ -5,6 +5,13 @@ import { dirname, join } from "node:path";
 import { loadState } from "./state.ts";
 import { validateWorkflowConfig } from "./workflow-config-schema.ts";
 import { resetWorkflowConfigCache } from "./paths.ts";
+import { commitScopedPath } from "./scoped-commit.ts";
+import type { ScopedCommitResult } from "./scoped-commit.ts";
+
+/** Repo-relative workflow config path. */
+export const WORKFLOW_CONFIG_PATH = ".pi/workflow.json";
+/** Commit subject for config updates. */
+export const WORKFLOW_CONFIG_COMMIT_SUBJECT = "chore: update workflow config";
 
 /** Inputs for a workflow config update. */
 export interface WorkflowConfigUpdateInput {
@@ -12,6 +19,8 @@ export interface WorkflowConfigUpdateInput {
   phase: string | undefined;
   patch: unknown;
   confirm: (title: string, message: string) => Promise<boolean>;
+  /** Commit one repo-relative path with a subject; omitted = no commit. */
+  commit?: (path: string, subject: string) => Promise<ScopedCommitResult>;
 }
 
 /** Outcome of a workflow config update. */
@@ -118,7 +127,18 @@ export async function updateWorkflowConfig(
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, after, "utf8");
   resetWorkflowConfigCache();
-  return { ok: true, text: `Updated ${path}.` };
+  if (!input.commit) return { ok: true, text: `Updated ${path}.` };
+  const c = await input.commit(WORKFLOW_CONFIG_PATH, WORKFLOW_CONFIG_COMMIT_SUBJECT);
+  if (c.kind === "landed") {
+    return { ok: true, text: `Updated ${path} and committed it as '${WORKFLOW_CONFIG_COMMIT_SUBJECT}'.` };
+  }
+  if (c.kind === "skipped") {
+    return { ok: true, text: `Updated ${path}; config identical to HEAD, commit skipped.` };
+  }
+  return {
+    ok: false,
+    text: `Wrote ${path}, but it was not committed:\n${c.investigation}`,
+  };
 }
 
 /**
@@ -141,6 +161,7 @@ export function registerWorkflowConfigTool(pi: ExtensionAPI): void {
         phase: state?.phase,
         patch: (params as { patch: unknown }).patch,
         confirm: (t, m) => (ctx.hasUI ? ctx.ui.confirm(t, m) : Promise.resolve(false)),
+        commit: (p, s) => commitScopedPath(pi, ctx.cwd, p, s),
       });
       return { content: [{ type: "text", text: res.text }], details: {}, isError: !res.ok };
     },

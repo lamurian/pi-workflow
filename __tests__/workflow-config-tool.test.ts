@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { updateWorkflowConfig } from "../extensions/workflow-config-tool.ts";
+import { commitScopedPath } from "../extensions/scoped-commit.ts";
 
 function setup(initial?: unknown): { cwd: string; path: string } {
   const cwd = mkdtempSync(join(tmpdir(), "wfcfg-"));
@@ -77,6 +80,65 @@ describe("update_workflow_config", () => {
     assert.ok(msg.includes('["npm","run","full"]'));
     assert.ok(msg.includes('["npm","run","lint"]'));
     assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), patch);
+  });
+
+  it("a confirmed update commits only .pi/workflow.json and reports the landed commit", async () => {
+    const { cwd, path } = setup({});
+    const git = (...a: string[]): string => {
+      const r = spawnSync("git", a, { cwd, encoding: "utf8" });
+      assert.equal(r.status, 0, r.stderr);
+      return (r.stdout ?? "").trim();
+    };
+    git("init", "-q");
+    git("config", "user.email", "t@t");
+    git("config", "user.name", "t");
+    git("config", "commit.gpgsign", "false");
+    writeFileSync(join(cwd, "other.txt"), "v1\n");
+    git("add", "--all");
+    git("commit", "-q", "-m", "base");
+    writeFileSync(join(cwd, "other.txt"), "v2\n");
+    git("add", "other.txt");
+    const pi = {
+      exec: async (cmd: string, args: string[]) => {
+        const r = spawnSync(cmd, args, { cwd, encoding: "utf8" });
+        return { stdout: r.stdout ?? "", stderr: r.stderr ?? "", code: r.status ?? 1, killed: false };
+      },
+    } as unknown as ExtensionAPI;
+    const res = await updateWorkflowConfig({
+      cwd, phase: "discussing", patch, confirm: async () => true,
+      commit: (p, s) => commitScopedPath(pi, cwd, p, s),
+    });
+    assert.equal(res.ok, true, res.text);
+    assert.match(res.text, /committed/);
+    assert.equal(git("log", "-1", "--pretty=%s"), "chore: update workflow config");
+    assert.equal(git("diff", "--name-only", "HEAD~1", "HEAD"), ".pi/workflow.json");
+    assert.equal(git("diff", "--cached", "--name-only"), "other.txt");
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), patch);
+  });
+
+  it("a hook rejection leaves the config written and returns the hook output", async () => {
+    const { cwd, path } = setup({});
+    const res = await updateWorkflowConfig({
+      cwd, phase: "discussing", patch, confirm: async () => true,
+      commit: async () => ({ kind: "failed", investigation: "HOOK SAYS NO" }),
+    });
+    assert.equal(res.ok, false);
+    assert.match(res.text, /Wrote/);
+    assert.match(res.text, /HOOK SAYS NO/);
+    assert.doesNotMatch(res.text, /committed it/);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), patch);
+  });
+
+  it("a config identical to HEAD skips the commit and says so", async () => {
+    const { cwd } = setup({});
+    let args: string[] = [];
+    const res = await updateWorkflowConfig({
+      cwd, phase: "discussing", patch, confirm: async () => true,
+      commit: async (p, s) => { args = [p, s]; return { kind: "skipped", investigation: "" }; },
+    });
+    assert.equal(res.ok, true);
+    assert.match(res.text, /skipped/);
+    assert.deepEqual(args, [".pi/workflow.json", "chore: update workflow config"]);
   });
 
   it("declining leaves the file unchanged", async () => {
