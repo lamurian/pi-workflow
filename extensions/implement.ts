@@ -17,6 +17,7 @@ import {
 import { runSoloImplement } from "./implement-solo.ts";
 import { setUnitPrompt } from "./unit-task-text.ts";
 import { readGitHead } from "./git-ops.ts";
+import { captureBaselineFailures } from "./baseline-failures.ts";
 import { preflightImplement } from "./implement-preflight.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { composeCompletionReport, composeHaltReport } from "./implement-report.ts";
@@ -136,6 +137,7 @@ export async function runImplement(
     task,
     runUnit,
     note || state.engineerNote,
+    resuming,
   )
     .then((result) => {
       // B2: a cancelled run skips the completion/halt reports and notifications.
@@ -196,6 +198,7 @@ export async function runImplement(
  * @param task         - The task contract.
  * @param runUnit      - Injectable unit runner.
  * @param engineerNote - Optional engineer's note forwarded to every unit.
+ * @param resuming     - True when resuming; skips baseline failure capture.
  * @returns Loop outcome; error details when an exception was caught.
  */
 async function runOrchestratedImplementSafely(
@@ -205,7 +208,15 @@ async function runOrchestratedImplementSafely(
   task: TaskContract,
   runUnit?: UnitRunner,
   engineerNote?: string,
+  resuming = false,
 ): Promise<Awaited<ReturnType<typeof runOrchestratedImplement>>> {
+  if (!resuming) {
+    try {
+      await captureBaselineFailures(pi, ctx.cwd, state);
+    } catch {
+      // Capture failure leaves baselineFailures unset; the loop still starts.
+    }
+  }
   try {
     return await runOrchestratedImplement(pi, ctx, state, task, runUnit, engineerNote);
   } catch (err) {
