@@ -93,11 +93,12 @@ An `unverified` confidence tag means derivation found no hit (default export, in
 
 1. **Index-membership manual tasks sequence before all implementation tasks.** Untrack, rename and every other `D`-entry task are index-membership work: a `D` declaration only materializes when `git rm --cached` is staged, so a D task ordered after implementation tasks trips the allowlist guard of every commit before it. List these manual tasks first in `tasks[]` so the loop runs them first.
 2. **Never ship a unit-side hard block before the orchestrator capability that satisfies it.** If the contract implies an unconditional guard block, the orchestrator-side capability that satisfies it must exist in the same release — otherwise the block's message must name the manual fallback a unit can use. A block with no owner deadlocks the run.
+3. **Grep the tests when changing an orchestrator rule.** When the contract changes an orchestrator rule (gate, retry, loop, status, guard, detection), grep the project's tests for that rule's message strings, function names and harness names — including dogfood tests that assert this repo's own detected configuration — and classify every hit. Scan evidence matches by symbol/basename and misses rule-level assertions in shared test files.
 
 ## Rules
 
 - Tasks that carry the business rules are testable. Scaffolding, scripts, and config are manual.
 - Declare superseded and obsolete test paths in `tests`/`sources` with their status. Undeclared test paths are protected by the staged-diff guard: deleting or skipping them halts implementation.
-- Set `status: "active"` for all tasks in the contract.
+- New tasks are `status: "active"`; done tasks are carried over automatically on re-save — do not reset them.
 - Be specific. Vague `expectedOutput` cannot be tested.
 - Advisory warnings never block the save, but read every one — each names a contract-quality issue you can fix before `/implement`.

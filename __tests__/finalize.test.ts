@@ -1188,6 +1188,21 @@ describe("finalize-prompt.md task-too-broad invariant (T1)", () => {
   });
 });
 
+describe("finalize-prompt.md orchestrator-rule grep and status (T11)", () => {
+  it("tells the drafter to grep tests for an orchestrator rule's strings and classify every hit", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /grep the project's tests for that rule's message strings, function names and harness names/);
+    assert.match(content, /classify every hit/);
+  });
+
+  it("says new tasks are active and done tasks carry over on re-save", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /New tasks are `status: "active"`/);
+    assert.match(content, /done tasks are carried over automatically on re-save/);
+    assert.doesNotMatch(content, /for all tasks in the contract/);
+  });
+});
+
 describe("save_task manual assertion prefix (T21)", () => {
   it("rejects a manual task assertion that does not start with 'inspect:'", async () => {
     const pi = mockPi();
