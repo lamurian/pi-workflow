@@ -82,8 +82,11 @@ function simpleDiff(before: string, after: string): string {
 export async function updateWorkflowConfig(
   input: WorkflowConfigUpdateInput,
 ): Promise<WorkflowConfigUpdateResult> {
-  if (input.phase !== "discussing") {
-    return { ok: false, text: "update_workflow_config is only allowed in the discussing phase; ask the user to run /discuss." };
+  if (input.phase !== "discussing" && input.phase !== "finalizing") {
+    return {
+      ok: false,
+      text: "update_workflow_config is only allowed in the discussing or finalizing phase; ask the user to run /discuss.",
+    };
   }
   const path = join(input.cwd, ".pi", "workflow.json");
   let current: unknown = {};
@@ -129,7 +132,7 @@ export function registerWorkflowConfigTool(pi: ExtensionAPI): void {
     label: "Update Workflow Config",
     description:
       "Apply a JSON merge patch to the project .pi/workflow.json. The merged result is " +
-      "validated and must be confirmed by the user. Only valid during the discussing phase.",
+      "validated and must be confirmed by the user. Only valid during the discussing or finalizing phase.",
     parameters: Type.Object({ patch: Type.Record(Type.String(), Type.Unknown()) }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);

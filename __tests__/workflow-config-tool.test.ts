@@ -23,7 +23,25 @@ describe("update_workflow_config", () => {
     });
     assert.equal(res.ok, false);
     assert.match(res.text, /\/discuss/);
+    assert.match(res.text, /discussing/);
+    assert.match(res.text, /finalizing/);
     assert.equal(existsSync(path), false);
+  });
+
+  it("applies a confirmed patch when the phase is finalizing", async () => {
+    const { cwd, path } = setup({});
+    const res = await updateWorkflowConfig({
+      cwd, phase: "finalizing", patch: { implement: { commands: { lint: ["npm", "run", "lint"] } } },
+      confirm: async () => true,
+    });
+    assert.equal(res.ok, true);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")).implement.commands.lint, ["npm", "run", "lint"]);
+  });
+
+  it("README documents discussing and finalizing for the tool", () => {
+    const readme = readFileSync(join(__dirname, "..", "README.md"), "utf8");
+    const row = readme.split("\n").find((l) => l.startsWith("| `update_workflow_config`")) ?? "";
+    assert.match(row, /`discussing` and `finalizing`/);
   });
 
   it("rejects an invalid merged result and writes nothing", async () => {
