@@ -1092,6 +1092,19 @@ describe("unit-prompt.md (T3)", () => {
   });
 });
 
+/** Write report.jsonl holding one assistant message_end event; return its path. */
+function writeFakeReport(dir: string): string {
+  const file = join(dir, "report.jsonl");
+  const text =
+    'ok\n```json\n{"summary":"guarded unit","suggestedCommit":"feat(core): add first behavior"}\n```';
+  const event = {
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "text", text }] },
+  };
+  writeFileSync(file, `${JSON.stringify(event)}\n`);
+  return file;
+}
+
 // ─── The default runner writes the guard file before spawning ───────────────
 
 describe("orchestrator spawn wiring (T3)", () => {
@@ -1099,15 +1112,14 @@ describe("orchestrator spawn wiring (T3)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "pi-guard-loop-"));
     const capture = join(tmp, "env-capture.txt");
     const fake = join(tmp, "fake-pi.sh");
+    const report = writeFakeReport(tmp);
     writeFileSync(
       fake,
       "#!/bin/sh\n" +
         `printf 'GUARD:%s\\n' "$PI_CONTRACT_GUARD_FILE" > "${capture}"\n` +
         "while IFS= read -r line; do\n" +
         "  case \"$line\" in\n" +
-        "    *'\"type\":\"prompt\"'*)\n" +
-        "      printf '%s\\n' \"{\\\"type\\\":\\\"message_end\\\",\\\"message\\\":{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"ok \\`\\`\\`json {\\\\\\\"summary\\\\\\\":\\\\\\\"guarded unit\\\\\\\",\\\\\\\"suggestedCommit\\\\\\\":\\\\\\\"feat(core): add first behavior\\\\\\\"} \\`\\`\\`\\\"}]}}\"\n" +
-        "      ;;\n" +
+        `    *'"type":"prompt"'*) cat "${report}" ;;\n` +
         "    *'\"type\":\"abort\"'*) exit 0 ;;\n" +
         "  esac\n" +
         "done\nexit 0\n",
@@ -1285,14 +1297,13 @@ describe("FULL-GATE ownsAll payload (T7)", () => {
   it("createDefaultUnitRunner writes ownsAll: true for the FULL-GATE unit and omits it for a regular task id", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "pi-guard-runner-"));
     const fake = join(tmp, "fake-pi.sh");
+    const report = writeFakeReport(tmp);
     writeFileSync(
       fake,
       "#!/bin/sh\n" +
         "while IFS= read -r line; do\n" +
         "  case \"$line\" in\n" +
-        "    *'\"type\":\"prompt\"'*)\n" +
-        "      printf '%s\\n' \"{\\\"type\\\":\\\"message_end\\\",\\\"message\\\":{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"ok \\`\\`\\`json {\\\\\\\"summary\\\\\\\":\\\\\\\"guarded unit\\\\\\\",\\\\\\\"suggestedCommit\\\\\\\":\\\\\\\"feat(core): add first behavior\\\\\\\"} \\`\\`\\`\\\"}]}}\"\n" +
-        "      ;;\n" +
+        `    *'"type":"prompt"'*) cat "${report}" ;;\n` +
         "    *'\"type\":\"abort\"'*) exit 0 ;;\n" +
         "  esac\n" +
         "done\n" +
