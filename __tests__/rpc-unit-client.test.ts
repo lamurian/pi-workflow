@@ -251,11 +251,23 @@ describe("runImplementerUnit over the rpc transport", () => {
   });
 
   it("shuts the child down gracefully after the report (abort + stdin close)", async () => {
+    // File-based fake: the report event lives in report.jsonl, so no shell
+    // quoting of backticks or nested JSON escapes is needed.
+    const reportDir = mkdtempSync(join(tmpdir(), "pi-rpc-report-"));
+    const reportFile = join(reportDir, "report.jsonl");
+    const reportEvent = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: 'ok\n```json\n{"summary":"done"}\n```' }],
+      },
+    };
+    writeFileSync(reportFile, JSON.stringify(reportEvent) + "\n");
     const fake = fakePi(
       'while IFS= read -r line; do\n' +
         '  case "$line" in\n' +
         "    *'\"type\":\"prompt\"'*)\n" +
-        '      printf \'%s\\n\' "{\\"type\\":\\"message_end\\",\\"message\\":{\\"role\\":\\"assistant\\",\\"content\\":[{\\"type\\":\\"text\\",\\"text\\":\\"ok \\`\\`\\`json {\\\\\\"summary\\\\\\":\\\\\\"done\\\\\\"} \\`\\`\\`\\"}]}}"\n' +
+        `      cat '${reportFile}'\n` +
         "      ;;\n" +
         '    *\'"type":"abort"\'*) echo "graceful-abort" >&2; exit 0 ;;\n' +
         "  esac\n" +
