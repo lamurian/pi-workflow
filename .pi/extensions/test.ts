@@ -17,7 +17,8 @@
 
 /** Detected test suites (label + argv + routing scope/cwd), frozen at generation time. */
 const SUITES = [
-  { "label": "javascript (npm run test)", "argv": ["npm","run","test"] }
+  { "label": "config (npx vitest run {tests})", "argv": ["npx","vitest","run","{tests}"], "scope": "files" },
+  { "label": "config (npm run typecheck)", "argv": ["npm","run","typecheck"], "scope": "full" }
 ];
 
 /** Per-suite wall clock budget: PI_TEST_TIMEOUT_MS, 300000ms default. */
