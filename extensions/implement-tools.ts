@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { loadState, transitionTo, updateUi, saveState } from "./state.ts";
 import { evaluateCompletionGate } from "./completion-gate.ts";
 import { readGitHead } from "./git-ops.ts";
+import { setTaskStatus } from "./task-status.ts";
 import { runAndPersistFinalGate } from "./full-gate.ts";
 import { formatGateEvidenceLine } from "./test-gate-report.ts";
 import {
@@ -97,7 +98,7 @@ export function registerMarkTaskDoneTool(pi: ExtensionAPI): void {
       if (behavior.status === "removed") {
         return { content: [{ type: "text", text: `mark_task_done rejected: behavior ${params.behaviorId} is removed.` }], details: {}, isError: true };
       }
-      behavior.status = "done";
+      setTaskStatus(state, params.behaviorId, "done");
       // T8: gate-backed evidence — for a task with tests refs the evidence
       // carries the orchestrator's gate result line (scope + pass/fail),
       // not the unit's self-report. The gate result is written by the
