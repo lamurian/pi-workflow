@@ -207,6 +207,18 @@ export function generateReport(state: WorkflowState): string {
     lines.push(`- Coverage: ${results.coveragePercent}%`);
   }
 
+  const gateNotes: string[] = [];
+  for (const gate of Object.values(state.gateResults ?? {})) {
+    gateNotes.push(...(gate.notes ?? []));
+  }
+  gateNotes.push(...(state.finalGate?.notes ?? []));
+  if (gateNotes.length > 0) {
+    lines.push("", "## Gate notes");
+    for (const note of gateNotes) {
+      lines.push(`- ${note}`);
+    }
+  }
+
   const completedManual = (task?.behaviors ?? []).filter(
     (b) => b.kind === "manual" && b.status === "done",
   );

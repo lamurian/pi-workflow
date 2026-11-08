@@ -199,6 +199,8 @@ export interface FinalGateResult {
   passed: boolean;
   /** Per-suite verdicts with capped output tails. */
   suites: GateSuiteResult[];
+  /** Retry notes (flaky re-runs of first red suites); absent when none. */
+  notes?: string[];
   /** ISO timestamp of the final-gate run. */
   at: string;
 }

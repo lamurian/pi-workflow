@@ -14,6 +14,7 @@ import type {
 import { saveState } from "./state.ts";
 import { unfilteredArgv } from "./suite-scope.ts";
 import { gateTail } from "./test-gate-run.ts";
+import { retryRedSuite } from "./gate-retry.ts";
 
 /** Per-suite verdicts of one final-gate run (timestamp added on persist). */
 export interface FinalGateRun {
@@ -21,6 +22,8 @@ export interface FinalGateRun {
   passed: boolean;
   /** Per-suite verdicts with capped output tails. */
   suites: GateSuiteResult[];
+  /** Flaky retry notes (green re-run of a first red suite); empty when none. */
+  notes: string[];
 }
 
 /**
@@ -87,6 +90,11 @@ async function execFinalSuite(
  * the supplied AbortSignal forwarded to each exec call. A killed or aborted
  * run counts as not passed.
  *
+ * Each red suite is re-run once through retryRedSuite (R2a) — never after an
+ * aborted signal. Nothing downstream exists to defer foreign failures to, so
+ * only a green re-run (flaky) passes; a twice-red suite stays red and only
+ * flaky notes are recorded.
+ *
  * @param pi       - ExtensionAPI used for exec.
  * @param cwd      - Repository working directory.
  * @param testTool - The recorded test-tool wiring (fullSuites or suites).
@@ -100,10 +108,22 @@ export async function runFinalGate(
   signal?: AbortSignal,
 ): Promise<FinalGateRun> {
   const results: GateSuiteResult[] = [];
+  const notes: string[] = [];
   for (const suite of resolveFinalGateSuites(testTool)) {
-    results.push(await execFinalSuite(pi, cwd, suite, signal));
+    const first = await execFinalSuite(pi, cwd, suite, signal);
+    if (first.passed || signal?.aborted) {
+      results.push(first);
+      continue;
+    }
+    // Re-run the red suite once; no owned tests at final-gate level, and a
+    // foreign verdict is forced back to red (nothing downstream to defer to).
+    const outcome = await retryRedSuite(first, () => execFinalSuite(pi, cwd, suite, signal), []);
+    const verdict =
+      outcome.kind === "flaky" ? outcome.result : { ...outcome.result, passed: false };
+    results.push(verdict);
+    if (outcome.kind === "flaky" && outcome.note) notes.push(outcome.note);
   }
-  return { passed: results.every((r) => r.passed), suites: results };
+  return { passed: results.every((r) => r.passed), suites: results, notes };
 }
 
 /**
@@ -126,7 +146,12 @@ export async function runAndPersistFinalGate(
   signal?: AbortSignal,
 ): Promise<FinalGateResult> {
   const run = await runFinalGate(pi, cwd, state.testTool, signal);
-  const result: FinalGateResult = { ...run, at: new Date().toISOString() };
+  const { notes, ...rest } = run;
+  const result: FinalGateResult = {
+    ...rest,
+    at: new Date().toISOString(),
+    ...(notes.length > 0 ? { notes } : {}),
+  };
   state.finalGate = result;
   saveState(pi, state);
   return result;
