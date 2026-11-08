@@ -148,9 +148,7 @@ export async function runImplement(
             `${result.unitsRun} unit(s) run.`,
           "info",
         );
-        // B4: the loop has already set state.phase to idle and persisted it
-        // before returning; deliver the pinned completion report as an agent
-        // turn (explore pattern) so the outcome renders in RPC clients.
+        // B4: phase already idle; deliver the completion report as an agent turn for RPC clients.
         pi.sendUserMessage(composeCompletionReport(result, task), { deliverAs: "steer" });
         return result;
       }
@@ -164,18 +162,12 @@ export async function runImplement(
           `Run /implement again to resume from the first active behavior.`,
         "warning",
       );
-      // B5: the halt notification and lastHalt persistence already happened;
-      // additionally deliver the pinned halt report as an agent turn (explore
-      // pattern) so the outcome renders in RPC clients. state.phase stays
-      // implementing, so a later /implement resumes.
+      // B5: deliver the halt report as an agent turn; phase stays implementing for resume.
       pi.sendUserMessage(composeHaltReport(result), { deliverAs: "steer" });
       return result;
     })
-    .finally(() => {
-      // Cleared when the background task settles (complete, halt, or crash)
-      // so a later /implement resumes normally.
-      endOrchestration();
-    });
+    // Cleared on settle (complete, halt, or crash) so a later /implement resumes.
+    .finally(() => endOrchestration());
   beginOrchestration(settled);
   onBackground?.(settled);
   ctx.ui.notify(
@@ -243,8 +235,6 @@ async function runOrchestratedImplementSafely(
     state.lastHalt = lastHalt;
     saveState(pi, state);
     updateUi(state, ctx);
-    // No separate toast: runImplement's halt handoff already surfaces
-    // haltedOn/error plus the lastHalt persistence note and resume guidance.
     return {
       complete: false,
       unitsRun: 0,
