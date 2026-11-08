@@ -15,6 +15,7 @@ import { saveState } from "./state.ts";
 import { unfilteredArgv } from "./suite-scope.ts";
 import { gateTail } from "./test-gate-run.ts";
 import { retryRedSuite } from "./gate-retry.ts";
+import { extractFailingPaths } from "./full-gate-triage.ts";
 
 /** Per-suite verdicts of one final-gate run (timestamp added on persist). */
 export interface FinalGateRun {
@@ -99,6 +100,8 @@ async function execFinalSuite(
  * @param cwd      - Repository working directory.
  * @param testTool - The recorded test-tool wiring (fullSuites or suites).
  * @param signal   - Optional AbortSignal forwarded to every exec call.
+ * @param baseline - Optional failing test paths known red before the run;
+ *                   a twice-red suite whose failing paths all lie in it passes.
  * @returns The per-suite verdicts and the overall pass flag.
  */
 export async function runFinalGate(
@@ -106,7 +109,9 @@ export async function runFinalGate(
   cwd: string,
   testTool: TestToolInfo | undefined,
   signal?: AbortSignal,
+  baseline?: readonly string[],
 ): Promise<FinalGateRun> {
+  const base = new Set(baseline ?? []);
   const results: GateSuiteResult[] = [];
   const notes: string[] = [];
   for (const suite of resolveFinalGateSuites(testTool)) {
@@ -118,10 +123,18 @@ export async function runFinalGate(
     // Re-run the red suite once; no owned tests at final-gate level, and a
     // foreign verdict is forced back to red (nothing downstream to defer to).
     const outcome = await retryRedSuite(first, () => execFinalSuite(pi, cwd, suite, signal), []);
-    const verdict =
-      outcome.kind === "flaky" ? outcome.result : { ...outcome.result, passed: false };
-    results.push(verdict);
-    if (outcome.kind === "flaky" && outcome.note) notes.push(outcome.note);
+    if (outcome.kind === "flaky") {
+      results.push(outcome.result);
+      if (outcome.note) notes.push(outcome.note);
+      continue;
+    }
+    const paths = extractFailingPaths(outcome.result);
+    if (base.size > 0 && paths.length > 0 && paths.every((p) => base.has(p))) {
+      results.push({ ...outcome.result, passed: true });
+      notes.push(`baseline: ${suite.label} failures pre-existing at baseline: ${paths.join(", ")}`);
+      continue;
+    }
+    results.push({ ...outcome.result, passed: false });
   }
   return { passed: results.every((r) => r.passed), suites: results, notes };
 }
@@ -145,7 +158,7 @@ export async function runAndPersistFinalGate(
   state: WorkflowState,
   signal?: AbortSignal,
 ): Promise<FinalGateResult> {
-  const run = await runFinalGate(pi, cwd, state.testTool, signal);
+  const run = await runFinalGate(pi, cwd, state.testTool, signal, state.baselineFailures);
   const { notes, ...rest } = run;
   const result: FinalGateResult = {
     ...rest,

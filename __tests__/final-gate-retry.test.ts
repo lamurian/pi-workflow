@@ -102,6 +102,62 @@ describe("final-gate retry (R2a)", () => {
     );
   });
 
+  it("passes a twice-red suite whose failing paths are all in the baseline", async () => {
+    const pi = mockPi(() => ({
+      stdout: "",
+      stderr: "FAIL  __tests__/old.test.ts > suite > test",
+      code: 1,
+      killed: false,
+    }));
+    const run = await runFinalGate(pi, "/repo", { source: "detected", suites: [GO_SUITE] }, undefined, [
+      "__tests__/old.test.ts",
+    ]);
+    assert.equal(run.passed, true);
+    assert.equal(run.notes.length, 1);
+    assert.match(run.notes[0]!, /^baseline: /);
+    assert.match(run.notes[0]!, /__tests__\/old\.test\.ts/);
+  });
+
+  it("keeps a twice-red suite red when a path is outside the baseline or none parse", async () => {
+    const tool: TestToolInfo = { source: "detected", suites: [GO_SUITE] };
+    const outside = mockPi(() => ({
+      stdout: "",
+      stderr: "FAIL  __tests__/old.test.ts > a\nFAIL  __tests__/new.test.ts > b",
+      code: 1,
+      killed: false,
+    }));
+    const r1 = await runFinalGate(outside, "/repo", tool, undefined, ["__tests__/old.test.ts"]);
+    assert.equal(r1.passed, false);
+    const unparsed = mockPi(() => ({ stdout: "boom", stderr: "", code: 1, killed: false }));
+    const r2 = await runFinalGate(unparsed, "/repo", tool, undefined, ["__tests__/old.test.ts"]);
+    assert.equal(r2.passed, false);
+    const noBase = mockPi(() => ({
+      stdout: "",
+      stderr: "FAIL  __tests__/old.test.ts > a",
+      code: 1,
+      killed: false,
+    }));
+    assert.equal((await runFinalGate(noBase, "/repo", tool)).passed, false);
+  });
+
+  it("runAndPersistFinalGate forwards state.baselineFailures", async () => {
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "topic",
+      testTool: { source: "detected", suites: [GO_SUITE] },
+      baselineFailures: ["__tests__/old.test.ts"],
+    };
+    const pi = mockPi(() => ({
+      stdout: "",
+      stderr: "FAIL  __tests__/old.test.ts > a",
+      code: 1,
+      killed: false,
+    }));
+    const run = await runAndPersistFinalGate(pi, "/repo", state);
+    assert.equal(run.passed, true);
+    assert.match(state.finalGate?.notes?.[0] ?? "", /^baseline: /);
+  });
+
   it("reports an aborted run as not passed without a second exec for that suite", async () => {
     const controller = new AbortController();
     controller.abort();

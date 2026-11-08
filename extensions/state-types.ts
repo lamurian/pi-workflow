@@ -149,6 +149,11 @@ export interface WorkflowState {
    * commands and the project config hash. Optional: absent before first save.
    */
   runPlan?: RunPlan;
+  /**
+   * Repo-relative failing test paths recorded before implementation; the
+   * final gate tolerates twice-red suites failing only on these. Optional.
+   */
+  baselineFailures?: string[];
 }
 
 /** One recorded contract mutation by runSaveTask. */
