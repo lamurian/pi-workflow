@@ -19,6 +19,12 @@ describe("extractReportBlock", () => {
     expect(hasParseableReport(`See the ${F}json block below.\n${F}json\n{"summary":"x"}\n${F}`)).toBe(true);
   });
 
+  it("accepts a summary string containing a json fence", () => {
+    const t = `${F}json\n{"summary":"mentions ${F}json inline"}\n${F}`;
+    expect(extractReportBlock(t)?.summary).toBe(`mentions ${F}json inline`);
+    expect(hasParseableReport(t)).toBe(true);
+  });
+
   it("returns the last of two valid blocks", () => {
     const t = `${F}json\n{"summary":"first"}\n${F}\n${F}json\n{"summary":"second"}\n${F}`;
     expect(extractReportBlock(t)?.summary).toBe("second");

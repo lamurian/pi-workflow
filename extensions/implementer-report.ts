@@ -262,13 +262,12 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
  * @returns The parsed object, or undefined when missing, invalid, or lacking a string summary.
  */
 export function extractReportBlock(text: string): (Record<string, unknown> & { summary: string }) | undefined {
-  const start = text.lastIndexOf("```json");
-  if (start < 0) return undefined;
-  const body = text.slice(start + 7);
-  const end = body.indexOf("```");
-  if (end < 0) return undefined;
+  const re = /^```json[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*$/gm;
+  let body: string | undefined;
+  for (const m of text.matchAll(re)) body = m[1];
+  if (body === undefined) return undefined;
   try {
-    const parsed = JSON.parse(body.slice(0, end)) as unknown;
+    const parsed = JSON.parse(body) as unknown;
     if (typeof parsed !== "object" || parsed === null) return undefined;
     const rec = parsed as Record<string, unknown>;
     return typeof rec.summary === "string" ? (rec as Record<string, unknown> & { summary: string }) : undefined;
