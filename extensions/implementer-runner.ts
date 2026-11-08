@@ -4,6 +4,7 @@ import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
+import { REPORT_REMINDER_MESSAGE, reportReminderAction } from "./report-reminder.ts";
 
 /** One orchestrator unit: a behavior plus the task text handed to its subprocess. */
 export interface UnitTask {
@@ -50,18 +51,7 @@ export interface UnitRunnerOptions {
   keepAlive?: boolean;
 }
 
-/**
- * Check that a final assistant message contains a parseable JSON report
- * block (fenced ```json with a string `summary`).
- *
- * Mirrors parseImplementerReport's success criterion: a missing, broken,
- * or summary-less block means the unit did not comply with the mandatory
- * report format — even though parseImplementerReport tolerantly falls
- * back to the whole message text.
- *
- * @param text - Final assistant message text (may be empty).
- * @returns True when a valid report block exists.
- */
+/** Re-export: true when a final assistant message holds a valid JSON report block. */
 export { hasParseableReport };
 
 /**
@@ -158,6 +148,7 @@ export async function runImplementerUnitWithClient(
   // T3: activity flags for the fail-fast dead-run decision (B2).
   let toolActivitySeen = false;
   let assistantText = "";
+  let reminderSent = false;
   let deadRun: { message?: string } | undefined; // fail-fast abort; provider message when known
 
   let settleWait: () => void = () => {};
@@ -193,7 +184,13 @@ export async function runImplementerUnitWithClient(
     if (decision.abort) {
       deadRun = { message: decision.providerMessage };
       settleWait();
+      return;
     }
+    const action = reportReminderAction(event, { reportSeen, reminderSent });
+    if (action === "remind") {
+      reminderSent = true;
+      client.prompt(REPORT_REMINDER_MESSAGE, "steer");
+    } else if (action === "settle") settleWait();
   });
   const unsubExit = client.onExit((info) => {
     exitCode = info.code;
