@@ -206,14 +206,14 @@ export async function runImplementerUnitWithClient(
   const progressTimer =
     timeoutMs > 0
       ? setTimeout(
-          () => client.steer(PROGRESS_STEER_MESSAGE),
+          () => client.prompt(PROGRESS_STEER_MESSAGE, "steer"),
           Math.floor(timeoutMs * PROGRESS_CHECK_RATIO),
         )
       : undefined;
   const softTimer =
     timeoutMs > 0
       ? setTimeout(
-          () => client.steer(WRAP_UP_STEER_MESSAGE),
+          () => client.prompt(WRAP_UP_STEER_MESSAGE, "steer"),
           Math.floor(timeoutMs * SOFT_DEADLINE_RATIO),
         )
       : undefined;

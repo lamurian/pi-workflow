@@ -320,13 +320,17 @@ function stubClient(stderr = "") {
   const eventListeners = new Set<(event: Record<string, unknown>) => void>();
   const exitListeners = new Set<(info: { code: number }) => void>();
   const steers: string[] = [];
+  const steerPrompts: string[] = [];
   let raw = "";
   let alive = true;
   return {
     steers,
+    steerPrompts,
     send: () => {},
     command: async () => ({ type: "response", success: false, id: "" }),
-    prompt: (_message: string) => {},
+    prompt: (message: string, streamingBehavior?: string) => {
+      if (streamingBehavior === "steer") steerPrompts.push(message);
+    },
     steer: (message: string) => {
       steers.push(message);
     },
@@ -386,20 +390,21 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     const client = stubClient();
     const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
     await vi.advanceTimersByTimeAsync(499);
-    assert.equal(client.steers.length, 0, "no steer before the 50% mark");
+    assert.equal(client.steerPrompts.length, 0, "no steer before the 50% mark");
     await vi.advanceTimersByTimeAsync(1);
-    assert.deepEqual(client.steers, [PROGRESS_STEER_MESSAGE], "progress steer at 500ms");
+    assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE], "progress steer at 500ms");
     await vi.advanceTimersByTimeAsync(299);
-    assert.equal(client.steers.length, 1, "no wrap-up before the 80% mark");
+    assert.equal(client.steerPrompts.length, 1, "no wrap-up before the 80% mark");
     await vi.advanceTimersByTimeAsync(1);
-    assert.deepEqual(client.steers, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 800ms");
-    assert.match(client.steers[1]!, /status/, "the steer names the status field");
-    assert.match(client.steers[1]!, /partial/, "the steer asks for status partial");
+    assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 800ms");
+    assert.match(client.steerPrompts[1]!, /status/, "the steer names the status field");
+    assert.match(client.steerPrompts[1]!, /partial/, "the steer asks for status partial");
     await vi.advanceTimersByTimeAsync(201); // hard kill at 1000ms
     const res = await promise;
     assert.equal(res.timedOut, true, "the hard kill still yields timedOut=true");
     assert.match(res.error ?? "", /timed out after 1000ms/);
-    assert.equal(client.steers.length, 2, "each steer fires exactly once");
+    assert.equal(client.steerPrompts.length, 2, "each steer fires exactly once");
+    assert.equal(client.steers.length, 0, "timed messages never use client.steer");
   });
 
   it("does not steer when timeoutMs is 0", async () => {
@@ -408,7 +413,7 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     const client = stubClient();
     const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 0 });
     await vi.advanceTimersByTimeAsync(10_000);
-    assert.equal(client.steers.length, 0, "no timers armed without a budget");
+    assert.equal(client.steerPrompts.length, 0, "no timers armed without a budget");
     client.emitAssistant("done.\n```json\n{\"summary\": \"ok\"}\n```");
     await promise;
   });
@@ -424,7 +429,7 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     assert.equal(res.summary, "ok");
     assert.equal(res.timedOut, undefined);
     await vi.advanceTimersByTimeAsync(2_000); // timers cleared on completion
-    assert.equal(client.steers.length, 0, "no steer when the report beats the deadline");
+    assert.equal(client.steerPrompts.length, 0, "no steer when the report beats the deadline");
   });
 
   it("clears the soft timer on abort (no steer after the unit is aborted)", async () => {
@@ -441,7 +446,7 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     const res = await promise;
     assert.equal(res.timedOut, true, "an abort takes the kill path");
     await vi.advanceTimersByTimeAsync(2_000);
-    assert.equal(client.steers.length, 0, "the soft timer must not steer after abort");
+    assert.equal(client.steerPrompts.length, 0, "the soft timer must not steer after abort");
   });
 });
 
