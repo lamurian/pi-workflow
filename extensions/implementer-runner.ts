@@ -1,5 +1,5 @@
 import { getImplementerTimeoutMs } from "./process-utils.ts";
-import { lastAssistantText, parseImplementerReport, shouldAbortDeadRun, buildDeadRunError, type ImplementerReport } from "./implementer-report.ts";
+import { hasParseableReport, lastAssistantText, parseImplementerReport, shouldAbortDeadRun, buildDeadRunError, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
@@ -62,16 +62,7 @@ export interface UnitRunnerOptions {
  * @param text - Final assistant message text (may be empty).
  * @returns True when a valid report block exists.
  */
-export function hasParseableReport(text: string): boolean {
-  const match = text.match(/```json\s*([\s\S]*?)```/);
-  if (!match) return false;
-  try {
-    const parsed = JSON.parse(match[1]!) as Record<string, unknown>;
-    return typeof parsed.summary === "string";
-  } catch {
-    return false;
-  }
-}
+export { hasParseableReport };
 
 /**
  * Run one implementer unit subprocess and parse its structured report.

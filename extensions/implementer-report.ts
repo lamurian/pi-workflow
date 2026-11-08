@@ -228,11 +228,8 @@ function parseReportFindings(raw: unknown): string[] | undefined {
 export function parseImplementerReport(stdout: string): ImplementerReport {
   const text = lastAssistantText(stdout);
   if (!text) return { summary: "" };
-  const jsonMatch = text.match(/```json\s*([\s\S]*?)```/);
-  if (jsonMatch) {
-    try {
-      const parsed = JSON.parse(jsonMatch[1]!) as Record<string, unknown>;
-      if (typeof parsed.summary === "string") {
+  const parsed = extractReportBlock(text);
+  if (parsed) {
         const blockedCommands = parseBlockedCommands(parsed.blockedCommands);
         const status = parseReportStatus(parsed.status);
         const findings = parseReportFindings(parsed.findings);
@@ -254,11 +251,39 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
             ? { alreadySatisfied: parsed.alreadySatisfied }
             : {}),
         };
-      }
-    } catch {
-      // Broken JSON block — fall through to whole-message summary.
-    }
   }
   return { summary: text.trim() };
+}
+
+/**
+ * Parse the LAST fenced ```json block in a message.
+ *
+ * @param text - Assistant message text.
+ * @returns The parsed object, or undefined when missing, invalid, or lacking a string summary.
+ */
+export function extractReportBlock(text: string): (Record<string, unknown> & { summary: string }) | undefined {
+  const start = text.lastIndexOf("```json");
+  if (start < 0) return undefined;
+  const body = text.slice(start + 7);
+  const end = body.indexOf("```");
+  if (end < 0) return undefined;
+  try {
+    const parsed = JSON.parse(body.slice(0, end)) as unknown;
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const rec = parsed as Record<string, unknown>;
+    return typeof rec.summary === "string" ? (rec as Record<string, unknown> & { summary: string }) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Check that a message contains a parseable final JSON report block.
+ *
+ * @param text - Final assistant message text.
+ * @returns True when a valid report block exists.
+ */
+export function hasParseableReport(text: string): boolean {
+  return extractReportBlock(text) !== undefined;
 }
 
