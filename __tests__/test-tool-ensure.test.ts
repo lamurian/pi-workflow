@@ -744,15 +744,23 @@ describe("dogfood: pi-workflow's own generated test extension (T5)", () => {
     );
   });
 
-  it(".pi/extensions/test.ts exists and equals generateTestExtension output for that suite", () => {
-    const detection = detectTestSuites(projectFacts(repoRoot));
+  it(".pi/extensions/test.ts exists and equals generateTestExtension output for the repo's resolved (config-aware) suites", () => {
+    const config = JSON.parse(
+      readFileSync(join(repoRoot, ".pi", "workflow.json"), "utf8"),
+    ) as Parameters<typeof detectTestSuites>[1];
+    const detection = detectTestSuites(projectFacts(repoRoot), config);
+    assert.equal(detection.source, "config", "the repo's .pi/workflow.json drives the suites");
+    assert.deepEqual(
+      detection.suites.map((s) => s.label),
+      ["config (npx vitest run {tests})", "config (npm run typecheck)"],
+    );
     const file = join(repoRoot, ".pi", "extensions", "test.ts");
     assert.ok(existsSync(file), ".pi/extensions/test.ts must exist in pi-workflow itself (dogfood)");
     const content = readFileSync(file, "utf8");
     assert.equal(
       content,
       generateTestExtension(detection.suites),
-      "the dogfooded file must equal the generator output for the repo's detected suite",
+      "the dogfooded file must equal the generator output for the repo's resolved (config-aware) suites",
     );
     assert.ok(content.includes(GENERATED_MARKER), "the marker guards regeneration");
     assert.equal(resolveTestExtensionPath(repoRoot), file, "resolution finds the repo's file");
