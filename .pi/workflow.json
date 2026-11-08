@@ -1,5 +1,35 @@
 {
   "finalize": {
     "maxTaskBytes": 262144
+  },
+  "implement": {
+    "tests": {
+      "scoped": [
+        {
+          "argv": [
+            "npx",
+            "vitest",
+            "run",
+            "{tests}"
+          ],
+          "scope": "files"
+        },
+        {
+          "argv": [
+            "npm",
+            "run",
+            "typecheck"
+          ],
+          "scope": "full"
+        }
+      ],
+      "full": [
+        [
+          "npm",
+          "run",
+          "test"
+        ]
+      ]
+    }
   }
 }
