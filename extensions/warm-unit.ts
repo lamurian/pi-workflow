@@ -17,6 +17,7 @@ import { truncateAttemptText } from "./halt-report.ts";
 import { classifyAttemptOutcome } from "./halt-diagnosis.ts";
 import { readGitHead } from "./git-ops.ts";
 import { saveState, updateUi } from "./state.ts";
+import { setTaskStatus } from "./task-status.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { openVerificationPause, type PauseOutcome } from "./hitl-pause.ts";
 
@@ -253,6 +254,7 @@ export interface BehaviorCompletionDeps {
 export async function completeAlreadySatisfied(deps: BehaviorCompletionDeps): Promise<void> {
   const { pi, ctx, state, behavior, result, position, client } = deps;
   behavior.status = "done";
+  setTaskStatus(state, behavior.id, "done");
   await shutdownWarmChild(client);
   result.satisfiedWithoutCommit.push(behavior.id);
   ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): already satisfied`);
@@ -270,6 +272,7 @@ export async function completeAlreadySatisfied(deps: BehaviorCompletionDeps): Pr
 export async function completeLeftUncommitted(deps: BehaviorCompletionDeps): Promise<void> {
   const { pi, ctx, state, behavior, result, position, client } = deps;
   behavior.status = "done";
+  setTaskStatus(state, behavior.id, "done");
   await shutdownWarmChild(client);
   result.leftUncommitted!.push({ behaviorId: behavior.id, sourceFile: behavior.sourceFile! });
   ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): done (left uncommitted)`);

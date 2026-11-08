@@ -867,6 +867,21 @@ describe("unit payload and slice task text (T5)", () => {
   });
 });
 
+// ═══ setTaskStatus routing ═══
+describe("warm-unit completion status", () => {
+  it("completeAlreadySatisfied marks the task done in state.contractV2", async () => {
+    const { completeAlreadySatisfied } = await import("../extensions/warm-unit.ts");
+    const state = warmTask();
+    state.contractV2 = {
+      title: "Warm Task", instruction: "x", done: "y", sources: [], tests: [],
+      tasks: [{ id: "T1", description: "x", expectedOutput: ["y"], status: "active" }],
+    };
+    const result = { complete: false, unitsRun: 1, landedCommits: [], satisfiedWithoutCommit: [] } as OrchestratorResult;
+    await completeAlreadySatisfied({ pi: mockPi(), ctx: ctxWithState(state), state, behavior: state.task!.behaviors[0]!, result, position: "1/1" });
+    assert.equal(state.contractV2.tasks[0]!.status, "done");
+  });
+});
+
 // ═══ File-size guard ═══
 describe("behavior-loop size", () => {
   it("behavior-loop.ts is at most 300 lines", () => {

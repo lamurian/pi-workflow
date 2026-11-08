@@ -181,6 +181,25 @@ describe("runOrchestratedImplement: alreadySatisfied marks done without a commit
     assert.equal(state.task!.behaviors[0]!.status, "done", "the behavior is done via the commit");
     assert.equal(spawns.length, 1, "no retry once the commit lands");
   });
+
+  it("a green scope gate landing marks the task done in state.contractV2", async () => {
+    const pi = execRecordingPi(" M src/a.ts");
+    const state: WorkflowState = {
+      phase: "implementing",
+      specText: "topic",
+      task: singleBehaviorTask(),
+      contractV2: {
+        title: "Code Task", instruction: "do things", done: "all green",
+        sources: [{ path: "src/a.ts", status: "M", tasks: ["T1"] }], tests: [],
+        tasks: [{ id: "T1", description: "first behavior", expectedOutput: ["e1"], status: "active" }],
+      },
+    };
+    const result = await runOrchestratedImplement(pi, ctxWithState(state), state, state.task!, async () => ({
+      summary: "done", suggestedCommit: "feat(core): add first behavior",
+    }));
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.equal(state.contractV2!.tasks[0]!.status, "done");
+  });
 });
 
 // ─── completion report ────────────────────────────────────────────────────────

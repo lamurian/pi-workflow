@@ -3,7 +3,7 @@ import { saveState, updateUi, type WorkflowState, type TaskContract, type Pendin
 import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
 import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts"; import { splitOrHalt, runSplitChild, type SplitTrigger } from "./split-planner.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
-import type { AttemptRecord } from "./halt-report.ts";
+import type { AttemptRecord } from "./halt-report.ts"; import { setTaskStatus } from "./task-status.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import { RETRY_BUDGET, buildFixTask, retryExhaustedDetail } from "./commit-gate.ts";
 import { relayImplementerEvent } from "./implementer-activity.ts";
@@ -132,7 +132,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       result.cancelled = true; ctx.ui.setStatus("implement", undefined);
       return result;
     }
-    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("unit-blocked"); if (attempt.blockedReason === "too-large") { const r = await trySplit("too-large", blockedText); if (r) return r; behavior.status = "done"; return undefined; } return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
+    const blockedText = blockedHaltText(behavior.id, attempt); if (blockedText) { recorder.sealLast("unit-blocked"); if (attempt.blockedReason === "too-large") { const r = await trySplit("too-large", blockedText); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; } return haltWithChild(behavior.id, blockedText); } // T12: blocked halts at once — no retry, no continuation.
     // T6: partial reports and timed-out attempts never reach the commit gate — their work stays uncommitted for a continuation unit.
     if (!attempt.missingReport && isPartialAttempt(attempt)) {
       const progressed = attemptProgress;
@@ -142,7 +142,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         // T7: repeated identical timeouts/partial reports waste hours — halt with an actionable diagnosis instead of burning retries.
         return haltWithChild(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
       }
-      if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; return undefined; } // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
+      if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; } // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
@@ -239,7 +239,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       }
       await shutdownWarmChild(liveChild); liveChild = undefined; // T5: landing ends the behavior — no live child survives it
       landedCommits.push(subject);
-      behavior.status = "done";
+      behavior.status = "done"; setTaskStatus(state, behavior.id, "done");
       if (pauseOutcome?.timedOut) {
         const check: PendingManualCheck = { behaviorId: behavior.id, description: behavior.description };
         state.pendingManualChecks = [...(state.pendingManualChecks ?? []), check];
