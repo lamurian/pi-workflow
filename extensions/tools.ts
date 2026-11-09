@@ -16,6 +16,5 @@ export const DISCUSS_BLOCKED_TOOLS: readonly string[] = [
   "expand_bullet_points",
   "standardize_frontmatter",
   "commit_changes",
-  "commit_amend",
   "run_precommit_check",
 ];

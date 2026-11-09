@@ -8,7 +8,7 @@ import { DISCUSS_BLOCKED_TOOLS } from "../extensions/tools.ts";
 // ═══════════════════════════════════════════════════════════════════════════════
 
 describe("DISCUSS_BLOCKED_TOOLS", () => {
-  it("deny-lists write, edit, PARA mutators and commit tools", () => {
+  it("deny-lists write, edit, PARA mutators, commit_changes and run_precommit_check", () => {
     const expected = [
       "write",
       "edit",
@@ -18,7 +18,7 @@ describe("DISCUSS_BLOCKED_TOOLS", () => {
       "expand_bullet_points",
       "standardize_frontmatter",
       "commit_changes",
-      "commit_amend",
+      "run_precommit_check",
     ];
     for (const name of expected) {
       assert.ok(
@@ -26,6 +26,13 @@ describe("DISCUSS_BLOCKED_TOOLS", () => {
         `${name} should be in the deny list`,
       );
     }
+  });
+
+  it("no longer deny-lists commit_amend", () => {
+    assert.ok(
+      !DISCUSS_BLOCKED_TOOLS.includes("commit_amend"),
+      "commit_amend should not be in the deny list",
+    );
   });
 
   it("is a flat list of tool names", () => {
