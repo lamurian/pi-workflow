@@ -110,7 +110,7 @@ describe("save_task per-task commit field", () => {
     const shared = "feat(shared): same message";
     const { res } = await save([
       { id: "T1", description: "x", expectedOutput: ["y"], commit: shared },
-      { id: "T2", description: "z", expectedOutput: ["w"], status: "removed", commit: shared },
+      { id: "T2", description: "z", expectedOutput: ["inspect: the removed task keeps the shared commit"], status: "removed", commit: shared },
     ]);
     assert.equal(res.ok, true, res.text);
   });
@@ -119,7 +119,7 @@ describe("save_task per-task commit field", () => {
     const commit = "feat(save-task): add per-task commit field";
     const { state, res } = await save([
       { id: "T1", description: "x", expectedOutput: ["y"], commit },
-      { id: "T2", description: "z", expectedOutput: ["w"], commit: "fix(save): distinct message" },
+      { id: "T2", description: "z", expectedOutput: ["inspect: the distinct commit lands on the saved task"], commit: "fix(save): distinct message" },
     ]);
     assert.equal(res.ok, true, res.text);
     assert.equal(state.contractV2?.tasks[0]?.commit, commit);
