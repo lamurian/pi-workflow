@@ -4,6 +4,11 @@ import { loadState } from "./state.ts";
 import { runContractScan } from "./contract-scan.ts";
 import { runSaveTask } from "./save-task-core.ts";
 import { loadContent } from "./utils.ts";
+import {
+  renderContractView,
+  renderSaveTaskCall,
+  renderSaveTaskResult,
+} from "./contract-view.ts";
 
 export { runContractScan };
 
@@ -95,6 +100,11 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
       { additionalProperties: true },
     ),
 
+    // T11: the readable contract view rides the result details and the
+    // render slots — the model-facing content text stays untouched.
+    renderCall: (args) => renderSaveTaskCall(args),
+    renderResult: (result) => renderSaveTaskResult(result),
+
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const state = loadState(ctx);
       const res = await runSaveTask(state, params as Record<string, unknown>, {
@@ -102,9 +112,13 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
         pi,
         ctx,
       });
+      const view = res.ok && state?.contractV2 ? renderContractView(state.contractV2) : undefined;
+      if (view !== undefined && ctx.mode === "rpc") {
+        ctx.ui.notify(view, "info");
+      }
       return {
         content: [{ type: "text", text: res.text }],
-        details: {},
+        details: view !== undefined ? { contractView: view } : {},
         ...(res.ok ? {} : { isError: true }),
       };
     },
