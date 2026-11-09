@@ -7,11 +7,7 @@
 import { readFileSync } from "node:fs";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-
-/** Max characters of output kept in the result tail. */
-const TAIL_CHARS = 4000;
-/** Default command timeout in milliseconds. */
-const DEFAULT_TIMEOUT_MS = 600_000;
+import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "../test-extension-constants.ts";
 
 /** Tool result shape returned by the run tool. */
 interface RunResult {
@@ -82,14 +78,24 @@ export function createRunTool(
       }
       const args = argv as string[];
       const cwd = typeof payload.repoRoot === "string" && payload.repoRoot ? payload.repoRoot : ctx.cwd;
+      // Same budget rule as the test tool: PI_TEST_TIMEOUT_MS wins when it is
+      // a positive number, otherwise DEFAULT_SUITE_TIMEOUT_MS.
+      const timeoutRaw = Number(env.PI_TEST_TIMEOUT_MS);
+      const timeout = Number.isFinite(timeoutRaw) && timeoutRaw > 0
+        ? timeoutRaw
+        : DEFAULT_SUITE_TIMEOUT_MS;
       let result: { stdout: string; stderr: string; code: number; killed?: boolean };
       try {
-        result = await pi.exec(args[0] as string, args.slice(1), { cwd, timeout: DEFAULT_TIMEOUT_MS });
+        result = await pi.exec(args[0] as string, args.slice(1), { cwd, timeout });
       } catch (err) {
         return say(`## ${name}\nspawn failed: ${String((err as Error)?.message ?? err)}`, true);
       }
       const joined = [result.stdout, result.stderr].filter(Boolean).join("\n");
-      const out = joined.slice(-TAIL_CHARS) || "(no output)";
+      const capped =
+        joined.length > OUTPUT_TAIL_CHARS
+          ? "\u2026" + joined.slice(-OUTPUT_TAIL_CHARS)
+          : joined;
+      const out = capped || "(no output)";
       const ok = result.code === 0 && !result.killed;
       return say(`## ${name}\nexit ${result.code}${result.killed ? " (killed)" : ""}\n${out}`, !ok);
     },

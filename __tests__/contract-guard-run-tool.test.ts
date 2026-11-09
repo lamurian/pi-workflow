@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createRunTool } from "../extensions/contract-guard/run-tool.ts";
 import { createContractGuardExtension, guardToolCall } from "../extensions/contract-guard/index.ts";
+import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "../extensions/test-extension-constants.ts";
 
 function payloadFile(): string {
   const dir = mkdtempSync(join(tmpdir(), "run-tool-"));
@@ -58,5 +59,59 @@ describe("contract-guard run tool", () => {
     createContractGuardExtension({})(pi as never);
     expect(names).toEqual(expect.arrayContaining(["delete_file", "run"]));
     expect(await guardToolCall({}, { toolName: "run", input: { name: "x" } })).toBeUndefined();
+  });
+
+  it("exec timeout follows PI_TEST_TIMEOUT_MS when it is a positive number", async () => {
+    const exec = vi.fn().mockResolvedValue({ stdout: "ok", stderr: "", code: 0, killed: false });
+    const tool = createRunTool({ exec } as never, {
+      PI_UNIT_FILE: payloadFile(),
+      PI_TEST_TIMEOUT_MS: "1234",
+    });
+    await tool.execute("id", { name: "lint" }, undefined, undefined, ctx);
+    expect(exec).toHaveBeenCalledWith(
+      "npm",
+      ["run", "lint"],
+      expect.objectContaining({ cwd: "/repo", timeout: 1234 }),
+    );
+  });
+
+  it("exec timeout falls back to DEFAULT_SUITE_TIMEOUT_MS when PI_TEST_TIMEOUT_MS is unset or not a positive number", async () => {
+    const envs = [
+      { PI_UNIT_FILE: payloadFile() },
+      { PI_UNIT_FILE: payloadFile(), PI_TEST_TIMEOUT_MS: "0" },
+      { PI_UNIT_FILE: payloadFile(), PI_TEST_TIMEOUT_MS: "abc" },
+    ];
+    for (const env of envs) {
+      const exec = vi.fn().mockResolvedValue({ stdout: "ok", stderr: "", code: 0, killed: false });
+      const tool = createRunTool({ exec } as never, env);
+      await tool.execute("id", { name: "lint" }, undefined, undefined, ctx);
+      expect(exec).toHaveBeenCalledWith(
+        "npm",
+        ["run", "lint"],
+        expect.objectContaining({ cwd: "/repo", timeout: DEFAULT_SUITE_TIMEOUT_MS }),
+      );
+    }
+  });
+
+  it("caps long output at OUTPUT_TAIL_CHARS with a leading ellipsis; short output unchanged", async () => {
+    const filler = "A".repeat(OUTPUT_TAIL_CHARS);
+    const exec = vi.fn().mockResolvedValue({
+      stdout: "x".repeat(100) + filler,
+      stderr: "",
+      code: 0,
+      killed: false,
+    });
+    const tool = createRunTool({ exec } as never, { PI_UNIT_FILE: payloadFile() });
+    const long = await tool.execute("id", { name: "lint" }, undefined, undefined, ctx);
+    const longText = long.content[0]?.text ?? "";
+    expect(longText).toContain(`\n…${filler}`);
+    expect(longText.endsWith(filler)).toBe(true);
+
+    const shortExec = vi.fn().mockResolvedValue({ stdout: "tiny", stderr: "", code: 0, killed: false });
+    const shortTool = createRunTool({ exec: shortExec } as never, { PI_UNIT_FILE: payloadFile() });
+    const short = await shortTool.execute("id", { name: "lint" }, undefined, undefined, ctx);
+    const shortText = short.content[0]?.text ?? "";
+    expect(shortText).toContain("tiny");
+    expect(shortText).not.toContain("…");
   });
 });
