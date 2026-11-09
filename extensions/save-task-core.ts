@@ -14,6 +14,8 @@ import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.
 import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
 import { detectTestSuites, projectFacts } from "./test-tool-detect.ts";
 import { ensureTestTool } from "./test-tool-ensure.ts";
+import { commitTestExtensionChore } from "./test-extension-chore.ts";
+import { TEST_EXTENSION_RELATIVE } from "./test-extension-constants.ts";
 import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
 import { runContractScan } from "./contract-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
@@ -181,6 +183,14 @@ export async function runSaveTask(
   const behaviorWarnings = state.task.behaviors.flatMap(collectBehaviorWarnings);
   const detection = await detectTestSuites(projectFacts(ctx.cwd), workflow);
   const ensured = await ensureTestTool(pi, ctx.cwd, detection);
+  // T12: a generated/regenerated extension is auto-committed as the sole
+  // signed-off chore commit (path-limited: other staged work stays staged).
+  let choreNote = "";
+  if (ensured.path !== undefined) {
+    const chore = await commitTestExtensionChore(pi, ctx.cwd, TEST_EXTENSION_RELATIVE);
+    choreNote = `\nTest extension chore commit: ${chore.kind}`;
+    if (chore.investigation) choreNote += `\n${chore.investigation}`;
+  }
   const { source, suites, fullSuites } = ensured;
   state.testTool = { source, suites, fullSuites };
   state.runPlan = await buildRunPlan(ctx.cwd, suites, fullSuites, workflow?.implement?.commands);
@@ -215,6 +225,7 @@ export async function runSaveTask(
     "Task saved. Phase: finalizing (read-only). " +
     "Wait for the user to run /implement once the contract is approved.";
   if (reportPath !== null) text += `\nFull scan report (uncapped): ${reportPath}`;
+  if (choreNote !== "") text += choreNote;
   if (prevDigest !== undefined) {
     if (scan === null) text += "\n\nNote: scan unavailable — apply judgment from the discussion.";
     text += `\n${ensured.message}`;
