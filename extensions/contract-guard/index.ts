@@ -15,14 +15,16 @@
  * - fails closed (all mutating tools blocked) when the guard file is
  *   missing or invalid.
  *
- * It also registers the `delete_file` tool: unlink a declared-D file from
- * disk; missing files surface as isError results.
+ * It also registers the `delete_file` tool (unlink a declared-D file; missing
+ * files surface as isError results) and the `run` tool (pinned payload
+ * commands; the tool enforces its own allowlist, so `run` passes the hook).
  */
 
 import { readFileSync, unlinkSync } from "node:fs";
 import { resolve } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createRunTool } from "./run-tool.ts";
 import { checkToolAction, type DeclaredFile } from "../contract-guard-core.ts";
 
 /** Validated guard payload (subset of the JSON file's fields). */
@@ -45,7 +47,7 @@ interface ToolCallLike {
 
 /** Tools that never touch files and always pass the guard (`test` is the
  * generated local test extension — allowed so bash-free units can verify). */
-const PASSTHROUGH_TOOLS = new Set(["read", "grep", "find", "ls", "test"]);
+const PASSTHROUGH_TOOLS = new Set(["read", "grep", "find", "ls", "test", "run"]);
 /** Tools checked against the contract's file allowlist. */
 const MUTATING_TOOLS = new Set(["write", "edit", "delete_file"]);
 /** Fail-closed reason: must mention "missing or invalid" per contract. */
@@ -206,7 +208,7 @@ export async function guardToolCall(
     block: true,
     reason:
       `Blocked: tool "${toolName || "(unknown)"}" is not available to this ` +
-      "unit — only read, grep, find, ls, the test tool, and the declared-file " +
+      "unit — only read, grep, find, ls, the test and run tools, and the declared-file " +
       "mutations write, edit and delete_file are granted.",
   };
 }
@@ -258,6 +260,7 @@ export function createContractGuardExtension(
   return (pi: ExtensionAPI) => {
     pi.on("tool_call", async (event) => guardToolCall(env, event as ToolCallLike));
     pi.registerTool(deleteFileTool);
+    pi.registerTool(createRunTool(pi, env));
   };
 }
 
