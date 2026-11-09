@@ -185,6 +185,9 @@ export function validateTaskUnit(
         `(one per assertion)`,
     };
   }
+  if (t.commit !== undefined && (typeof t.commit !== "string" || t.commit.trim() === "")) {
+    return { ok: false, reason: `tasks[${i}].commit must be a non-empty string when present` };
+  }
   const status = t.status === "done" || t.status === "removed" ? t.status : "active";
   return {
     ok: true,
@@ -193,6 +196,7 @@ export function validateTaskUnit(
       description: t.description,
       expectedOutput: [...(expected as string[])],
       status,
+      ...(typeof t.commit === "string" ? { commit: t.commit } : {}),
     },
   };
 }

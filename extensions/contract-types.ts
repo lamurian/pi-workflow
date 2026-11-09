@@ -77,6 +77,12 @@ export interface TaskUnit {
   status: TaskStatus;
   /** Command names the task needs; each must be declared in implement.commands. */
   commands?: string[];
+  /**
+   * Optional commit message for the task, in conventional
+   * `type(scope): description` form, single line, <=75 chars, unique per
+   * non-removed task, and never containing a declared task id.
+   */
+  commit?: string;
 }
 
 /** The normalized v2 contract: the path lists are the single source of truth. */

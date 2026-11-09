@@ -8,6 +8,7 @@ import type { ContractV2 } from "./contract-types.ts";
 import { buildSplitContract } from "./contract-split.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
 import { checkTaskBreadth } from "./contract-breadth.ts";
+import { checkTaskCommitRules } from "./commit-message.ts";
 import { checkTaskSizing, resolveSizingLimits } from "./contract-sizing.ts";
 import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
 import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
@@ -110,6 +111,8 @@ async function checkSharedRules(
       }
     }
   }
+  const commitError = checkTaskCommitRules(contract.tasks);
+  if (commitError !== null) return `save_task rejected: ${commitError}`;
   const tooBroad = checkTaskBreadth(contract, resolveMaxPathsPerTask(workflow));
   if (tooBroad !== null) return `save_task rejected: ${tooBroad}`;
   const sizing = checkTaskSizing(contract, cwd, resolveSizingLimits(workflow));
