@@ -532,7 +532,7 @@ describe("T9: implement-start test extension chore commit", () => {
     );
     assert.ok(choreCommit >= 0, `the chore commit lands with subject "${TEST_EXTENSION_CHORE_SUBJECT}"`);
     assert.deepEqual(execLog[choreCommit]!.args, [
-      "commit", "--only", "-m", "chore: regenerate test extension", "--", ".pi/extensions/test.ts",
+      "commit", "-m", "chore: regenerate test extension", "--signoff", "--only", "--", ".pi/extensions/test.ts",
     ]);
     assert.ok(spawnIdx > choreCommit, "the chore commit lands before the first unit spawns");
 
@@ -594,7 +594,7 @@ describe("T9: implement-start test extension chore commit", () => {
     assert.equal(state.lastHalt?.diagnosis, "the run halted before any unit started", "persisted to lastHalt");
   });
 
-  it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by git-commit-gate.ts (commitAndGate) and test-extension-chore.ts (the T9 chore commit), one call site each", async () => {
+  it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by commit-core.ts (buildCommitArgs) and git-commit-gate.ts (commitAndGate), one call site each", async () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
     const collect = (dir: string): string[] => {
       const files: string[] = [];
@@ -610,8 +610,8 @@ describe("T9: implement-start test extension chore commit", () => {
       .map((file) => relative(extDir, file).split(sep).join("/"));
     assert.deepEqual(
       offenders.sort(),
-      ["git-commit-gate.ts", "test-extension-chore.ts"],
-      "only the commit gate and the chore-commit module may invoke git commit",
+      ["commit-core.ts", "git-commit-gate.ts"],
+      "only the shared commit core and the commit gate may invoke git commit",
     );
     for (const file of offenders) {
       const text = readFileSync(join(extDir, file), "utf8");

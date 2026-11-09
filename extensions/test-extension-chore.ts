@@ -1,12 +1,14 @@
 // The sole orchestrator-authored chore commit: the regenerated test extension.
 // Path-limited (`git commit --only -- <path>`): other staged work — e.g. left
 // over by a halted unit attempt — never blocks it and is never swept in.
-// Also hosts the shared single-path commit mechanics (re-exported by scoped-commit.ts)
-// so git commit has exactly one call site outside git-commit-gate.ts.
+// Also hosts the shared single-path commit mechanics (re-exported by scoped-commit.ts);
+// the commit argv itself is built and run by commit-core.ts, so every commit is
+// signed off and git commit has exactly one call site there.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { runCommit } from "./commit-core.ts";
 import { TEST_EXTENSION_PATH } from "./contract-guard-core.ts";
-import { getCommitTimeoutMs, readGitHead } from "./git-ops.ts";
+import { readGitHead } from "./git-ops.ts";
 
 /** Subject of the sole orchestrator-authored chore commit: the regenerated test extension. */
 export const TEST_EXTENSION_CHORE_SUBJECT = "chore: regenerate test extension";
@@ -64,10 +66,7 @@ export async function commitScopedPath(
     const changed = await pathChanged(pi, cwd, path);
     if (typeof changed === "string") return { kind: "failed", investigation: changed };
     if (!changed) return { kind: "skipped", investigation: "" };
-    const res = await pi.exec("git", ["commit", "--only", "-m", subject, "--", path], {
-      cwd,
-      timeout: getCommitTimeoutMs(),
-    });
+    const res = await runCommit(pi, cwd, subject, undefined, [path]);
     const headAfter = await readGitHead(pi, cwd);
     if (headBefore !== null && headAfter !== null && headAfter !== headBefore) {
       return { kind: "landed", investigation: "" };

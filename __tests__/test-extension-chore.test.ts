@@ -71,6 +71,11 @@ describe("commitTestExtensionChore (bug 2)", () => {
 
     assert.equal(result.kind, "landed", result.investigation);
     assert.equal(gitIn("log", "-1", "--pretty=%s"), TEST_EXTENSION_CHORE_SUBJECT);
+    assert.match(
+      gitIn("log", "-1", "--pretty=%B"),
+      /^Signed-off-by: chore <chore@test>$/m,
+      "the chore commit carries the Signed-off-by trailer from user.name/user.email",
+    );
     assert.equal(
       gitIn("diff", "--name-only", "HEAD~1", "HEAD"),
       EXT,
@@ -109,7 +114,7 @@ describe("commitTestExtensionChore (bug 2)", () => {
     assert.equal(gitIn("diff", "--name-only", "HEAD~1", "HEAD"), EXT);
   });
 
-  it("runs git commit with argv commit --only -m <subject> -- .pi/extensions/test.ts", async () => {
+  it("runs git commit with argv commit -m <subject> --signoff --only -- .pi/extensions/test.ts", async () => {
     const { repo, pi, execLog } = setupRepo();
     writeFileSync(join(repo, EXT), "// generated v2\n");
 
@@ -119,9 +124,10 @@ describe("commitTestExtensionChore (bug 2)", () => {
     assert.equal(commits.length, 1, "exactly one commit invocation");
     assert.deepEqual(commits[0]!.args, [
       "commit",
-      "--only",
       "-m",
       "chore: regenerate test extension",
+      "--signoff",
+      "--only",
       "--",
       ".pi/extensions/test.ts",
     ]);
