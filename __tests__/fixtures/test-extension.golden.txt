@@ -212,48 +212,6 @@ function withRun(argv, run) {
  * @param pi - ExtensionAPI of the host process.
  */
 export default function testToolExtension(pi) {
-  // Deterministic run tool (unit processes only): executes the pinned argv of
-  // a command name listed for the unit's task (payload.unit.commands) from
-  // payload.commands. Registered before `test` so `test` stays last.
-  if (process.env.PI_UNIT_FILE) {
-    pi.registerTool({
-      name: "run",
-      label: "Run command",
-      description:
-        "Run a pinned project command by name. Only the command names listed " +
-        "for this unit's task are allowed; the argv is fixed in the unit payload.",
-      parameters: {
-        type: "object",
-        properties: { name: { type: "string", description: "Command name listed for this task." } },
-        required: ["name"],
-        additionalProperties: false,
-      },
-      async execute(toolCallId, params, signal, onUpdate, ctx) {
-        const name = params && typeof params.name === "string" ? params.name : "";
-        const payload = await readUnitPayload();
-        const unit = (payload && payload.unit) || {};
-        const allowed = Array.isArray(unit.commands) ? unit.commands : [];
-        const table = (payload && payload.commands) || {};
-        const argv = Object.prototype.hasOwnProperty.call(table, name) ? table[name] : null;
-        const valid = Array.isArray(argv) && argv.length > 0 && argv.every((a) => typeof a === "string");
-        const say = (text, isError) => ({ content: [{ type: "text", text: text }], isError: isError || undefined });
-        if (allowed.indexOf(name) < 0 || !valid) {
-          return say("command " + JSON.stringify(name) + " is not listed for this task (allowed: " +
-            (allowed.join(", ") || "none") + "). Nothing was run.", true);
-        }
-        let result;
-        try {
-          const opts = { cwd: (payload && payload.repoRoot) || ctx.cwd, timeout: suiteTimeoutMs() };
-          result = await pi.exec(argv[0], argv.slice(1), opts);
-        } catch (err) {
-          return say("## " + name + "\nspawn failed: " + String((err && err.message) || err), true);
-        }
-        const out = tail([result.stdout, result.stderr].filter(Boolean).join("\n")) || "(no output)";
-        const ok = result.code === 0 && !result.killed;
-        return say("## " + name + "\nexit " + result.code + (result.killed ? " (killed)" : "") + "\n" + out, !ok);
-      },
-    });
-  }
   pi.registerTool({
     name: "test",
     label: "Run tests",

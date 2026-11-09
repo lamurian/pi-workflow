@@ -66,7 +66,7 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
 
 ### Named commands and the `run` tool
 
-`implement.commands` in workflow.json maps command names to argv arrays (e.g. `{ "lint": ["npm", "run", "lint"] }`). A task lists the names it needs in `commands`; `save_task` rejects a name not declared there — add it via `update_workflow_config` first. The generated extension registers a `run` tool next to `test`, so bash-free units can execute exactly those declared commands and nothing else.
+`implement.commands` in workflow.json maps command names to argv arrays (e.g. `{ "lint": ["npm", "run", "lint"] }`). A task lists the names it needs in `commands`; `save_task` rejects a name not declared there — add it via `update_workflow_config` first. The child contract-guard extension (loaded into every unit via `-e`) registers the `run` tool, so bash-free units can execute exactly those declared commands and nothing else; the generated `.pi/extensions/test.ts` registers only `test`, which keeps a unit child from loading two extensions that both register `run`.
 
 ### Task sizing limits
 
