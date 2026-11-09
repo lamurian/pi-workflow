@@ -33,37 +33,29 @@ export async function runSoloImplement(
 }
 
 /**
- * Build the path-scoped commit instruction from the task contract's
- * declared file paths. Stages via `git add -- <paths>` and commits with a
- * conventional subject; never mentions `commit_changes` or blanket staging.
+ * Build the commit instruction for the solo TDD prompt: each behavior is
+ * committed through the `commit_changes` tool with its `taskId` right after
+ * `mark_task_done`. Never instructs raw `git add`/`git commit` commands.
  *
- * @param task - The task contract.
  * @returns The rendered `## Commits` section (never empty).
  */
-function buildCommitInstruction(task: TaskContract): string {
-  const declared = task.files.map((f) => f.path);
-  const addCommand =
-    declared.length > 0 ? `git add -- ${declared.join(" ")}` : "git add -- <paths>";
+function buildCommitInstruction(): string {
   return (
     "\n## Commits\n\n" +
-    "After each `mark_task_done`, stage the contract's declared paths explicitly " +
-    "and commit them yourself — the extension never commits in this mode.\n\n" +
-    "1. Stage ONLY the declared paths (never the whole working tree):\n\n" +
-    `   ${addCommand}\n\n` +
-    "   The form is always `git add -- <paths>`: pass the contract's declared " +
-    "paths from above, space-separated after `--`, including newly added test files.\n" +
-    "2. Commit them with a conventional subject line:\n\n" +
-    '   `git commit -m "type(scope): description"`\n\n' +
-    "The subject must follow the conventional format (`type(scope): description`, " +
-    "≤75 chars) and describe what the behavior changed. " +
+    "Right after each `mark_task_done`, call the `commit_changes` tool with " +
+    "`taskId` set to the id of the behavior you just marked — one commit per " +
+    "behavior, made by the tool, never by raw shell commands.\n\n" +
+    "`commit_changes` stages only the behavior's owned paths and commits " +
+    "with a conventional subject (`type(scope): description`, ≤75 chars) that " +
+    "describes what the behavior changed. " +
     "Do NOT include the behavior id in the subject.\n"
   );
 }
 
 /**
  * Build the TDD prompt from the task contract. The rendered prompt carries
- * the contract's declared file paths plus path-scoped staging instructions
- * (`git add -- <paths>`, then `git commit` with a conventional subject).
+ * the contract's declared file paths plus the `commit_changes`/`taskId`
+ * instruction (one commit per behavior right after `mark_task_done`).
  *
  * @param task - The task contract.
  * @returns The rendered TDD prompt string.
@@ -72,6 +64,6 @@ export async function buildTddPrompt(task: TaskContract): Promise<string> {
   const template = await loadContent("tdd-prompt.md");
   return renderTemplate(template, {
     task: formatTask(task),
-    commitInstruction: buildCommitInstruction(task),
+    commitInstruction: buildCommitInstruction(),
   });
 }

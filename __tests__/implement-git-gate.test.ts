@@ -43,23 +43,25 @@ describe("T2: retry escalation of the child thinking floor", () => {
   });
 });
 
-// ═══ T4: path-scoped staging instruction (supersedes the commit_changes path) ═══
-describe("T4: solo prompt path-scoped staging instruction", () => {
-  it("buildTddPrompt renders the declared paths and instructs `git add -- <paths>` then a conventional `git commit`", async () => {
+// ═══ T10: solo prompt commits each task via commit_changes with its task id ═══
+describe("T10: solo prompt commit_changes instruction", () => {
+  it("buildTddPrompt instructs calling commit_changes with the task id right after each mark_task_done", async () => {
     const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
     const prompt = await buildTddPrompt(finalizingState().task!);
     assert.match(prompt, /Files: src\/a\.ts \(M\)/, "declared paths render in the contract block");
-    assert.match(prompt, /git add -- <paths>/, "the path-scoped staging form is spelled out");
-    assert.match(prompt, /git add --[^\n`]*src\/a\.ts/, "the concrete declared path rides the add command");
-    assert.match(prompt, /git commit/, "the prompt instructs committing");
+    assert.match(prompt, /commit_changes/, "the prompt names the commit_changes tool");
+    assert.match(prompt, /taskId/, "the prompt names the taskId parameter");
+    assert.match(prompt, /right after each `mark_task_done`/i, "the commit lands right after each mark");
     assert.match(prompt, /conventional/i, "the commit subject stays conventional");
-    assert.match(prompt, /after each `mark_task_done`/i, "the commit lands right after each mark");
   });
 
-  it("never instructs commit_changes or blanket staging", async () => {
+  it("no longer instructs raw `git add` or `git commit` commands", async () => {
     const { buildTddPrompt } = await import("../extensions/implement-solo.ts");
     const prompt = await buildTddPrompt(finalizingState().task!);
-    assert.doesNotMatch(prompt, /commit_changes/, "no commit_changes instruction anywhere");
+    assert.doesNotMatch(prompt, /`git add/, "no backticked git add command is instructed");
+    assert.doesNotMatch(prompt, /git add --/, "no path-scoped staging instruction");
+    assert.doesNotMatch(prompt, /`git commit/, "no backticked git commit command is instructed");
+    assert.doesNotMatch(prompt, /git commit -m/, "no raw commit -m instruction");
     assert.doesNotMatch(prompt, /git add --all/, "no blanket add --all instruction");
     assert.doesNotMatch(prompt, /git add -A/, "no blanket add -A instruction");
   });
@@ -83,7 +85,7 @@ describe("T4: solo prompt path-scoped staging instruction", () => {
     assert.doesNotMatch(prompt, /back_to_finalize/, "no back_to_finalize reference");
   });
 
-  it("runImplement steers the path-scoped instruction regardless of commit_changes registration", async () => {
+  it("runImplement steers the commit_changes instruction regardless of tool registration", async () => {
     for (const tools of [["read", "commit_changes"], ["read", "bash"]]) {
       const pi = mockPi(tools);
       const ctx = ctxWithState(finalizingState());
@@ -91,8 +93,10 @@ describe("T4: solo prompt path-scoped staging instruction", () => {
       await runImplement("--solo", pi, ctx);
 
       const [text] = (pi.calls["sendUserMessage"] ?? [])[0] as [string];
-      assert.match(text, /git add --/, `staging instruction present for tools: ${tools.join(",")}`);
-      assert.doesNotMatch(text, /commit_changes/, `no commit_changes instruction for tools: ${tools.join(",")}`);
+      assert.match(text, /commit_changes/, `commit_changes instruction present for tools: ${tools.join(",")}`);
+      assert.match(text, /taskId/, `taskId named for tools: ${tools.join(",")}`);
+      assert.doesNotMatch(text, /git add --/, `no raw staging instruction for tools: ${tools.join(",")}`);
+      assert.doesNotMatch(text, /`git commit/, `no raw commit instruction for tools: ${tools.join(",")}`);
     }
   });
 });
