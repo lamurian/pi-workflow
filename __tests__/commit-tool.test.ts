@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { buildCommitArgs } from "../extensions/commit-core.ts";
 import { getCommitTimeoutMs } from "../extensions/git-ops.ts";
-import type { WorkflowState } from "../extensions/state.ts";
+import type { ContractV2, WorkflowState } from "../extensions/state.ts";
 
 // ═══ T7: workflow-owned commit_changes tool ═══
 
@@ -207,6 +207,85 @@ describe("commit_changes tool (T7)", () => {
     assert.ok(
       !pi.execLog.some((c) => c.args[0] === "commit"),
       "git commit must not be invoked when nothing is staged",
+    );
+  });
+
+  // ─── Assertion 3 (T7.2): taskId mode is contract-driven ───────────────
+
+  it("taskId mode commits with the contract task's message and stages only owned changed paths", async () => {
+    const contract: ContractV2 = {
+      title: "commit tool",
+      instruction: "i",
+      done: "d",
+      sources: [
+        { path: "extensions/commit-tool.ts", tasks: ["T7"] },
+        { path: "extensions/index.ts", tasks: ["T8"] },
+      ],
+      tests: [{ path: "__tests__/commit-tool.test.ts", tasks: ["T7"] }],
+      tasks: [
+        {
+          id: "T7",
+          description: "commit tool",
+          expectedOutput: ["x"],
+          status: "active",
+          commit: "feat: commit tool",
+        },
+        { id: "T8", description: "other", expectedOutput: ["y"], status: "active" },
+      ],
+    };
+    const pi = mockPi({
+      changed:
+        " M extensions/commit-tool.ts\n" +
+        " M extensions/index.ts\n" +
+        " M __tests__/commit-tool.test.ts",
+      commitCode: 0,
+      shortSha: "abc1234",
+      landedSubject: "feat: commit tool",
+    });
+    const tool = await getTool(pi);
+
+    const res = await tool.execute(
+      "c1",
+      { taskId: "T7" },
+      undefined,
+      undefined,
+      ctxWithState({ phase: "implementing", specText: "t", contractV2: contract }),
+    );
+
+    assert.notEqual(res.isError, true, "taskId mode must not error");
+    const text = res.content[0].text as string;
+    assert.match(text, /abc1234/, "reports the landed short sha");
+    assert.match(text, /feat: commit tool/, "reports the landed subject");
+
+    const owned = ["extensions/commit-tool.ts", "__tests__/commit-tool.test.ts"];
+    const adds = pi.execLog.filter((c) => c.args[0] === "add");
+    assert.equal(adds.length, 1, "exactly one git add runs");
+    assert.deepEqual(
+      adds[0]!.args,
+      ["add", "--", ...owned],
+      "stages only the task's owned changed paths",
+    );
+    assert.ok(
+      !pi.execLog.some((c) => c.args[0] === "add" && c.args.includes("--all")),
+      "taskId mode never runs git add --all",
+    );
+
+    const commit = pi.execLog.find((c) => c.args[0] === "commit");
+    assert.ok(commit, "git commit must run");
+    assert.deepEqual(
+      commit!.args,
+      buildCommitArgs("feat: commit tool", undefined, owned),
+      "commits with the contract task's commit message, limited to owned paths",
+    );
+    assert.ok(commit!.args.includes("--signoff"));
+    assert.equal(commit!.options?.timeout, getCommitTimeoutMs());
+    assert.ok(
+      pi.execLog.indexOf(adds[0]!) < pi.execLog.indexOf(commit!),
+      "staging happens before the commit",
+    );
+    assert.ok(
+      !pi.execLog.some((c) => c.args.includes("--no-verify")),
+      "never bypasses the hooks",
     );
   });
 });
