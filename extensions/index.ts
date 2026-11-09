@@ -18,6 +18,7 @@ import { runApprove, runSteer, cleanupOrchestration } from "./hitl-pause.ts";
 import { runFinalize, registerSaveTaskTool } from "./finalize.ts";
 import { registerPrecommitCheckTool } from "./precommit-check.ts";
 import { registerCommitTool } from "./commit-tool.ts";
+import { registerCommitCommand, guardBashGitCommit } from "./commit-command.ts";
 import { registerExploreCommand, registerExploreTool } from "./explore.ts";
 import { registerWorkflowConfigTool } from "./workflow-config-tool.ts";
 import { getSkillsDir } from "./utils.ts";
@@ -77,6 +78,7 @@ export default function (pi: ExtensionAPI): void {
   registerCompleteImplementationTool(pi);
   registerPrecommitCheckTool(pi);
   registerCommitTool(pi);
+  registerCommitCommand(pi);
   registerWorkflowConfigTool(pi);
 
   // Zero-token activity relay rendering (T2). Fire-and-forget: degrades to
@@ -88,6 +90,11 @@ export default function (pi: ExtensionAPI): void {
   // with a phase-aware message. Tools stay in the active set so the
   // model gets an explanation instead of "tool not found".
   pi.on("tool_call", async (event, ctx) => {
+    // T8: bash git-commit guardrail — runs in every phase, before the
+    // phase gate, so `git commit` only ever lands via commit_changes.
+    const commitBlock = guardBashGitCommit(event);
+    if (commitBlock) return commitBlock;
+
     const currentState = loadState(ctx);
     if (!currentState) return;
     const phase = currentState.phase;
