@@ -70,13 +70,13 @@ const VALID = {
   sources: [{ path: "src/a.ts", tasks: ["T1"] }],
   tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
   tasks: [
-    { id: "T1", description: "x", expectedOutput: ["returns x"], status: "active" },
+    { id: "T1", description: "x", expectedOutput: ["returns x"], status: "active", commit: "feat: implement x" },
   ],
 };
 
 /** T1 as a manual task (no tests refs): assertions must start with 'inspect:'. */
 const MANUAL_TASKS = [
-  { id: "T1", description: "x", expectedOutput: ["inspect: returns x"], status: "active" },
+  { id: "T1", description: "x", expectedOutput: ["inspect: returns x"], status: "active", commit: "feat: implement x" },
 ];
 
 describe("save_task", () => {
@@ -159,6 +159,7 @@ describe("save_task", () => {
             description: "Add test scenarios for validation",
             expectedOutput: ["test file contains 3 cases covering edge cases"],
             status: "active",
+            commit: "feat: implement add test scenarios",
           },
         ],
       },
@@ -204,6 +205,7 @@ describe("save_task", () => {
             description: "Add test scenarios for validation",
             expectedOutput: ["test file contains 3 cases covering edge cases"],
             status: "active",
+            commit: "feat: implement add test scenarios",
           },
         ],
       },
@@ -1255,8 +1257,8 @@ describe("save_task dirty-tree advisory warning (T6)", () => {
         ],
         tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
         tasks: [
-          { id: "T1", description: "first", expectedOutput: ["e1"], status: "active" },
-          { id: "T2", description: "second", expectedOutput: ["inspect: e2"], status: "active" },
+          { id: "T1", description: "first", expectedOutput: ["e1"], status: "active", commit: "feat: implement first" },
+          { id: "T2", description: "second", expectedOutput: ["inspect: e2"], status: "active", commit: "feat: implement second" },
         ],
       },
       undefined,
@@ -1272,5 +1274,92 @@ describe("save_task dirty-tree advisory warning (T6)", () => {
     assert.match(text, /dirty-tree/, "the warning names the dirty-tree preflight");
     assert.match(text, /src\/other\.ts/, "the warning names the dirty path");
     assert.match(text, /\bT2\b/, "the warning names the owning task");
+  });
+});
+
+// ═══ advisory missing-commit warning + commit docs (T4) ═══
+describe("save_task missing-commit advisory (T4)", () => {
+  it("saves an active task with no commit and warns naming the task and the fallback subject", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+    const notifyCalls: string[] = [];
+    ctx.ui.notify = (msg: string) => {
+      notifyCalls.push(msg);
+    };
+
+    const res = await getSaveTask(pi).execute(
+      "c1",
+      {
+        ...VALID,
+        tasks: [
+          {
+            id: "T1",
+            description: "Add test scenarios for validation",
+            expectedOutput: ["returns x"],
+            status: "active",
+          },
+        ],
+      },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    assert.notEqual(res.isError, true, "the missing-commit warning is advisory; the save still succeeds");
+    assert.equal(s.phase, "finalizing", "the contract still saves");
+    assert.ok(s.contractV2, "state.contractV2 carries the saved contract");
+    const text = res.content[0].text;
+    assert.match(text, /Warnings \(advisory/, "the warning lands in the advisory block");
+    assert.match(text, /warning: [^\n]*\bT1\b/, "the warning names the task");
+    assert.match(
+      text,
+      /feat: implement Add test scenarios for validation/,
+      "the warning names the fallback subject",
+    );
+    assert.match(notifyCalls[0]!, /warnings: 1/, "the missing-commit warning counts in the notify");
+  });
+
+  it("does not warn for an active task that declares a commit", async () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const s = discussingState();
+    const ctx = ctxWithState(s);
+
+    const res = await getSaveTask(pi).execute("c1", VALID, undefined, undefined, ctx);
+
+    assert.notEqual(res.isError, true);
+    assert.doesNotMatch(res.content[0].text, /has no commit/);
+  });
+
+  it("finalize-prompt.md documents the per-task commit field and its reject rules", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /`commit`/, "the tasks[] field list documents the commit field");
+    assert.match(content, /derived from the task's assertions/, "commit derives from assertions");
+    assert.match(content, /single line/i, "reject rule: single line");
+    assert.match(content, /75 characters/, "reject rule: at most 75 characters");
+    assert.match(content, /conventional/i, "reject rule: conventional form");
+    assert.match(content, /task id/, "reject rule: no declared task id");
+    assert.match(content, /unique/i, "reject rule: unique per non-removed task");
+  });
+
+  it("save_task parameter descriptions list commit in the task unit and split child shapes", () => {
+    const pi = mockPi();
+    registerSaveTaskTool(pi);
+    const entries = (pi.calls["registerTool"] ?? []) as Array<[
+      { name: string; parameters: { properties: Record<string, { description?: string }> } },
+    ]>;
+    const def = entries.find(([d]) => d.name === "save_task")![0];
+    assert.match(
+      def.parameters.properties["tasks"]!.description!,
+      /\bcommit\b/,
+      "task unit shape carries commit",
+    );
+    assert.match(
+      def.parameters.properties["operation"]!.description!,
+      /\bcommit\b/,
+      "split child shape carries commit",
+    );
   });
 });

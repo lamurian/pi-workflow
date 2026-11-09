@@ -97,3 +97,22 @@ export function checkTaskCommitRules(tasks: readonly TaskUnit[]): string | null 
   }
   return null;
 }
+
+/**
+ * Advisory warnings for active tasks that declare no `commit`: each names
+ * the task and the fallback subject the commit gate will derive.
+ *
+ * @param tasks - All task units of the contract being saved.
+ * @returns One warning per active task without a commit; empty otherwise.
+ */
+export function missingCommitWarnings(tasks: readonly TaskUnit[]): string[] {
+  const warnings: string[] = [];
+  for (const t of tasks) {
+    if (t.status !== "active" || t.commit !== undefined) continue;
+    warnings.push(
+      `task ${t.id} has no commit — the commit gate falls back to ` +
+        `"feat: implement ${t.description}"`,
+    );
+  }
+  return warnings;
+}

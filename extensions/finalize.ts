@@ -67,7 +67,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
           Type.String({
             description:
               "Contract operation: 'replace' (default) or 'split' with { parentId, " +
-              "tasks: [{ description, expectedOutput[], paths[], commands? }] }",
+              "tasks: [{ description, expectedOutput[], paths[], commands?, commit? }] }",
           }),
         ),
         sources: Type.Optional(
@@ -82,7 +82,7 @@ export function registerSaveTaskTool(pi: ExtensionAPI): void {
         ),
         tasks: Type.Optional(
           Type.Array(Type.Unknown(), {
-            description: "Task units: { id, description, expectedOutput[], status? }",
+            description: "Task units: { id, description, expectedOutput[], status?, commit? }",
           }),
         ),
         files: Type.Optional(

@@ -8,7 +8,7 @@ import type { ContractV2 } from "./contract-types.ts";
 import { buildSplitContract } from "./contract-split.ts";
 import { validateContract, preserveContractDoneStatuses } from "./contract-v2-validate.ts";
 import { checkTaskBreadth } from "./contract-breadth.ts";
-import { checkTaskCommitRules } from "./commit-message.ts";
+import { checkTaskCommitRules, missingCommitWarnings } from "./commit-message.ts";
 import { checkTaskSizing, resolveSizingLimits } from "./contract-sizing.ts";
 import { collectBehaviorWarnings, deriveTaskContract } from "./contract-v1-view.ts";
 import { loadWorkflowConfig, resolveMaxPathsPerTask } from "./paths.ts";
@@ -188,6 +188,7 @@ export async function runSaveTask(
   const scan = await runContractScan(pi, ctx.cwd, state.task.files);
   const allWarnings = [
     ...behaviorWarnings,
+    ...missingCommitWarnings(preserved.contract.tasks),
     ...(detection.warnings ?? []),
     ...(scan?.warnings ?? []),
     ...(await dirtyTreeSaveWarnings(pi, ctx.cwd, preserved.contract)),

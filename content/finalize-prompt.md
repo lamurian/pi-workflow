@@ -20,8 +20,9 @@ The contract is normalized: `sources` and `tests` are the two path lists and the
 - `tests[]` — test and fixture files. Each entry: `{ path, status?, tasks }`.
   - `tasks` — the ids of the tasks that own this path. Ownership is per path and strict: a unit may write or edit only paths whose `tasks` include its own task id, and may `delete_file` only a `status: "D"` path its task owns. Shared files name several task ids — overlapping refs are legal and first-class.
   - `status` — optional per-path FACT: absent = write-authorized (`A`/`M` is a display qualifier computed from git at save time, never enforced); `"D"` = delete authority, granted only to the tasks in `tasks` — so every `D` entry must name at least one owning task.
-- `tasks[]` — task units, each `{ id, description, expectedOutput, status }`:
+- `tasks[]` — task units, each `{ id, description, expectedOutput, status, commit? }`:
   - `expectedOutput` is an ARRAY — one entry per assertion. The task's tests must prove exactly these entries, no more and no fewer: per-task `expectedOutput` is the test's contract.
+  - `commit` — the task's commit message, derived from the task's assertions. Reject rules (save_task rejects — blocking): single line, at most 75 characters, conventional form, no declared task id, unique per non-removed task. When a task omits it, the commit gate falls back to the advisory subject `feat: implement <description>` and save_task warns.
   - `status` — `active` for everything new (`done` survives a re-finalize via preservation; `removed` drops a task).
   - A task with no path refs is a pure-manual task and fine as is. A task with no `tests` refs derives an empty test scope and therefore no test gate — manual-ness is derived, never a declared field.
 
