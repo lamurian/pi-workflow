@@ -18,7 +18,7 @@ import { formatFailingTest, renderFullGateHalt, triageFullGate } from "./full-ga
 import { renderGateReport } from "./test-gate-report.ts";
 import { runAndPersistFinalGate } from "./full-gate.ts";
 import { deriveAllowlist } from "./contract-derive.ts";
-import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
+import { commitAndGate } from "./git-commit-gate.ts";
 import { readGitHead } from "./git-ops.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { shutdownWarmChild } from "./warm-unit.ts";
@@ -48,6 +48,9 @@ export interface FinalGateDeps {
 
 /** Findings prefix a fix unit uses to report a guard-blocked undeclared path. */
 export const BLOCKED_PATH_PREFIX = "BLOCKED PATH: ";
+
+/** Fixed commit subject for the FULL-GATE fix commit (T3): independent of the unit's report. */
+export const FULL_GATE_FIX_SUBJECT = "fix: restore green test suite";
 
 /**
  * Build the fix unit's task text for the one allowed fix round (T7).
@@ -212,7 +215,7 @@ async function runFixRound(
     );
   }
   const behavior = fixBehavior();
-  const subject = pickCommitSubject(attempt, behavior);
+  const subject = FULL_GATE_FIX_SUBJECT;
   const commit = await commitAndGate(pi, cwd, subject, behavior, task, 1, state.baselineHead);
   if (commit.outcome !== null) {
     return halt(

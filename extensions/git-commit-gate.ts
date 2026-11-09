@@ -1,16 +1,14 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { classifyCommit, type GateOutcome } from "./commit-gate.ts";
+import { buildCommitArgs, formatCommitSubject } from "./commit-core.ts";
 import { classifyStagedDiff } from "./staged-diff-guard.ts";
 import { TEST_EXTENSION_PATH, type DeclaredFile } from "./contract-guard-core.ts";
 import { classifyBaselineDiff, planUnstage } from "./contract-guard-diff.ts";
 import { deriveAllowlist } from "./contract-derive.ts";
 import {
-  filterOrchestratorOwned, NameStatusReadError, ownerlessHalt, readGuardNameStatus,
-  runHeadStagedNameStatus, unstageContamination, withRemediation,
+  filterOrchestratorOwned, NameStatusReadError, ownerlessHalt, readGuardNameStatus, runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
-import {
-  getCommitTimeoutMs, readChangedPaths, readDiffStat, readGitHead, readTreeState,
-} from "./git-ops.ts";
+import { getCommitTimeoutMs, readChangedPaths, readDiffStat, readGitHead, readTreeState } from "./git-ops.ts";
 import type { SlopGateRunner } from "./slop-gate.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
@@ -29,18 +27,21 @@ export interface CommitAttempt {
 }
 
 /**
- * Pick the conventional commit subject: the subagent's suggestion, or a generic
- * subject so a missing suggestion never blocks the commit step.
- * @param report - parsed report; @param behavior - the behavior being committed.
- * @returns A conventional commit subject line (no behavior id).
+ * Pick the conventional commit subject: the contract task's commit when present, else the
+ * subagent's suggestion, else a generic subject; normalized to one line of at most 75 chars.
+ * @param report / behavior - parsed report and behavior; @param contract - optional v2
+ *   contract whose task carries the commit. @returns A conventional subject (no behavior id).
  */
 export function pickCommitSubject(
   report: ImplementerReport,
   behavior: Behavior,
+  contract?: ContractV2,
 ): string {
+  const taskCommit = contract?.tasks.find((t) => t.id === behavior.id)?.commit?.trim();
+  if (taskCommit) return formatCommitSubject(taskCommit);
   const suggested = report.suggestedCommit?.trim();
-  if (suggested) return suggested;
-  return `feat: implement ${behavior.description}`.slice(0, 75);
+  if (suggested) return formatCommitSubject(suggested);
+  return formatCommitSubject(`feat: implement ${behavior.description}`);
 }
 
 /** Build the contract-guard halt from a baseline classification (T3: shared by the v2 teeth guard and the v1 staged guard; never commits). */
@@ -204,7 +205,7 @@ export async function commitAndGate(
       }
       slopNotes = verdict.notes;
     }
-    const res = await pi.exec("git", ["commit", "-m", subject], { cwd, timeout: timeoutMs });
+    const res = await pi.exec("git", buildCommitArgs(subject), { cwd, timeout: timeoutMs });
     commitExitCode = res.code;
     commitOutput = [res.stdout ?? "", res.stderr ?? ""].filter(Boolean).join("\n");
   } catch (err) {

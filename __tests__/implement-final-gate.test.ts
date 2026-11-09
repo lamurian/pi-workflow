@@ -185,7 +185,16 @@ describe("T7: orchestrator final gate", () => {
     );
     const commits = execLog.filter((e) => e.cmd === "git" && e.args[0] === "commit");
     assert.equal(commits.length, 2, "the fix unit's work is committed through the commit gate");
-    assert.equal(commits[1]!.args[2], "fix(final): repair the failing test");
+    assert.deepEqual(
+      commits[0]!.args,
+      ["commit", "-m", "feat(core): add first behavior", "--signoff"],
+      "the orchestrator commit runs through the core (signed off)",
+    );
+    assert.deepEqual(
+      commits[1]!.args,
+      ["commit", "-m", "fix: restore green test suite", "--signoff"],
+      "the FULL-GATE fix commit lands with the fixed subject (T3)",
+    );
     assert.equal(
       execLog.filter((e) => e.cmd === "npm").length,
       4,
@@ -594,7 +603,7 @@ describe("T9: implement-start test extension chore commit", () => {
     assert.equal(state.lastHalt?.diagnosis, "the run halted before any unit started", "persisted to lastHalt");
   });
 
-  it("noOtherOrchestratorCommitPath: git commit is invoked in extensions/ only by commit-core.ts (buildCommitArgs) and git-commit-gate.ts (commitAndGate), one call site each", async () => {
+  it("noOtherOrchestratorCommitPath: git commit argv is spelled out only in commit-core.ts, and commitAndGate routes through buildCommitArgs", async () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
     const collect = (dir: string): string[] => {
       const files: string[] = [];
@@ -610,8 +619,8 @@ describe("T9: implement-start test extension chore commit", () => {
       .map((file) => relative(extDir, file).split(sep).join("/"));
     assert.deepEqual(
       offenders.sort(),
-      ["commit-core.ts", "git-commit-gate.ts"],
-      "only the shared commit core and the commit gate may invoke git commit",
+      ["commit-core.ts"],
+      "only the shared commit core may spell out git commit argv (T3: the gate routes through it)",
     );
     for (const file of offenders) {
       const text = readFileSync(join(extDir, file), "utf8");
@@ -621,6 +630,16 @@ describe("T9: implement-start test extension chore commit", () => {
         `${file} has exactly one commit call site`,
       );
     }
+    const gate = readFileSync(join(extDir, "git-commit-gate.ts"), "utf8");
+    assert.match(
+      gate,
+      /buildCommitArgs\(subject\)/,
+      "commitAndGate builds its commit argv through the core (signoff included)",
+    );
+    assert.ok(
+      !/\[\s*"commit"\s*,/.test(gate),
+      "git-commit-gate.ts never spells out the commit argv itself",
+    );
   });
 
   it("gitModulesWithinLineBudget: the split git modules are each at most 250 lines", () => {

@@ -212,7 +212,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       }
     }
 
-    const subject = pickCommitSubject(attempt, behavior);
+    const subject = pickCommitSubject(attempt, behavior, state.contractV2);
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): committing…`);
     const commit = await commitAndGate(pi, cwd, subject, behavior, task, retry, state.baselineHead, state.contractV2, slopRunner);
     // T8: the commit-gate verdict seals the last attempt's outcome in the halt report's attempt table (landed attempts reset with the next behavior's history).
