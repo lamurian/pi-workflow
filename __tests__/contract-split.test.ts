@@ -95,6 +95,36 @@ describe("save_task split", () => {
     });
   }
 
+  it("carries each child's commit onto the new T<n>.k task unit", async () => {
+    const s = state();
+    const kids = [
+      { ...KIDS[0], commit: "feat(split): land one-a assertions" },
+      { ...KIDS[1], commit: "fix(split): land one-b assertions" },
+    ];
+    const res = await split(s, kids);
+    assert.equal(res.ok, true, res.text);
+    const c = s.contractV2!;
+    assert.equal(c.tasks[0]?.id, "T1.1");
+    assert.equal(c.tasks[0]?.commit, "feat(split): land one-a assertions");
+    assert.equal(c.tasks[1]?.id, "T1.2");
+    assert.equal(c.tasks[1]?.commit, "fix(split): land one-b assertions");
+    assert.equal(c.tasks[2]?.commit, undefined);
+  });
+
+  it("rejects a split whose children share one commit message, naming both child ids", async () => {
+    const s = state();
+    const shared = "feat(split): one message for both children";
+    const res = await split(s, [
+      { ...KIDS[0], commit: shared },
+      { ...KIDS[1], commit: shared },
+    ]);
+    assert.equal(res.ok, false, res.text);
+    assert.match(res.text, /T1\.1/);
+    assert.match(res.text, /T1\.2/);
+    assert.match(res.text, /share the same commit/);
+    assert.deepEqual(s.contractV2, contract());
+  });
+
   it("rejects splitting a split child", async () => {
     const s = state();
     assert.equal((await split(s, KIDS)).ok, true);

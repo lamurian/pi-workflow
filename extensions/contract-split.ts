@@ -10,6 +10,8 @@ export interface SplitChild {
   /** Parent paths this child owns. */
   paths: string[];
   commands?: string[];
+  /** Optional conventional commit message carried onto the new task unit. */
+  commit?: string;
 }
 
 /** Result of buildSplitContract. */
@@ -39,11 +41,15 @@ function parseChildren(raw: unknown): SplitChild[] | string {
     if (c.commands !== undefined && !isStringArray(c.commands)) {
       return `tasks[${i}].commands must be a string array`;
     }
+    if (c.commit !== undefined && (typeof c.commit !== "string" || c.commit.trim() === "")) {
+      return `tasks[${i}].commit must be a non-empty string when present`;
+    }
     out.push({
       description: c.description,
       expectedOutput: c.expectedOutput,
       paths: c.paths,
       ...(c.commands ? { commands: c.commands as string[] } : {}),
+      ...(c.commit !== undefined ? { commit: c.commit as string } : {}),
     });
   }
   return out;
@@ -117,6 +123,7 @@ export function buildSplitContract(prior: ContractV2, parentId: unknown, rawTask
     expectedOutput: [...k.expectedOutput],
     status: "active",
     ...(k.commands && k.commands.length > 0 ? { commands: [...k.commands] } : {}),
+    ...(k.commit !== undefined ? { commit: k.commit } : {}),
   }));
   const tasks = prior.tasks.flatMap((t) => (t.id === parentId ? children : [t]));
   return {
