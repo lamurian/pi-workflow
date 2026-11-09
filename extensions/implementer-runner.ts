@@ -86,6 +86,8 @@ export { hasParseableReport };
  *                       PI_CONTRACT_GUARD_FILE), merged over process.env.
  * @param modelRef     - Optional canonical `provider/id` reference passed as `--model <ref>`.
  * @param thinkingFloor - Optional `--thinking` escalation floor (max'd with the env base).
+ * @param runCommands  - T19: the task's pinned command names; non-empty grants
+ *                       `run` in `--tools` (forwarded to spawnRpcUnitClient).
  * @returns Parsed report, plus `client` when kept alive and
  *          `error`/`timedOut`/`missingReport`/`modelError` on failure.
  */
@@ -100,6 +102,7 @@ export async function runImplementerUnit(
   env?: Record<string, string>,
   modelRef?: string,
   thinkingFloor?: string,
+  runCommands: readonly string[] = [],
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
@@ -108,7 +111,7 @@ export async function runImplementerUnit(
     cwd,
     env,
     testExtPath: resolveTestExtensionPath(cwd),
-    modelRef, thinkingFloor,
+    modelRef, thinkingFloor, runCommands,
   });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });
