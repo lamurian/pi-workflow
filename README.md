@@ -2,7 +2,7 @@
 
 A pi extension for a lean **discuss → finalize → implement** workflow. Discussion and contract-drafting are gated (read-only); implementation defaults to an orchestrator that runs one subagent per contract task and gates each task on a landed commit.
 
-Committing is the orchestrator's job, and the project's own pre-commit hooks are the verification gate. The orchestrator commits with plain `git commit` (never `--no-verify`), so hooks — lint, format, tests — fire naturally and own pass/fail. The orchestrator never invents test commands: verification comes from the project's hooks plus the orchestrator's own test gates over the detected suites (see [Test gates](#test-gates-orchestrator-run)). At `/finalize` the extension detects the project's test suites and generates a `test` tool the implementer units run in-turn (see [Test-tool detection, generation, and lifecycle](#test-tool-detection-generation-and-lifecycle)). In solo mode, the agent calls `commit_changes`, which also fires hooks.
+Committing is the orchestrator's job, and the project's own pre-commit hooks are the verification gate. The orchestrator commits with plain `git commit` (never `--no-verify`), so hooks — lint, format, tests — fire naturally and own pass/fail. The orchestrator never invents test commands: verification comes from the project's hooks plus the orchestrator's own test gates over the detected suites (see [Test gates](#test-gates-orchestrator-run)). At `/finalize` the extension detects the project's test suites and generates a `test` tool the implementer units run in-turn (see [Test-tool detection, generation, and lifecycle](#test-tool-detection-generation-and-lifecycle)). In solo mode, the agent commits through `commit_changes` — this extension's own workflow-owned commit tool (see [Committing](#committing-workflow-owned-commits)) — which also fires hooks.
 
 Two deterministic gates protect the atomic green-commit invariant: a **test scan** at finalize time (advisory contract evidence) and a **staged-diff tamper guard** at commit time (hard, orchestrator-only). An optional third gate, the [slop gate](#slop-gate), scans the staged diff for AI-slop before the commit when enabled.
 
@@ -13,6 +13,7 @@ Two deterministic gates protect the atomic green-commit invariant: a **test scan
 | `/discuss <topic>` | Discuss an issue, bug, chore, or small fix. No files are written; the agent clarifies, proposes an approach, and iterates until you confirm. |
 | `/finalize` | Draft the atomic task contract (files, instruction, definition of done, testable tasks) from the discussion. Valid only after `/discuss`. |
 | `/implement [--solo]` | Implement the finalized task contract. **Default: orchestrator** — spawns one subagent per active task, commits (hooks fire), and marks each done when HEAD moves. Pass `--solo` for the in-session TDD loop instead. Valid after `/finalize`; re-run it to resume a halted implementation from the first active task. |
+| `/commit` | Stage all changes (`git add --all`) and steer a follow-up: read the staged diff, author one single-line conventional message, call `commit_changes`. Refuses (staging nothing) during the read-only `discussing`/`finalizing` phases; notifies when nothing is staged. |
 | `/explore <instruction>` | Explore the codebase using parallel searches (scout subagents) and get a structured summary. |
 
 ## AI Tools
@@ -24,10 +25,31 @@ Two deterministic gates protect the atomic green-commit invariant: a **test scan
 | `update_workflow_config` | Edits `.pi/workflow.json` (`implement.tests`, `implement.commands`, `finalize` limits) after schema validation. Allowed only in the `discussing` and `finalizing` phases; the guard points units and later phases back to `/discuss`. |
 | `mark_task_done` | Marks one task done after implementing it. For a task with `tests` refs the evidence carries the orchestrator's gate result line (scope + pass/fail) from the per-task scope gate, replacing the unit's self-report. Soft-warns (does not block) when no commit landed since the previous task. |
 | `complete_implementation` | Ends the `implementing` phase and returns the workflow to idle. Refuses while any task is active, then runs the FULL GATE — every detected suite unfiltered, orchestrator-run — and blocks completion on red, naming the failing suite and its output tail. The orchestrator completes on its own and does not call this tool. |
+| `commit_changes` | The workflow's own commit tool (registered by this extension — no external commit extension required). With `taskId`: stage only that contract task's owned changed paths (never `git add --all`) and commit with the task's contract `commit` message, path-limited via `--only -- <paths>`. Without `taskId`: stage everything and commit the given `message`. Either way the commit goes through the shared commit core: always `--signoff`, never `--no-verify`. Returns the landed short sha and subject; a hook rejection comes back as an error with the hook output tail. Reports `nothing to commit` when the staged set is empty. |
 
 There is no `run_tests` tool. Test-suite detection is deterministic and runs at `/finalize`: manifests are scanned and `.pi/extensions/test.ts` is generated for the detected suites, orchestrator-owned and never declared in the contract's path lists; orchestrator subagents load it as their `test` tool, defaulting to their task's derived scope. Authoritative verification belongs to the project's commit hooks plus the orchestrator's scope and full gates (orchestrator), or to the `test` tool and the agent's own sandboxed commands (solo).
 
 The orchestrator runs extension code, not the model: it spawns the subagents, so no extra model-facing tools are exposed for that path.
+
+## Committing: workflow-owned commits
+
+Every commit the workflow makes is built and run by one **commit core** (`extensions/commit-core.ts`): `git commit -m <subject> --signoff` with `--signoff` **always on**, so no commit can land without a `Signed-off-by` trailer, and never `--no-verify`, so the project's pre-commit hooks run on every commit. The subject is normalized to the first non-empty line capped at 75 characters; an optional body passes verbatim; when paths are given the commit is path-limited (`--only -- <paths>`) so other staged work stays staged; the run sits under the `PI_COMMIT_TIMEOUT_MS` budget.
+
+Three workflow-owned surfaces sit on top of the core — all shipped by this extension, so solo mode never depends on an external commit extension:
+
+- **`commit_changes` tool** — two modes. *Message mode*: stages everything (`git add --all`), checks the staged set (an empty set reports `nothing to commit` without invoking `git commit`), then commits through the core. *`taskId` mode*: stages only that contract task's owned changed paths (never `git add --all`) and commits with the task's contract `commit` message (fallback `feat: implement <description>`), path-limited via `--only -- <paths>`. Both modes return the landed short sha and subject; a hook rejection comes back as an error result carrying the hook output tail. The orchestrator commits with plain `git commit` through this same core; the solo TDD loop commits through this tool.
+- **`/commit` command** — stages all changes (`git add --all`) and steers a follow-up: read `git diff --cached`, author ONE single-line conventional message (`type(scope): description`, ≤75 chars) describing the diff, call `commit_changes`. With nothing staged it only notifies; during the read-only `discussing`/`finalizing` phases it refuses and stages nothing.
+- **Bash guardrail** — a `tool_call` guard runs in every phase, before the phase gate, and blocks any bash command that runs `git commit` (including `git -c k=v commit` and a commit chained behind another command) with a reason naming `commit_changes`: raw shell commits bypass the workflow commit gate, so commits only ever land through the tool.
+
+**The contract `commit` field.** Each `tasks[]` entry may carry an optional `commit` — the subject used when that task commits. `save_task` hard-validates the rules, each rejection naming the task and the violated rule:
+
+- **single line** — multi-line commits are rejected;
+- **at most 75 characters**;
+- **conventional form** — `type(scope): description`;
+- **no declared task id** — a task id appearing as its own token (e.g. `feat(T1): x`) is rejected;
+- **one unique message per non-removed task** — two non-removed tasks sharing a subject are rejected (removed tasks may share or keep stale commits).
+
+An active task with no `commit` draws an advisory warning, and the commit gate falls back to `feat: implement <description>`.
 
 ## Workflow
 
@@ -53,12 +75,19 @@ The orchestrator runs extension code, not the model: it spawns the subagents, so
    - **Enriched halt report** — on halt the orchestrator returns a structured report to the main process: `Commits landed since /implement started:` (per-run fallback lists landed commit subjects or `(none)`), a truncated attempt table (outcome, duration, progress, last text cut to 200 chars), the findings tail, a `Diagnosis:` line and a `Recommended next action:` line, closing with *"Relay this status and the recommended next action to the user. Do not run tools or modify the working tree."* The **main process** — not a subagent — relays this status and the recommended action to you.
    - **alreadySatisfied** — a unit may report `alreadySatisfied: true` when the task is in fact already implemented at HEAD. With a **clean tree and unchanged HEAD** since the attempt started, the orchestrator marks the task done **without invoking git commit** (no hook run, no retry) and lists it in the completion report under `Satisfied without a new commit:`. With a dirty tree the flag is ignored and the normal commit gate runs — only a verifiably no-op change skips the gate.
    Removed tasks are skipped.
-4. **Implement (`--solo`)** — `/implement --solo` steers the in-session agent with a TDD prompt instead: write a failing test → implement → self-check (the `test` tool when present, else its own sandboxed commands) → `mark_task_done` → (when available) `commit_changes`, which fires the same hooks. When `commit_changes` is registered, the prompt instructs a conventional commit after each task; the instruction is omitted entirely when the tool is absent. `mark_task_done` soft-warns if HEAD has not advanced since the previous task — it never blocks.
+4. **Implement (`--solo`)** — `/implement --solo` steers the in-session agent with a TDD prompt instead: write a failing test → implement → self-check (the `test` tool when present, else its own sandboxed commands) → `mark_task_done` → `commit_changes`, which fires the same hooks. `commit_changes` is this extension's own workflow-owned tool — registered by the extension factory alongside the other workflow tools, never supplied by an external commit extension — and the TDD prompt instructs one conventional commit per task through it, never raw shell commands. `mark_task_done` soft-warns if HEAD has not advanced since the previous task — it never blocks.
 
    **Solo asymmetry:** solo mode has no extension-level staged-diff inspection, and no slop gate runs on this path either — the scan resolves only inside the orchestrator loop. The tamper rule is **prompt-only** (prompt discipline): the TDD prompt instructs the agent to never delete, skip, or weaken a test to land a commit, and to report instead. The orchestrator's hard guard does not apply on this path — only the project's commit hooks gate.
 5. **Complete** — the orchestrator returns the workflow to idle on its own once every task is done (each `done` backed by a landed commit whose hooks passed and, for tasks with tests, a green scope gate; tasks reported `alreadySatisfied` on a clean tree with unchanged HEAD are flagged in the completion report). In solo mode the agent calls `complete_implementation`, which refuses while tasks are active and runs the full gate — every suite unfiltered — blocking completion on red. Completed manual tasks are listed in the final report under **Manual verification required**.
 6. **Resume** — after a halt, re-run `/implement`. Done tasks are skipped and the loop continues from the first active one; when the working tree is dirty, the resumed unit receives the `git status --short` output as context. The original baseline HEAD is kept. The persisted `lastHalt` is rendered as a `## Previous run halted` section (diagnosis, recommended next action, attempt table) and prepended to the **first unit of the halted task only** — retries, continuations and other tasks never inherit it.
 7. **Commit & push** — push and open a PR with your own git workflow.
+
+### The `/finalize` contract view for TUI and RPC (paseo)
+
+`save_task` renders a readable **contract view** with zero model tokens: one `# Task <id>` section per non-removed task carrying its `Commit:` line in backticks (or a fallback note naming `feat: implement <description>` when the task declares no `commit`), an `Assertions:` bullet list, and the task's owned `Sources:`/`Tests:` paths with `D` entries marked `(D)`. The view rides the tool result's `details.contractView`; the model-facing content text stays untouched.
+
+- **TUI** — the `save_task` `renderCall`/`renderResult` slots draw the view instead of the raw JSON payload: `renderCall` derives it from the call arguments (the contract is not saved yet), `renderResult` from the result's `details`.
+- **RPC (paseo)** — where those render slots do not apply, the same rendered view is pushed through `ctx.ui.notify` after a successful save.
 
 ### Run plan and preflight
 
