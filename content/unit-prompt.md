@@ -43,6 +43,7 @@ For `manual` behaviors: implement, verify by inspection, describe how you verifi
 
 - Implement ONLY the behavior named in the task text.
 - Do NOT run `git commit` or `git add`.
+- Units no longer suggest commit messages: the report carries no `suggestedCommit` field.
 - Tests are the specification. If a test looks wrong, report it instead of changing it.
 - If the task text includes a `Previous attempt failed` section or a hook/guard investigation, fix those issues first. Failures of any stage return to you as instructions in a later spawn.
 
@@ -53,7 +54,6 @@ End your final message with exactly one fenced JSON block and nothing after it:
 ```json
 {
   "summary": "what you changed and how you verified it",
-  "suggestedCommit": "type(scope): conventional subject, max 75 chars, no behavior id",
   "status": "complete",
   "findings": ["short reusable facts for later units"],
   "nextSteps": "what a follow-up unit should do next",

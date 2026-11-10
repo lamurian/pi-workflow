@@ -1,7 +1,7 @@
 /** Reminder steer sent once when a unit ends its run without the JSON report. */
 export const REPORT_REMINDER_MESSAGE =
   "your run ended without the mandatory JSON report block: emit only the " +
-  "fenced json report (summary, suggestedCommit, status) now, nothing else";
+  "fenced json report (summary, status) now, nothing else";
 
 /**
  * Decide what to do when an agent_end arrives without a parseable report.

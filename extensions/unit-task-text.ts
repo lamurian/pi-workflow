@@ -169,7 +169,7 @@ function buildSliceTask(
       : "",
     "## Verification",
     sliceVerificationLine(scope, behavior, options.testTool),
-    "End with the JSON report block (summary, suggestedCommit) as instructed.",
+    "End with the JSON report block as instructed.",
   ]
     .filter(Boolean)
     .join("\n");
@@ -210,7 +210,7 @@ export function buildUnitTask(
     options.preloadCwd ? buildContextPreload(task.files, options.preloadCwd) : "",
     "## Verification",
     verificationLine(behavior, options.testTool),
-    "End with the JSON report block (summary, suggestedCommit) as instructed.",
+    "End with the JSON report block as instructed.",
   ]
     .filter(Boolean)
     .join("\n");
