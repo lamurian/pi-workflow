@@ -31,7 +31,7 @@ Named commands: `name -> non-empty argv array`, e.g. `"lint": ["pixi", "run", "l
 
 Positive integers only:
 
-- `finalize.maxPathsPerTask` (default 10)
+- `finalize.maxPathsPerTask` (default 5)
 - `finalize.maxAssertionsPerTask`
 - `finalize.maxManualAssertions`
 - `finalize.maxTaskBytes`
@@ -47,6 +47,6 @@ Positive integers only:
     },
     "commands": { "lint": ["pixi", "run", "lint"] }
   },
-  "finalize": { "maxPathsPerTask": 10, "maxAssertionsPerTask": 8 }
+  "finalize": { "maxPathsPerTask": 5, "maxAssertionsPerTask": 8 }
 }
 ```
