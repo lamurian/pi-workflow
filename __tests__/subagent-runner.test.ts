@@ -1035,7 +1035,13 @@ describe("runImplementerUnit diagnostics (T7)", () => {
   it("names timeouts and keeps the last assistant text when available", async () => {
     const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
     const prev = process.env.PI_BIN;
-    process.env.PI_BIN = await fakePi("sleep 60\n");
+    // The fake must outlive the 400 ms wall clock (so the timeout fires) but
+    // die soon after: the 3-round deadline handover is event-driven — child
+    // exit unblocks its idle/report waits — so the runner settles with the
+    // named timeout inside the test budget. The fully-hung-child worst case
+    // (three report-less rounds, then SIGKILL) is covered in
+    // deadline-handover.test.ts with a stub client.
+    process.env.PI_BIN = await fakePi("sleep 3\n");
     try {
       const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 400);
       assert.match(res.error ?? "", /timed out after 400ms/, "timeout must be named");
@@ -1049,7 +1055,9 @@ describe("runImplementerUnit diagnostics (T7)", () => {
   it("flags timeouts and leads the error with the last assistant text, not raw JSONL", async () => {
     const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
     const prev = process.env.PI_BIN;
-    process.env.PI_BIN = await fakePi("sleep 60\n");
+    // Same fixture as the test above: live past the wall clock, dead before
+    // the handover's 5 s/30 s caps can burn the 15 s test budget.
+    process.env.PI_BIN = await fakePi("sleep 3\n");
     try {
       const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 400);
       assert.equal(res.timedOut, true, "timeout must be flagged structurally");
