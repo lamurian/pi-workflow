@@ -1,22 +1,15 @@
-import { describe, it, vi } from "vitest";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import {
-  WARM_STEER_CAP,
-  UNDELIVERED_STEER_ERROR,
-  canSteerWarmChild,
-  shutdownWarmChild,
-  steerFixRound,
-} from "../extensions/warm-unit.ts";
+import { shutdownWarmChild } from "../extensions/warm-unit.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
   type UnitRunner,
 } from "../extensions/implement-loop.ts";
 import type { UnitTask } from "../extensions/implementer-runner.ts";
-import { WRAP_UP_STEER_MESSAGE } from "../extensions/implementer-runner.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "../extensions/unit-client-registry.ts";
 import type { RpcUnitClient } from "../extensions/rpc-unit-client.ts";
 import { parseImplementerReport } from "../extensions/implementer-report.ts";
@@ -153,39 +146,21 @@ interface FakeClientHandle {
   record: {
     steers: string[];
     prompts: Array<{ message: string; streamingBehavior?: string }>;
-    commands: Array<Record<string, unknown>>;
     shutdowns: number;
   };
-  /** Append stdout content (JSONL) and notify event listeners. */
-  emit: (text: string) => void;
-  /** Kill the child: isAlive() turns false and exit listeners fire. */
-  die: () => void;
 }
 
-/**
- * Fake kept-alive RpcUnitClient. `onPrompt` (if given) runs inside prompt() so
- * a warm fix round can emit its NEW report synchronously, like a real child would.
- * `onCommand` (if given) shapes command() responses — return `{ isStreaming: false }`
- * to make the T2 get_state probe mark warm rounds undelivered.
- */
-function makeWarmClient(
-  onPrompt?: (message: string, emit: (text: string) => void) => void,
-  onCommand?: (command: Record<string, unknown>) => { isStreaming?: boolean },
-): FakeClientHandle {
+/** Fake kept-alive RpcUnitClient recording prompts, steers and shutdowns. */
+function makeWarmClient(): FakeClientHandle {
   let stdout = "";
   let alive = true;
   const record = {
     steers: [] as string[],
     prompts: [] as Array<{ message: string; streamingBehavior?: string }>,
-    commands: [] as Array<Record<string, unknown>>,
     shutdowns: 0,
   };
   const listeners = new Set<(event: Record<string, unknown>) => void>();
   const exitListeners = new Set<(info: { code: number }) => void>();
-  const emit = (text: string) => {
-    stdout += text + "\n";
-    for (const l of listeners) l({ type: "message_end" });
-  };
   const client = {
     isAlive: () => alive,
     shutdown: async () => {
@@ -198,14 +173,9 @@ function makeWarmClient(
       for (const l of exitListeners) l({ code: 1 });
     },
     send: () => {},
-    command: async (commandObj: Record<string, unknown>) => {
-      record.commands.push(commandObj);
-      const data = onCommand?.(commandObj);
-      return { type: "response", success: true, id: "x", ...(data ? { data } : {}) };
-    },
+    command: async () => ({ type: "response", success: true, id: "x" }),
     prompt: (message: string, streamingBehavior?: string) => {
       record.prompts.push(streamingBehavior ? { message, streamingBehavior } : { message });
-      onPrompt?.(message, emit);
     },
     steer: (message: string) => {
       record.steers.push(message);
@@ -221,31 +191,11 @@ function makeWarmClient(
     rawStdout: () => stdout,
     stderrText: () => "",
   } as unknown as RpcUnitClient;
-  return {
-    client,
-    record,
-    emit,
-    die: () => {
-      if (!alive) return;
-      alive = false;
-      for (const l of exitListeners) l({ code: 1 });
-    },
-  };
+  return { client, record };
 }
 
-// ═══ canSteerWarmChild / shutdownWarmChild ═══
-describe("warm child gate and shutdown", () => {
-  it("requires a live child below the 5-steer cap", () => {
-    assert.equal(WARM_STEER_CAP, 5);
-    const warm = makeWarmClient();
-    assert.equal(canSteerWarmChild(undefined, 0), false, "no client -> fresh spawn");
-    assert.equal(canSteerWarmChild(warm.client, 0), true, "live child below the cap");
-    assert.equal(canSteerWarmChild(warm.client, WARM_STEER_CAP - 1), true, "last steer allowed");
-    assert.equal(canSteerWarmChild(warm.client, WARM_STEER_CAP), false, "cap reached -> fresh spawn");
-    warm.die();
-    assert.equal(canSteerWarmChild(warm.client, 0), false, "dead child -> fresh spawn");
-  });
-
+// ═══ shutdownWarmChild ═══
+describe("warm child shutdown", () => {
   it("shutdownWarmChild shuts an alive child down, clears the registry, and is idempotent", async () => {
     const warm = makeWarmClient();
     setActiveUnitClient(warm.client);
@@ -259,128 +209,28 @@ describe("warm child gate and shutdown", () => {
   });
 });
 
-// ═══ steerFixRound ═══
-describe("steerFixRound", () => {
-  it("delivers the fix via prompt with streamingBehavior steer and settles on the NEW report, not the earlier one", async () => {
-    const warm = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("fixed after hook rejection", { suggestedCommit: "feat(core): fix" })));
+// ═══ T7: warm-steer fix machinery removed ═══
+describe("warm-steer fix machinery removed (T7)", () => {
+  it("warm-unit exports no steerFixRound, canSteerWarmChild or WARM_STEER_CAP", async () => {
+    const mod = (await import("../extensions/warm-unit.ts")) as Record<string, unknown>;
+    assert.equal("steerFixRound" in mod, false, "steerFixRound is removed from warm-unit");
+    assert.equal("canSteerWarmChild" in mod, false, "canSteerWarmChild is removed from warm-unit");
+    assert.equal("WARM_STEER_CAP" in mod, false, "WARM_STEER_CAP is removed from warm-unit");
+  });
+
+  it("the attempt recorder exposes no runSteer", async () => {
+    const { createAttemptRecorder } = await import("../extensions/warm-unit.ts");
+    const recorder = createAttemptRecorder({
+      behaviorId: "T1",
+      cwd: "/tmp/test",
+      runUnit: async () => ({ summary: "done" }),
+      relay: () => {},
+      recordFindings: () => false,
+      fingerprint: async () => "fp",
+      head: async () => null,
+      history: [],
     });
-    // The child already printed the base report before the fix round.
-    warm.emit(assistantLine(reportJson("stale base report", { suggestedCommit: "feat(core): stale" })));
-
-    const result = await steerFixRound(warm.client, "## Previous attempt failed (retry 1/5)", undefined, 0);
-
-    assert.equal(result.summary, "fixed after hook rejection", "only post-delivery content settles the round");
-    assert.equal(result.suggestedCommit, "feat(core): fix");
-    assert.deepEqual(
-      warm.record.prompts,
-      [{ message: "## Previous attempt failed (retry 1/5)", streamingBehavior: "steer" }],
-      "the fix task text rides a prompt with steer semantics",
-    );
-    assert.deepEqual(warm.record.steers, [], "no steer command carries the fix");
-  });
-
-  it("arms the wrap-up and kill timers per round and clears them on settle", async () => {
-    vi.useFakeTimers();
-    try {
-      const warm = makeWarmClient();
-      const round1 = steerFixRound(warm.client, "fix-1", undefined, 1_000);
-      await vi.advanceTimersByTimeAsync(800);
-      assert.deepEqual(
-        warm.record.prompts,
-        [{ message: "fix-1", streamingBehavior: "steer" }],
-        "the fix text is prompted once at round start",
-      );
-      assert.deepEqual(
-        warm.record.steers,
-        [WRAP_UP_STEER_MESSAGE],
-        "the soft deadline wrap-up steer still arrives via steer",
-      );
-      warm.emit(assistantLine(reportJson("round 1")));
-      const res1 = await round1;
-      assert.equal(res1.summary, "round 1");
-
-      const round2 = steerFixRound(warm.client, "fix-2", undefined, 1_000);
-      assert.deepEqual(
-        warm.record.prompts,
-        [
-          { message: "fix-1", streamingBehavior: "steer" },
-          { message: "fix-2", streamingBehavior: "steer" },
-        ],
-        "the round prompt itself",
-      );
-      await vi.advanceTimersByTimeAsync(800);
-      assert.equal(warm.record.steers.length, 2, "the per-round wrap-up timer is rearmed for round 2");
-      warm.emit(assistantLine(reportJson("round 2")));
-      await round2;
-      await vi.advanceTimersByTimeAsync(2_000);
-      assert.equal(warm.record.steers.length, 2, "timers are cleared once the round settles");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("times out with diagnostics when the child never reports again", async () => {
-    vi.useFakeTimers();
-    try {
-      const warm = makeWarmClient();
-      const round = steerFixRound(warm.client, "fix", undefined, 1_000);
-      await vi.advanceTimersByTimeAsync(1_000);
-      const res = await round;
-      assert.equal(res.timedOut, true, "the hard kill marks the round timed out");
-      assert.match(res.error ?? "", /warm retry timed out/);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("marks the round undelivered when the child reports isStreaming false with no new stdout (T2)", async () => {
-    vi.useFakeTimers();
-    try {
-      const warm = makeWarmClient(undefined, () => ({ isStreaming: false }));
-      const round = steerFixRound(warm.client, "fix", undefined, 60_000);
-      await vi.advanceTimersByTimeAsync(300); // the 250ms probe fires, far before the 60s hard timeout
-      const res = await round;
-      assert.equal(res.undeliveredSteer, true, "an idle child that never picked the prompt up settles as undelivered");
-      assert.equal(res.error, UNDELIVERED_STEER_ERROR, "the delivery-failure error text rides the result");
-      assert.notEqual(res.timedOut, true, "the round returns promptly instead of waiting out the hard timeout");
-      assert.equal(warm.client.isAlive(), true, "an undelivered round does not kill the child");
-      assert.deepEqual(warm.record.prompts, [{ message: "fix", streamingBehavior: "steer" }], "the fix text still rode a steer prompt");
-      assert.ok(
-        warm.record.commands.some((c) => c.type === "get_state"),
-        "the child state is probed via get_state shortly after delivery",
-      );
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("keeps awaiting the new report for a streaming child or new stdout before the probe (T2)", async () => {
-    vi.useFakeTimers();
-    try {
-      const streaming = makeWarmClient(undefined, () => ({ isStreaming: true }));
-      let settled = false;
-      const round1 = steerFixRound(streaming.client, "fix-a", undefined, 60_000).then((res) => {
-        settled = true;
-        return res;
-      });
-      await vi.advanceTimersByTimeAsync(300);
-      assert.equal(settled, false, "a streaming child leaves the round awaiting the new report");
-      streaming.emit(assistantLine(reportJson("late but real report")));
-      const res1 = await round1;
-      assert.equal(res1.undeliveredSteer, undefined, "a delivered report carries no undelivered marker");
-      assert.equal(res1.summary, "late but real report");
-
-      const chatty = makeWarmClient(undefined, () => ({ isStreaming: false }));
-      const round2 = steerFixRound(chatty.client, "fix-b", undefined, 60_000);
-      chatty.emit(assistantLine(reportJson("chatty child report")));
-      await vi.advanceTimersByTimeAsync(300);
-      const res2 = await round2;
-      assert.equal(res2.undeliveredSteer, undefined, "new stdout before the probe keeps the round awaiting the report");
-      assert.equal(res2.summary, "chatty child report");
-    } finally {
-      vi.useRealTimers();
-    }
+    assert.equal("runSteer" in recorder, false, "runSteer is removed from the attempt recorder");
   });
 });
 
