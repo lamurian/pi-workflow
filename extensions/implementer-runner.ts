@@ -22,7 +22,7 @@ export interface UnitTask {
 }
 
 /** Fraction of the per-unit time budget at which the wrap-up steer fires. */
-export const SOFT_DEADLINE_RATIO = 0.8;
+export const SOFT_DEADLINE_RATIO = 0.7;
 
 /** Fraction of the per-unit time budget at which the progress-check steer fires. */
 export const PROGRESS_CHECK_RATIO = 0.5;
@@ -65,7 +65,7 @@ export { hasParseableReport };
  * JSONL `prompt` command on stdin (never argv), keeping stdin open for
  * later steering. Completion is a parsed report block seen on stdout —
  * not process exit — after which the child is shut down gracefully
- * (`abort` + stdin close, SIGKILL fallback). At 75% of the budget the
+ * (`abort` + stdin close, SIGKILL fallback). At 70% of the budget the
  * unit is steered once with WRAP_UP_STEER_MESSAGE (soft deadline) so it
  * can emit a status-partial report before the hard kill. A child that
  * exits before
@@ -132,7 +132,7 @@ export async function runImplementerUnit(
  * fake-timer tests with an injected client. Arms two timers when
  * `timeoutMs > 0`:
  *
- * - a soft deadline at SOFT_DEADLINE_RATIO (80%) of the budget that
+ * - a soft deadline at SOFT_DEADLINE_RATIO (70%) of the budget that
  *   steers the unit once with WRAP_UP_STEER_MESSAGE so it can wrap up
  *   with a status-partial report before the kill;
  * - the hard kill at `timeoutMs` that SIGKILLs the child (timedOut=true).
@@ -213,7 +213,7 @@ export async function runImplementerUnitWithClient(
     client.kill();
   };
   const timer = timeoutMs > 0 ? setTimeout(killNow, timeoutMs) : undefined;
-  // Progress check at 50%, then one wrap-up steer at 80%, before the hard kill.
+  // Progress check at 50%, then one wrap-up steer at 70%, before the hard kill.
   const progressTimer =
     timeoutMs > 0
       ? setTimeout(

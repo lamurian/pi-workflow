@@ -321,7 +321,7 @@ describe("runImplementerUnit over the rpc transport", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// T3 — soft deadline: a single wrap-up steer at 75% before the hard kill
+// T3 — soft deadline: a single wrap-up steer at 70% before the hard kill
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
@@ -394,7 +394,7 @@ function stubClient(stderr = "") {
 describe("runImplementerUnit soft deadline (T3)", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("steers progress at 500ms and wraps up at 800ms of a 1000ms budget, each once", async () => {
+  it("steers progress at 500ms and wraps up at 700ms of a 1000ms budget, each once", async () => {
     vi.useFakeTimers();
     const { runImplementerUnitWithClient, PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE } = await import(
       "../extensions/implementer-runner.ts"
@@ -405,13 +405,13 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     assert.equal(client.steerPrompts.length, 0, "no steer before the 50% mark");
     await vi.advanceTimersByTimeAsync(1);
     assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE], "progress steer at 500ms");
-    await vi.advanceTimersByTimeAsync(299);
-    assert.equal(client.steerPrompts.length, 1, "no wrap-up before the 80% mark");
+    await vi.advanceTimersByTimeAsync(199);
+    assert.equal(client.steerPrompts.length, 1, "no wrap-up before the 70% mark");
     await vi.advanceTimersByTimeAsync(1);
-    assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 800ms");
+    assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 700ms");
     assert.match(client.steerPrompts[1]!, /status/, "the steer names the status field");
     assert.match(client.steerPrompts[1]!, /partial/, "the steer asks for status partial");
-    await vi.advanceTimersByTimeAsync(201); // hard kill at 1000ms
+    await vi.advanceTimersByTimeAsync(301); // hard kill at 1000ms
     const res = await promise;
     assert.equal(res.timedOut, true, "the hard kill still yields timedOut=true");
     assert.match(res.error ?? "", /timed out after 1000ms/);
