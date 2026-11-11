@@ -142,7 +142,6 @@ export async function runOrchestratedImplement(
 
   // T22: per-behavior attempt seconds live in duration-tracker.ts.
   const tracker = createDurationTracker(cwd, () => state.contractV2, result);
-  const setSlow = tracker.attach;
 
   const halt = createHalt({ pi, ctx, state, cwd, result, landedCommits, attemptHistory });
 
@@ -180,11 +179,10 @@ export async function runOrchestratedImplement(
     if (advisory) ctx.ui.notify(advisory, "info");
   }
 
-  const resuming = state.phase === "implementing";
   // Steering (T4): user input during an open verification pause goes to the live child.
   registerWorkflowInputHandler(pi, ctx);
   let resumeTreeContext = "";
-  if (resuming) {
+  if (state.phase === "implementing") {
     const tree = await readTreeState(pi, cwd);
     if (tree && tree !== "(unavailable)") {
       resumeTreeContext =
@@ -237,14 +235,14 @@ export async function runOrchestratedImplement(
     });
     resumeTreeContext = "";
     tracker.record(behavior.id, attemptHistory);
-    if (halted) return setSlow(halted);
+    if (halted) return tracker.attach(halted);
     if (landedCommits.length > landedBefore) await refreshTestExtensionAfterLanding(pi, cwd, state);
   }
-  setSlow(result);
+  tracker.attach(result);
 
   const refusal = evaluateCompletionGate(state);
   if (refusal) {
-    return setSlow(await halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`));
+    return tracker.attach(await halt(units[units.length - 1]!.id, `Completion gate refused: ${refusal}`));
   }
-  return setSlow(await finishRun(gateDeps));
+  return tracker.attach(await finishRun(gateDeps));
 }
