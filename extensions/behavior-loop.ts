@@ -13,6 +13,7 @@ import { getCommitTimeoutMs, isOutOfRepoBehavior, readGitHead, readTreeFingerpri
 import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
 import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
+import { resolveBehaviorSession } from "./behavior-sessions.ts";
 import { commitScopeGate } from "./test-gate-run.ts";
 import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
 import type { UnitRunner, OrchestratorResult } from "./implement-loop.ts";
@@ -62,8 +63,20 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): implementing…`); // B3: the "workflow" key from state.ts updateUi is never written by these frames.
   // T5: with a v2 contract (state.contractV2) the unit text is the unit's slice only.
   const unitOptions: UnitTaskOptions = { contract: state.contractV2, preloadCwd: cwd, testTool: state.testTool };
-  const baseCore = taskPrefix + buildUnitTask(behavior, task, unitOptions) + noteSection + resumeTreeContext;
-  const baseTask: UnitTask = { behaviorId: behavior.id, taskText: haltPrefix + baseCore + findingsSection(), kind: behavior.kind };
+  const baseUnitTask = buildUnitTask(behavior, task, unitOptions);
+  const baseCore = taskPrefix + baseUnitTask + noteSection + resumeTreeContext;
+  // T3: every spawn of this behavior resumes the same session transcript
+  // (<behaviorId>-<baselineHead first 8>); the base attempt carries it too.
+  const resume = resolveBehaviorSession(cwd, behavior.id, state.baselineHead);
+  /** True when the behavior's transcript is on disk — the base attempt's spawn
+   * creates it, so follow-ups see it and drop the base task text. */
+  const transcriptExists = () => resolveBehaviorSession(cwd, behavior.id, state.baselineHead).exists;
+  /** Base task text for a follow-up: empty when the transcript already holds it. */
+  const followUpBaseCore = () => (transcriptExists() ? "" : baseCore);
+  /** Strip the embedded base task from a retry text when the transcript holds it. */
+  const stripRetryBase = (text: string): string =>
+    transcriptExists() ? text.replace(`\n\n## Original task\n${baseUnitTask}`, "") : text;
+  const baseTask: UnitTask = { behaviorId: behavior.id, taskText: haltPrefix + baseCore + findingsSection(), kind: behavior.kind, session: resume.session };
 
   const relay = (event: Record<string, unknown>) => relayImplementerEvent(pi, ctx, behavior.id, position, event);
   // T5: the kept-alive child absorbs hook-rejected/no-changes fixes as warm steers below WARM_STEER_CAP.
@@ -97,7 +110,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
    * `thinking` is the retry escalation floor (medium/high); continuations pass none. */
   const runFollowUp = async (taskText: string, thinking?: string) => {
     await shutdownWarmChild(liveChild); liveChild = undefined; // never leak a stale kept-alive child across fresh spawns
-    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind, ...(thinking ? { thinking } : {}) });
+    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind, session: resume.session, ...(thinking ? { thinking } : {}) });
     liveChild = attempt.client; adoptRound(); result.unitsRun++;
   };
   const runRetry = async (taskText: string) => {
@@ -145,7 +158,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
-        await runFollowUp(buildContinuationTaskText(behavior.id, attempt, baseCore, await readTreeState(pi, cwd)) + noteSection + findingsSection());
+        await runFollowUp(buildContinuationTaskText(behavior.id, attempt, followUpBaseCore(), await readTreeState(pi, cwd)) + noteSection + findingsSection());
         continue;
       }
       if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; } // T8/T5: checked only after continuations are exhausted — a progressing timeout resumes meanwhile; the no-progress early halt above keeps precedence and its message.
@@ -155,7 +168,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
           return haltWithChild(behavior.id,
             `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without advancing the tree or adding findings: ${attempt.summary ?? "no summary"}`);
         }
-        await runRetry(buildRetryTask(behavior, task, attempt, retry, unitOptions) + noteSection + findingsSection());
+        await runRetry(stripRetryBase(buildRetryTask(behavior, task, attempt, retry, unitOptions)) + noteSection + findingsSection());
         continue;
       }
       // Timed out without progress (or beyond the continuation budget): fall through to the unchanged timeout-retry path below.
@@ -167,7 +180,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       if (retry > RETRY_BUDGET) {
         return haltWithChild(behavior.id, `Unit ${behavior.id} failed after ${RETRY_BUDGET} retries: ${attempt.error}`);
       }
-      await runRetry(buildRetryTask(behavior, task, attempt, retry, unitOptions) + noteSection + findingsSection());
+      await runRetry(stripRetryBase(buildRetryTask(behavior, task, attempt, retry, unitOptions)) + noteSection + findingsSection());
       continue;
     }
 

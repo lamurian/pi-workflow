@@ -69,6 +69,7 @@ export function createDefaultUnitRunner(
       modelRef,
       unit.thinking,
       runCommands,
+      unit.session,
     );
   };
 }

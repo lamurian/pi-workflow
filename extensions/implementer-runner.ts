@@ -4,6 +4,7 @@ import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
 import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
+import type { UnitSessionSpec } from "./unit-session.ts";
 import { REPORT_REMINDER_MESSAGE, reportReminderAction } from "./report-reminder.ts";
 
 /** One orchestrator unit: a behavior plus the task text handed to its subprocess. */
@@ -15,6 +16,9 @@ export interface UnitTask {
   /** Behavior kind; manual units keep their child alive for the HITL pause. */
   kind?: "test" | "manual";
   thinking?: string; // escalation floor for this spawn's --thinking; omitted on the first attempt
+  /** T3: resume session spec; forwarded to the spawn so every attempt of the
+   * behavior reuses the same transcript (`--session-dir`/`--session-id`). */
+  session?: UnitSessionSpec;
 }
 
 /** Fraction of the per-unit time budget at which the wrap-up steer fires. */
@@ -88,6 +92,9 @@ export { hasParseableReport };
  * @param thinkingFloor - Optional `--thinking` escalation floor (max'd with the env base).
  * @param runCommands  - T19: the task's pinned command names; non-empty grants
  *                       `run` in `--tools` (forwarded to spawnRpcUnitClient).
+ * @param session      - T3: resume session spec; forwarded to the spawn so the
+ *                       child gets `--session-dir`/`--session-id` instead of
+ *                       `--no-session` (absent keeps today's argv).
  * @returns Parsed report, plus `client` when kept alive and
  *          `error`/`timedOut`/`missingReport`/`modelError` on failure.
  */
@@ -103,6 +110,7 @@ export async function runImplementerUnit(
   modelRef?: string,
   thinkingFloor?: string,
   runCommands: readonly string[] = [],
+  session?: UnitSessionSpec,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
@@ -111,7 +119,7 @@ export async function runImplementerUnit(
     cwd,
     env,
     testExtPath: resolveTestExtensionPath(cwd),
-    modelRef, thinkingFloor, runCommands,
+    modelRef, thinkingFloor, runCommands, session,
   });
   setActiveUnitClient(client);
   return runImplementerUnitWithClient(client, taskText, { timeoutMs, signal, onEvent, keepAlive });
