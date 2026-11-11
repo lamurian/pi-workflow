@@ -149,12 +149,17 @@ export function buildEarlyHaltError(behaviorId: string, attempts: number): strin
 }
 
 /**
- * Whether consecutive timed-out attempts should halt the behavior (T5).
+ * Whether consecutive timed-out attempts should halt the behavior (T5, T8).
  *
  * Counts attempts killed by the wall-clock limit in a row regardless of
- * progress: at {@link TIMEOUT_HALT_THRESHOLD} (2) the loop halts even when
- * the tree fingerprint moved — the unit does not fit the time budget.
- * Any non-timeout attempt resets the count.
+ * progress: at {@link TIMEOUT_HALT_THRESHOLD} (2) the unit does not fit the
+ * time budget. Progress-aware ordering (T8): the loop consults this
+ * predicate only after {@link decideContinuation} declines to resume, so a
+ * timed-out attempt with progress keeps spawning continuations while the
+ * budget allows instead of halting after two; the check fires once the
+ * continuation budget is exhausted (or the attempt made no progress). The
+ * no-progress early halt ({@link shouldHaltEarly}) always keeps precedence
+ * and its message. Any non-timeout attempt resets the count.
  *
  * @param consecutiveTimeouts - Timed-out attempts so far, in a row.
  * @returns True when the behavior must halt now.

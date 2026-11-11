@@ -474,7 +474,7 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
     assert.match(text, /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation is present");
   });
 
-  it("two consecutive timed-out attempts that each made progress halt after 2 spawns with the unit-too-large error", async () => {
+  it("timed-out attempts that each made progress continue as continuations, then split or halt with unit-too-large once the budget is exhausted", async () => {
     const { pi, commits } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
@@ -492,10 +492,18 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
 
     const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
 
-    assert.equal(result.complete, false, "progress does not save a second consecutive timeout");
-    assert.equal(spawns.length, 2, "halts after the second timeout, not the retry budget");
+    assert.equal(result.complete, false, "the continuation budget eventually exhausts into the timeout halt");
+    assert.equal(
+      spawns.length,
+      1 + MAX_CONTINUATIONS,
+      "initial attempt plus one continuation per budget slot — continuations instead of halting after two",
+    );
+    for (const spawn of spawns.slice(1)) {
+      assert.match(spawn.taskText, /## Continue previous partial attempt/, "each progressing timeout resumes as a continuation");
+      assert.ok(!/retry \d\/5/.test(spawn.taskText), "continuations never consume the retry budget");
+    }
     assert.equal(result.haltedOn, "T1");
-    assert.match(result.error ?? "", /unit too large/, "unit-too-large diagnosis");
+    assert.match(result.error ?? "", /unit too large/, "unit-too-large diagnosis once the continuation budget is exhausted");
     assert.doesNotMatch(result.error ?? "", /exploration not converging/, "the no-progress rule stays silent when the tree moved");
     assert.match(result.error ?? "", /\/discuss -> \/finalize/, "split recommendation");
     assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation");

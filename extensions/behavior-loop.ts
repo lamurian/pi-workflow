@@ -142,13 +142,13 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         // T7: repeated identical timeouts/partial reports waste hours — halt with an actionable diagnosis instead of burning retries.
         return haltWithChild(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
       }
-      if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; } // T5: two consecutive timeouts halt even when the tree moved — the no-progress halt above keeps precedence and its message.
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): continuing partial work…`);
         await runFollowUp(buildContinuationTaskText(behavior.id, attempt, baseCore, await readTreeState(pi, cwd)) + noteSection + findingsSection());
         continue;
       }
+      if (shouldHaltOnTimeout(timeoutStreak)) { const r = await trySplit("timeout", buildTimeoutHaltError(behavior.id, timeoutStreak)); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; } // T8/T5: checked only after continuations are exhausted — a progressing timeout resumes meanwhile; the no-progress early halt above keeps precedence and its message.
       if (!attempt.error) {
         // A partial report without progress consumes one retry as today.
         if (retry > RETRY_BUDGET) {
