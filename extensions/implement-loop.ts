@@ -29,6 +29,7 @@ export type UnitAttempt = ImplementerReport & {
   missingReport?: boolean; // True when the unit exited 0 without the mandatory JSON report block.
   undeliveredSteer?: boolean; // True when a warm fix round was never picked up by the child (T2).
   client?: RpcUnitClient; // Live rpc client handle; only for manual-kind behaviors (T3).
+  contextPercent?: number; // T5: context-window usage percent read via get_session_stats before shutdown.
 };
 
 /** Injectable unit runner: execute one behavior, return its report. */

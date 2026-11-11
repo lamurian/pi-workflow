@@ -7,6 +7,7 @@ import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import type { UnitSessionSpec } from "./unit-session.ts";
 import { REPORT_REMINDER_MESSAGE, reportReminderAction } from "./report-reminder.ts";
+import { readContextPercent } from "./session-stats.ts";
 
 /** One orchestrator unit: a behavior plus the task text handed to its subprocess. */
 export interface UnitTask {
@@ -116,7 +117,7 @@ export async function runImplementerUnit(
   thinkingFloor?: string,
   runCommands: readonly string[] = [],
   session?: UnitSessionSpec,
-): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient; contextPercent?: number }> {
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
   const client = spawnRpcUnitClient({
@@ -159,7 +160,7 @@ export async function runImplementerUnitWithClient(
   client: RpcUnitClient,
   taskText: string,
   options: UnitRunnerOptions = {},
-): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient }> {
+): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient; contextPercent?: number }> {
   const { timeoutMs = getImplementerTimeoutMs(), signal, onEvent, keepAlive = false } = options;
 
   let timedOut = false;
@@ -260,6 +261,13 @@ export async function runImplementerUnitWithClient(
   unsubEvents();
   unsubExit();
 
+  // T5: context usage capture — read via get_session_stats while the child
+  // is still alive, after the attempt settled and before any shutdown.
+  const contextPercent = client.isAlive() ? await readContextPercent(client) : undefined;
+  /** Spread the captured context percent onto a result only when present. */
+  const attach = <T extends object>(result: T): T & { contextPercent?: number } =>
+    contextPercent === undefined ? result : { ...result, contextPercent };
+
   // Completion (report seen) or exit/kill: graceful shutdown (unless the
   // orchestrator keeps the child alive for a manual verification pause),
   // then classify.
@@ -280,7 +288,7 @@ export async function runImplementerUnitWithClient(
   // T3/B2: fail fast — the provider rejected the model; the wall clock would only burn the budget.
   if (deadRun) {
     await releaseIfKept();
-    return { ...report, error: buildDeadRunError(deadRun.message, stderr, stdout), modelError: true };
+    return attach({ ...report, error: buildDeadRunError(deadRun.message, stderr, stdout), modelError: true });
   }
   if (timedOut) {
     // T2.2b: a handover report settles the attempt with its findings and
@@ -297,7 +305,7 @@ export async function runImplementerUnitWithClient(
       assistant ? `--- last assistant text ---\n${assistant}` : "",
       rawTail ? `--- raw stdout tail ---\n${rawTail}` : "",
     ].filter(Boolean);
-    return { ...base, error: parts.join("\n\n"), timedOut: true };
+    return attach({ ...base, error: parts.join("\n\n"), timedOut: true });
   }
   if (!reportSeen && exitCode !== 0) {
     await releaseIfKept();
@@ -306,7 +314,7 @@ export async function runImplementerUnitWithClient(
       stderr.trim() || `implementer exited with code ${exitCode}`,
       stdoutTail ? `--- unit stdout tail ---\n${stdoutTail}` : "",
     ].filter(Boolean);
-    return { ...report, error: parts.join("\n\n") };
+    return attach({ ...report, error: parts.join("\n\n") });
   }
   const finalText = lastAssistantText(stdout);
   if (!hasParseableReport(finalText)) {
@@ -314,16 +322,16 @@ export async function runImplementerUnitWithClient(
     const detail = finalText
       ? `--- final assistant text ---\n${finalText}`
       : "(no assistant output captured)";
-    return {
+    return attach({
       ...report,
       error:
         "implementer ended without the required JSON report block " +
         "(a prose handover plea is not a report).\n\n" + detail,
       missingReport: true,
-    };
+    });
   }
   if (keepAlive && client.isAlive()) {
-    return { ...report, client };
+    return attach({ ...report, client });
   }
-  return report;
+  return attach(report);
 }
