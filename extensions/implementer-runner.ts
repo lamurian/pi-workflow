@@ -1,4 +1,5 @@
 import { getImplementerTimeoutMs } from "./process-utils.ts";
+import { runDeadlineHandover, type DeadlineHandoverResult } from "./deadline-handover.ts";
 import { hasParseableReport, lastAssistantText, parseImplementerReport, shouldAbortDeadRun, buildDeadRunError, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
 import { spawnRpcUnitClient } from "./rpc-unit-client.ts";
@@ -71,7 +72,11 @@ export { hasParseableReport };
  * exits before
  * any report yields `error` with the same stdout-tail diagnostics as the
  * one-shot transport. The PI_IMPLEMENT_TIMEOUT_MS model-activity wall
- * clock still SIGKILLs a working child; timeouts are detected
+ * clock starts the deadline handover (runDeadlineHandover: up to three
+ * abort/prompt rounds) instead of SIGKILLing outright; only after the third
+ * report-less round is the child killed. A report emitted during a round
+ * settles the attempt with that report's fields. A parent abort signal still
+ * SIGKILLs immediately without handover rounds. Timeouts are detected
  * structurally (`timedOut: true`) and their error context is the last
  * assistant text. An exit-0 child without a parseable JSON report block
  * is a failure too (`missingReport: true`), never a silent success.
@@ -135,9 +140,13 @@ export async function runImplementerUnit(
  * - a soft deadline at SOFT_DEADLINE_RATIO (70%) of the budget that
  *   steers the unit once with WRAP_UP_STEER_MESSAGE so it can wrap up
  *   with a status-partial report before the kill;
- * - the hard kill at `timeoutMs` that SIGKILLs the child (timedOut=true).
+ * - the wall clock at `timeoutMs` that runs runDeadlineHandover instead of
+ *   SIGKILLing outright: up to three abort/prompt rounds; a report during a
+ *   round settles the attempt with that report (timedOut=true), and only
+ *   three report-less rounds SIGKILL the child. A parent abort signal
+ *   bypasses the handover and kills immediately.
  *
- * Both timers are cleared as soon as the run settles (report seen, child
+ * All timers are cleared as soon as the run settles (report seen, child
  * exit, or abort), so a completed unit is never steered afterwards.
  *
  * @param client   - Live RPC client for the unit subprocess.
@@ -208,11 +217,19 @@ export async function runImplementerUnitWithClient(
     if (!reportSeen) settleWait();
   });
 
+  // Parent abort: SIGKILL immediately, never through handover rounds.
   const killNow = () => {
     timedOut = true;
     client.kill();
   };
-  const timer = timeoutMs > 0 ? setTimeout(killNow, timeoutMs) : undefined;
+  // T2.2b: the wall clock runs the deadline handover; the run settles when
+  // the handover's report event or its final SIGKILL exit fires below.
+  let handoverDone: Promise<DeadlineHandoverResult> | undefined;
+  const onDeadline = () => {
+    timedOut = true;
+    handoverDone = runDeadlineHandover(client);
+  };
+  const timer = timeoutMs > 0 ? setTimeout(onDeadline, timeoutMs) : undefined;
   // Progress check at 50%, then one wrap-up steer at 70%, before the hard kill.
   const progressTimer =
     timeoutMs > 0
@@ -266,7 +283,11 @@ export async function runImplementerUnitWithClient(
     return { ...report, error: buildDeadRunError(deadRun.message, stderr, stdout), modelError: true };
   }
   if (timedOut) {
+    // T2.2b: a handover report settles the attempt with its findings and
+    // nextSteps; three report-less rounds end in SIGKILL (base = parsed stdout).
+    const handover = handoverDone ? await handoverDone : undefined;
     await releaseIfKept();
+    const base = handover?.report ?? report;
     const assistant = lastAssistantText(stdout);
     const rawTail = assistant ? "" : stdout.trim().slice(-400);
     const marker = `timed out after ${timeoutMs}ms`;
@@ -276,7 +297,7 @@ export async function runImplementerUnitWithClient(
       assistant ? `--- last assistant text ---\n${assistant}` : "",
       rawTail ? `--- raw stdout tail ---\n${rawTail}` : "",
     ].filter(Boolean);
-    return { ...report, error: parts.join("\n\n"), timedOut: true };
+    return { ...base, error: parts.join("\n\n"), timedOut: true };
   }
   if (!reportSeen && exitCode !== 0) {
     await releaseIfKept();

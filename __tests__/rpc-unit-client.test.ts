@@ -290,21 +290,6 @@ describe("runImplementerUnit over the rpc transport", () => {
     });
   });
 
-  it("SIGKILLs a working child at the wall clock and reports timedOut with assistant-text context", async () => {
-    const fake = fakePi(
-      'printf \'%s\\n\' \'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial work"}]}}\'\nexec sleep 60\n',
-    );
-    const { runImplementerUnit } = await import("../extensions/implementer-runner.ts");
-    await withPiBin(fake, async () => {
-      const started = Date.now();
-      const res = await runImplementerUnit("sys", "task", "/tmp", undefined, 400);
-      assert.equal(res.timedOut, true, "timeout must be flagged structurally");
-      assert.match(res.error ?? "", /timed out after 400ms/, "timeout must be named");
-      assert.match(res.error ?? "", /partial work/, "error context must be the assistant text");
-      assert.ok(Date.now() - started < 5_000, "must settle promptly after the kill");
-    });
-  });
-
   it("classifies an exit before any report block per the old exit semantics", async () => {
     const fake = fakePi(
       'printf \'%s\\n\' \'{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"halfway there"}]}}\'\nexit 3\n',
@@ -321,6 +306,84 @@ describe("runImplementerUnit over the rpc transport", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// T2.2b — the wall clock runs the deadline handover instead of a hard SIGKILL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe("runImplementerUnit deadline handover (T2.2b)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("SIGKILLs the child only after the third handover round with no report, and reports timedOut", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const {
+      DEADLINE_HANDOVER_MESSAGE,
+      DEADLINE_IDLE_TIMEOUT_MS,
+      DEADLINE_REPORT_TIMEOUT_MS,
+    } = await import("../extensions/deadline-handover.ts");
+    const client = stubClient();
+    client.emitAssistant("partial work"); // assistant text stays as the timeout error context
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 400 });
+    const handovers = () => client.prompts.filter((m) => m === DEADLINE_HANDOVER_MESSAGE);
+
+    await vi.advanceTimersByTimeAsync(400); // wall clock hits -> handover round 1 begins
+    assert.equal(client.isAlive(), true, "the deadline must not SIGKILL outright");
+    assert.equal(client.sends.length, 1, "round 1 opens with the RPC abort");
+    await vi.advanceTimersByTimeAsync(DEADLINE_IDLE_TIMEOUT_MS);
+    assert.equal(handovers().length, 1, "round 1 prompts the handover after the idle cap");
+    await vi.advanceTimersByTimeAsync(DEADLINE_REPORT_TIMEOUT_MS); // round 1 report wait elapses -> round 2
+    await vi.advanceTimersByTimeAsync(DEADLINE_IDLE_TIMEOUT_MS);
+    assert.equal(handovers().length, 2, "round 2 prompts the handover");
+    assert.equal(client.isAlive(), true, "no SIGKILL before the third round completes");
+    await vi.advanceTimersByTimeAsync(DEADLINE_REPORT_TIMEOUT_MS); // round 2 report wait elapses -> round 3
+    await vi.advanceTimersByTimeAsync(DEADLINE_IDLE_TIMEOUT_MS);
+    assert.equal(handovers().length, 3, "the third round prompts the handover");
+    assert.equal(client.isAlive(), true, "the kill waits for the third report wait");
+    await vi.advanceTimersByTimeAsync(DEADLINE_REPORT_TIMEOUT_MS);
+    assert.equal(client.isAlive(), false, "the child is SIGKILLed after the third round");
+    const res = await promise;
+    assert.equal(res.timedOut, true, "timeout must be flagged structurally");
+    assert.match(res.error ?? "", /timed out after 400ms/, "timeout must be named");
+    assert.match(res.error ?? "", /partial work/, "error context must be the assistant text");
+    assert.equal(client.sends.length, 3, "exactly one RPC abort per round");
+  });
+
+  it("a report emitted during a handover round settles the attempt with timedOut true, findings and nextSteps", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient } = await import("../extensions/implementer-runner.ts");
+    const { DEADLINE_HANDOVER_MESSAGE, DEADLINE_IDLE_TIMEOUT_MS } = await import(
+      "../extensions/deadline-handover.ts"
+    );
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 400 });
+    await vi.advanceTimersByTimeAsync(400); // wall clock -> the runner invokes the handover
+    assert.equal(
+      client.prompts.includes(DEADLINE_HANDOVER_MESSAGE),
+      false,
+      "round 1 waits for the idle cap before prompting",
+    );
+    await vi.advanceTimersByTimeAsync(DEADLINE_IDLE_TIMEOUT_MS);
+    assert.ok(
+      client.prompts.includes(DEADLINE_HANDOVER_MESSAGE),
+      "the deadline must invoke the handover routine",
+    );
+    client.emitAssistant(
+      'wrapping up\n```json\n{"summary":"late partial","status":"partial","findings":["f-one","f-two"],"nextSteps":"resume at the fixture"}\n```',
+    );
+    const res = await promise; // settles without further timers: the round's report wait sees it
+    assert.equal(res.timedOut, true, "a handover report still flags timedOut");
+    assert.equal(res.summary, "late partial");
+    assert.deepEqual(res.findings, ["f-one", "f-two"], "the report's findings ride the attempt");
+    assert.equal(res.nextSteps, "resume at the fixture", "the report's nextSteps ride the attempt");
+    await vi.advanceTimersByTimeAsync(120_000); // no later round, steer or kill may fire
+    assert.equal(
+      client.prompts.filter((m) => m === DEADLINE_HANDOVER_MESSAGE).length,
+      1,
+      "the attempt settled during the first handover round",
+    );
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // T3 — soft deadline: a single wrap-up steer at 70% before the hard kill
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -333,14 +396,21 @@ function stubClient(stderr = "") {
   const exitListeners = new Set<(info: { code: number }) => void>();
   const steers: string[] = [];
   const steerPrompts: string[] = [];
+  const prompts: string[] = [];
+  const sends: Array<Record<string, unknown>> = [];
   let raw = "";
   let alive = true;
   return {
     steers,
     steerPrompts,
-    send: () => {},
+    prompts,
+    sends,
+    send: (command: Record<string, unknown>) => {
+      sends.push(command);
+    },
     command: async () => ({ type: "response", success: false, id: "" }),
     prompt: (message: string, streamingBehavior?: string) => {
+      prompts.push(message);
       if (streamingBehavior === "steer") steerPrompts.push(message);
     },
     steer: (message: string) => {
@@ -399,6 +469,8 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     const { runImplementerUnitWithClient, PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE } = await import(
       "../extensions/implementer-runner.ts"
     );
+    const { DEADLINE_HANDOVER_MESSAGE, DEADLINE_IDLE_TIMEOUT_MS, DEADLINE_REPORT_TIMEOUT_MS } =
+      await import("../extensions/deadline-handover.ts");
     const client = stubClient();
     const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
     await vi.advanceTimersByTimeAsync(499);
@@ -411,9 +483,18 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE, WRAP_UP_STEER_MESSAGE], "wrap-up at 700ms");
     assert.match(client.steerPrompts[1]!, /status/, "the steer names the status field");
     assert.match(client.steerPrompts[1]!, /partial/, "the steer asks for status partial");
-    await vi.advanceTimersByTimeAsync(301); // hard kill at 1000ms
+    await vi.advanceTimersByTimeAsync(301); // wall clock at 1000ms starts the deadline handover
+    // No report ever arrives: three rounds of idle cap + report cap end in the SIGKILL.
+    for (let round = 0; round < 3; round++) {
+      await vi.advanceTimersByTimeAsync(DEADLINE_IDLE_TIMEOUT_MS + DEADLINE_REPORT_TIMEOUT_MS);
+    }
     const res = await promise;
-    assert.equal(res.timedOut, true, "the hard kill still yields timedOut=true");
+    assert.equal(res.timedOut, true, "the deadline still yields timedOut=true");
+    assert.equal(
+      client.prompts.filter((m) => m === DEADLINE_HANDOVER_MESSAGE).length,
+      3,
+      "the hard path ran three handover rounds before the kill",
+    );
     assert.match(res.error ?? "", /timed out after 1000ms/);
     assert.equal(client.steerPrompts.length, 2, "each steer fires exactly once");
     assert.equal(client.steers.length, 0, "timed messages never use client.steer");
@@ -455,10 +536,18 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     });
     await vi.advanceTimersByTimeAsync(0);
     controller.abort();
+    assert.equal(client.isAlive(), false, "a parent abort kills the child immediately");
     const res = await promise;
     assert.equal(res.timedOut, true, "an abort takes the kill path");
-    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(2_000); // well past the original 1000ms deadline
     assert.equal(client.steerPrompts.length, 0, "the soft timer must not steer after abort");
+    const { DEADLINE_HANDOVER_MESSAGE } = await import("../extensions/deadline-handover.ts");
+    assert.equal(
+      client.prompts.includes(DEADLINE_HANDOVER_MESSAGE),
+      false,
+      "an abort must never run handover rounds",
+    );
+    assert.equal(client.sends.length, 0, "an abort never sends a handover abort round");
   });
 });
 
