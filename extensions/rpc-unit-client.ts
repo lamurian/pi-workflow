@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { buildImplementerArgs } from "./implementer-args.ts";
 import { getPiInvocation } from "./process-utils.ts";
+import type { UnitSessionSpec } from "./unit-session.ts";
 
 /** An image attachment in RPC ImageContent format. */
 export interface RpcImage {
@@ -51,6 +52,9 @@ export interface RpcUnitClientOptions {
   thinkingFloor?: string;
   /** T19: the task's pinned command names; non-empty grants `run` in `--tools`. */
   runCommands?: readonly string[];
+  /** T1: persistent session spec forwarded to `buildImplementerArgs`; when
+   * present the child gets `--session-dir`/`--session-id` instead of `--no-session`. */
+  session?: UnitSessionSpec;
 }
 
 /**
@@ -104,7 +108,7 @@ let commandSeq = 0;
  * @returns A live client handle for the child process.
  */
 export function spawnRpcUnitClient(options: RpcUnitClientOptions): RpcUnitClient {
-  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath, options.modelRef, options.thinkingFloor, options.runCommands);
+  const args = buildImplementerArgs(options.systemPrompt, options.testExtPath, options.modelRef, options.thinkingFloor, options.runCommands, options.session);
   const invocation = getPiInvocation(args);
   const proc: ChildProcess = spawn(invocation.command, invocation.args, {
     cwd: options.cwd,

@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { resolveChildThinking } from "./process-utils.ts";
+import { unitSessionFile, type UnitSessionSpec } from "./unit-session.ts";
 
 /** Bash-free tools granted to an implementer subprocess by default. */
 const DEFAULT_IMPLEMENTER_TOOLS = "read,write,edit,grep,find,ls,delete_file";
@@ -67,6 +68,12 @@ export function getImplementerTools(
  *                       effective level is max(env base, floor).
  * @param runCommands - T19: the task's pinned command names; when non-empty
  *                       `run` is appended to `--tools`, otherwise it never is.
+ * @param session      - T1: optional persistent session spec. When present,
+ *                       `--no-session` is replaced by `--session-dir <dir>` and
+ *                       `--session-id <id>`; a `forkFrom` source resolves via
+ *                       `unitSessionFile` to an explicit `--fork <abs .jsonl>`
+ *                       (never the bare id, which would hit `--fork`'s partial-
+ *                       UUID form). Absent keeps today's `--no-session` argv.
  * @returns Array of CLI arguments for the implementer subprocess.
  */
 export function buildImplementerArgs(
@@ -75,6 +82,7 @@ export function buildImplementerArgs(
   modelRef?: string,
   thinkingFloor?: string,
   runCommands: readonly string[] = [],
+  session?: UnitSessionSpec,
 ): string[] {
   const tools = getImplementerTools();
   const names = tools.split(",").map((n) => n.trim()).filter((n) => n !== "run");
@@ -82,12 +90,21 @@ export function buildImplementerArgs(
   // T19: run is granted only when the unit's task lists pinned commands.
   if (runCommands.length > 0) names.push("run");
   const granted = names.join(",");
-  const args: string[] = [
-    "--mode", "rpc",
-    "--no-session",
+  const args: string[] = ["--mode", "rpc"];
+  if (session) {
+    args.push("--session-dir", session.dir);
+    if (session.forkFrom) {
+      const source = unitSessionFile(session.dir, session.forkFrom);
+      if (source) args.push("--fork", source);
+    }
+    args.push("--session-id", session.id);
+  } else {
+    args.push("--no-session");
+  }
+  args.push(
     "--no-extensions",
     "-e", contractGuardExtensionPath(),
-  ];
+  );
   if (testExtPath) {
     args.push("-e", testExtPath);
   }
