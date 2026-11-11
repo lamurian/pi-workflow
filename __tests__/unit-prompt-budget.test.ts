@@ -19,7 +19,20 @@ describe("unit-prompt.md budget (T11)", () => {
     assert.match(text, /not repeat verification/i);
     assert.match(text, /600 s/);
     assert.match(text, /50%/);
-    assert.match(text, /80%/);
+    assert.match(text, /70%/);
+    assert.doesNotMatch(text, /80%/, "the stale 80% steer is gone");
+  });
+
+  it("states steers at 50% and 70% and a deadline handover that asks for the report at once", async () => {
+    const text = await load();
+    assert.match(text, /steers at 50% and 70%/);
+    assert.match(text, /deadline/i);
+    assert.match(
+      text,
+      /emit it at once|immediately/i,
+      "a deadline handover asks for the JSON report immediately",
+    );
+    assert.match(text, /status partial, findings, nextSteps/i);
   });
 
   it("documents status blocked with blockedReason capability or too-large", async () => {

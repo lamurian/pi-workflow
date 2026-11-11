@@ -315,7 +315,8 @@ describe("getImplementerTimeoutMs (T8)", () => {
       "retry text names the 600 s default",
     );
     const prompt = await loadContent("unit-prompt.md");
-    assert.match(prompt, /900 s default/, "unit prompt names the 900 s default");
+    assert.match(prompt, /600 s default/, "unit prompt names the 600 s default");
+    assert.doesNotMatch(prompt, /900 s/, "the stale 900 s default is gone");
   });
 });
 
