@@ -5,9 +5,7 @@ import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import {
   WARM_STEER_CAP,
-  UNDELIVERED_HALT_THRESHOLD,
   UNDELIVERED_STEER_ERROR,
-  buildUndeliveredHaltText,
   canSteerWarmChild,
   shutdownWarmChild,
   steerFixRound,
@@ -386,8 +384,8 @@ describe("steerFixRound", () => {
   });
 });
 
-// ═══ T2: undelivered fix rounds ═══
-describe("undelivered fix rounds (T2)", () => {
+// ═══ T6: fix rounds never warm-steer ═══
+describe("fix rounds never warm-steer (T6)", () => {
   /** Fresh loop run with the cancelled flag reset (cancelOrchestration is sticky). */
   async function runLoop(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState, runner: UnitRunner) {
     beginOrchestration(Promise.resolve());
@@ -398,89 +396,38 @@ describe("undelivered fix rounds (T2)", () => {
     }
   }
 
-  it("an undelivered round falls back to a fresh spawn without charging the retry or the warm steer (T2)", async () => {
-    const pi = piWithGate({ landOnCommit: 3 }); // hook rejects commits 1-2, lands 3
+  it("a fix round never steers into the kept-alive child and its prompt carries the gate failure output (T6)", async () => {
+    const pi = piWithGate({ landOnCommit: 2 }); // hook rejects commit 1, lands 2
     const state = warmTask();
     const ctx = ctxWithState(state);
     const calls: UnitTask[] = [];
-    // The first fix round goes warm into an idle child: the get_state probe reports
-    // isStreaming false and no stdout ever follows the prompt — the round is undelivered.
-    // (A SECOND consecutive undelivered round would halt the run — see the next test.)
-    const idle = makeWarmClient(undefined, () => ({ isStreaming: false }));
-    const deliver = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("fixed after undelivered rounds", { suggestedCommit: "feat(core): fix T1" })));
-    });
-    const clients = [idle, deliver];
+    const warm = makeWarmClient();
     const runner: UnitRunner = async (unit) => {
       calls.push(unit);
-      const handle = clients[calls.length - 1]!;
-      setActiveUnitClient(handle.client);
-      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base", client: handle.client };
+      if (calls.length === 1) {
+        setActiveUnitClient(warm.client);
+        return { summary: "implemented", suggestedCommit: "feat(core): base", client: warm.client, contextPercent: 30 };
+      }
+      return { summary: "fixed", suggestedCommit: "feat(core): fix T1" };
     };
 
     const result = await runLoop(pi, ctx, state, runner);
 
-    assert.equal(result.complete, true, "the run lands once a warm round is delivered");
-    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"], "the commit uses the delivered report");
-    assert.equal(calls.length, 2, "base plus one fresh fallback — the undelivered round spawned no unit of its own");
-    assert.equal(calls[1]!.behaviorId, "T1", "the fresh fallback targets the same behavior");
-    assert.match(
-      calls[1]!.taskText,
-      /## Previous attempt failed \(retry 1\/5\)/,
-      "the fallback fresh spawn carries the same fix text with the retry counter untouched",
-    );
-    assert.equal(idle.record.prompts.length, 1, "the undelivered round still rode a warm prompt (steer refunded)");
-    assert.equal(idle.record.shutdowns, 1, "the idle child is shut down by its fallback");
-    assert.equal(deliver.record.prompts.length, 1, "the next fix round still went warm into the live child");
-    assert.equal(deliver.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
-    assert.match(
-      deliver.record.prompts[0]!.message,
-      /## Previous attempt failed \(retry 1\/5\)/,
-      "the retry counter was never incremented by the undelivered round",
-    );
-    assert.equal(result.unitsRun, 2, "the undelivered round contributes its fallback fresh spawn, not itself");
-    assert.equal(deliver.record.shutdowns, 1, "the delivered child is shut down on landing");
-  });
-
-  it("two consecutive undelivered rounds halt with the infrastructure delivery error (T2)", async () => {
-    const pi = piWithGate({}); // the hook always rejects
-    const state = warmTask();
-    const ctx = ctxWithState(state);
-    const calls: UnitTask[] = [];
-    const idleA = makeWarmClient(undefined, () => ({ isStreaming: false }));
-    const idleB = makeWarmClient(undefined, () => ({ isStreaming: false }));
-    const clients = [idleA, idleB];
-    const runner: UnitRunner = async (unit) => {
-      calls.push(unit);
-      const handle = clients[calls.length - 1]!;
-      setActiveUnitClient(handle.client);
-      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base", client: handle.client };
-    };
-
-    const result = await runLoop(pi, ctx, state, runner);
-
-    assert.equal(result.complete, false, "the run halts on the second consecutive undelivered round");
-    assert.equal(result.haltedOn, "T1");
-    assert.match(result.error ?? "", /infrastructure/, "the halt names the infrastructure delivery failure");
-    assert.doesNotMatch(result.error ?? "", /failed after \d+ retries/, "never a retry-budget message");
-    assert.ok(
-      (result.error ?? "").includes(buildUndeliveredHaltText("T1", UNDELIVERED_HALT_THRESHOLD)),
-      "the halt text is buildUndeliveredHaltText at the threshold",
-    );
-    assert.equal(calls.length, 2, "one fresh fallback after the first undelivered round, none after the halt");
-    assert.equal(idleA.record.prompts.length, 1, "warm fix round 1 into child A");
-    assert.equal(idleB.record.prompts.length, 1, "warm fix round 2 into child B");
-    assert.equal(idleB.record.shutdowns, 1, "the halt shuts the live child down");
-
-    // The undelivered rounds land in the attempt history with progress false and the delivery error.
-    const undelivered = (result.attempts ?? []).filter((a) => a.lastText === UNDELIVERED_STEER_ERROR);
-    assert.equal(undelivered.length, UNDELIVERED_HALT_THRESHOLD, "one attempt record per undelivered round");
-    assert.ok(undelivered.every((a) => a.progress === false), "undelivered rounds record no progress");
+    assert.equal(result.complete, true, result.error ?? "the run lands after one fresh fix round");
+    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"], "the commit uses the fix report");
+    assert.equal(calls.length, 2, "base plus exactly one fresh fix spawn");
+    assert.equal(warm.record.prompts.length, 0, "the kept-alive child never receives the fix prompt");
+    assert.deepEqual(warm.record.steers, [], "the fix round never steers into the kept-alive child");
+    assert.equal(warm.record.shutdowns, 1, "the kept-alive child is shut down before the fresh spawn");
+    assert.match(calls[1]!.taskText, /## Previous attempt failed \(retry 1\/5\)/, "the fresh spawn carries the fix text");
+    assert.match(calls[1]!.taskText, /husky - pre-commit hook failed/, "the prompt carries the gate failure output");
+    assert.match(calls[1]!.session?.id ?? "", /-fix1$/, "fresh session id <implSessionId>-fix1");
+    assert.equal(calls[1]!.session?.forkFrom, undefined, "a mechanical trigger fresh-spawns");
   });
 });
 
 // ═══ Loop integration: warm retries ═══
-describe("orchestrator warm retries", () => {
+describe("fix sessions replace warm retries (T6)", () => {
   /** Fresh loop run with the cancelled flag reset (cancelOrchestration is sticky). */
   async function runLoop(pi: ExtensionAPI, ctx: ExtensionContext, state: WorkflowState, runner: UnitRunner) {
     beginOrchestration(Promise.resolve());
@@ -491,111 +438,19 @@ describe("orchestrator warm retries", () => {
     }
   }
 
-  it("a hook-rejected commit delivers the fix via prompt into the same live child and lands from the new report", async () => {
-    const pi = piWithGate({ landOnCommit: 2 });
-    const state = warmTask();
-    const ctx = ctxWithState(state);
-    const calls: UnitTask[] = [];
-    const warm = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("fixed after hook rejection", { suggestedCommit: "feat(core): fix T1" })));
-    });
-    warm.emit(assistantLine(reportJson("stale base report", { suggestedCommit: "feat(core): stale" })));
-    const runner: UnitRunner = async (unit) => {
-      calls.push(unit);
-      setActiveUnitClient(warm.client); // mirrors runImplementerUnit's registry behavior
-      return {
-        summary: `implemented ${unit.behaviorId}`,
-        suggestedCommit: "feat(core): base",
-        client: warm.client,
-      };
-    };
-
-    const result = await runLoop(pi, ctx, state, runner);
-
-    assert.equal(result.complete, true, "the steered retry lands");
-    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"], "the commit uses the post-steer report");
-    assert.equal(calls.length, 1, "no fresh fix unit is spawned while the child is alive");
-    assert.equal(result.unitsRun, 1, "a warm round is not a new unit");
-    assert.equal(warm.record.prompts.length, 1, "one warm fix prompt");
-    assert.equal(warm.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
-    assert.match(warm.record.prompts[0]!.message, /## Previous attempt failed \(retry 1\/5\)/, "the fix task text");
-    assert.match(warm.record.prompts[0]!.message, /husky - pre-commit hook failed/, "the hook output rides the prompt");
-    assert.deepEqual(warm.record.steers, [], "no steer command: the report settles before the soft deadline");
-    assert.equal(warm.record.shutdowns, 1, "the child is shut down on landing");
-  });
-
-  it("a no-changes commit outcome also delivers the fix via prompt into the same live child", async () => {
-    const pi = piWithGate({ landOnCommit: 2, failCode: 0, dirty: () => false });
-    const state = warmTask();
-    const ctx = ctxWithState(state);
-    const calls: UnitTask[] = [];
-    const warm = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("implemented for real", { suggestedCommit: "feat(core): fix T1" })));
-    });
-    const runner: UnitRunner = async (unit) => {
-      calls.push(unit);
-      setActiveUnitClient(warm.client);
-      return { summary: "reported success", suggestedCommit: "feat(core): base", client: warm.client };
-    };
-
-    const result = await runLoop(pi, ctx, state, runner);
-
-    assert.equal(result.complete, true, "the steered retry lands");
-    assert.equal(calls.length, 1, "no fresh spawn for a no-changes fix");
-    assert.equal(warm.record.prompts.length, 1, "one warm fix prompt");
-    assert.equal(warm.record.prompts[0]!.streamingBehavior, "steer", "steer semantics ride the prompt");
-    assert.match(
-      warm.record.prompts[0]!.message,
-      /No changes detected/,
-      "the no-changes investigation rides the prompt",
-    );
-    assert.deepEqual(warm.record.steers, [], "no steer command");
-    assert.deepEqual(result.landedCommits, ["feat(core): fix T1"]);
-  });
-
-  it("a dead child falls back to a fresh fix unit", async () => {
-    const pi = piWithGate({ landOnCommit: 3 });
-    const state = warmTask();
-    const ctx = ctxWithState(state);
-    const calls: UnitTask[] = [];
-    const first = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("partial fix", { suggestedCommit: "feat(core): try1" })));
-      first.die(); // the child dies right after its warm round
-    });
-    const second = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("fixed fresh", { suggestedCommit: "feat(core): fix T1" })));
-    });
-    const clients = [first, second];
-    const runner: UnitRunner = async (unit) => {
-      calls.push(unit);
-      const handle = clients[calls.length - 1]!;
-      setActiveUnitClient(handle.client);
-      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base", client: handle.client };
-    };
-
-    const result = await runLoop(pi, ctx, state, runner);
-
-    assert.equal(result.complete, true, "the fresh fix unit lands the commit");
-    assert.equal(calls.length, 2, "one warm fix round, then one fresh fix unit");
-    assert.match(calls[1]!.taskText, /## Previous attempt failed \(retry 2\/5\)/, "the fresh unit gets the fix task");
-    assert.equal(first.record.prompts.length, 1, "only the first round was delivered, via prompt");
-    assert.deepEqual(first.record.steers, [], "no steer command to the warm child");
-    assert.equal(first.record.shutdowns, 0, "a dead child is not shut down again");
-    assert.equal(second.record.shutdowns, 1, "the fresh child is shut down on landing");
-  });
-
-  it("counts every warm steer toward RETRY_BUDGET and halts after the 5-steer cap", async () => {
+  it("persistent hook rejection halts after five fresh fix units on fresh session ids (T6)", async () => {
     const pi = piWithGate({}); // hook always rejects, tree stays dirty
     const state = warmTask();
     const ctx = ctxWithState(state);
     const calls: UnitTask[] = [];
-    const warm = makeWarmClient((_message, emit) => {
-      emit(assistantLine(reportJson("another attempt", { suggestedCommit: "feat(core): fix" })));
-    });
+    const warm = makeWarmClient();
     const runner: UnitRunner = async (unit) => {
       calls.push(unit);
-      setActiveUnitClient(warm.client);
-      return { summary: "attempt", suggestedCommit: "feat(core): base", client: warm.client };
+      if (calls.length === 1) {
+        setActiveUnitClient(warm.client);
+        return { summary: "attempt", suggestedCommit: "feat(core): base", client: warm.client };
+      }
+      return { summary: `attempt ${calls.length}`, suggestedCommit: "feat(core): base" };
     };
 
     const result: OrchestratorResult = await runLoop(pi, ctx, state, runner);
@@ -603,11 +458,15 @@ describe("orchestrator warm retries", () => {
     assert.equal(result.complete, false, "the run halts once the budget is spent");
     assert.equal(result.haltedOn, "T1");
     assert.match(result.error ?? "", /after 5 retries/);
-    assert.equal(calls.length, 1, "all five retries were warm rounds, no fresh spawn");
-    assert.equal(warm.record.prompts.length, WARM_STEER_CAP, "exactly 5 fix prompts before the halt");
-    assert.deepEqual(warm.record.steers, [], "no steer commands: every fix rides a prompt");
-    assert.equal(result.attempts?.length, 6, "base attempt plus 5 steered rounds in the attempt table");
-    assert.equal(warm.record.shutdowns, 1, "the child is shut down on halt");
+    assert.equal(calls.length, 6, "base plus five fresh fix units — never a warm steer");
+    assert.equal(warm.record.prompts.length, 0, "the kept-alive child is never prompted");
+    assert.deepEqual(warm.record.steers, [], "no steer commands at all");
+    assert.equal(warm.record.shutdowns, 1, "the child is shut down before the first fresh fix spawn");
+    for (const [i, spawn] of calls.slice(1).entries()) {
+      assert.match(spawn.session?.id ?? "", new RegExp(`-fix${i + 1}$`), "fresh id per fix index");
+      assert.equal(spawn.session?.forkFrom, undefined, "a mechanical trigger never forks");
+    }
+    assert.equal(result.attempts?.length, 6, "base attempt plus 5 fix rounds in the attempt table");
   });
 
   it("injected runners without a client keep the fresh-spawn behavior", async () => {

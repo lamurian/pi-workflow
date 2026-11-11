@@ -13,13 +13,13 @@ import { getCommitTimeoutMs, isOutOfRepoBehavior, readGitHead, readTreeFingerpri
 import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
 import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
-import { resolveBehaviorSession } from "./behavior-sessions.ts";
+import { resolveBehaviorSession, createFixRoundTracker, noteAttemptContext, chooseBehaviorFixSession, type FixTrigger } from "./behavior-sessions.ts";
 import { removeBehaviorSessions } from "./unit-session.ts";
 import { commitScopeGate } from "./test-gate-run.ts";
 import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
 import type { UnitRunner, OrchestratorResult } from "./implement-loop.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
-import { canSteerWarmChild, shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause, buildUndeliveredHaltText, UNDELIVERED_HALT_THRESHOLD } from "./warm-unit.ts";
+import { shutdownWarmChild, createAttemptRecorder, completeAlreadySatisfied, completeLeftUncommitted, runManualVerificationPause } from "./warm-unit.ts";
 
 /** Shared driver state and callbacks handed to runBehaviorLoop for one behavior. */
 export interface BehaviorLoopDeps {
@@ -43,7 +43,7 @@ export interface BehaviorLoopDeps {
 /**
  * Run the unit/retry/commit loop for one active behavior: base attempt, partials,
  * budget-charged retries, the mustRunNow pause, already-satisfied, the commit gate
- * with fix rounds (T5 warm steers) and the fresh-spawn fallback.
+ * with fix rounds (T6: forked or fresh sessions) and the fresh-spawn fallback.
  * Driver state and behavior.status are mutated in place.
  *
  * @param behavior   - The active behavior to run.
@@ -80,10 +80,8 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   const baseTask: UnitTask = { behaviorId: behavior.id, taskText: haltPrefix + baseCore + findingsSection(), kind: behavior.kind, session: resume.session };
 
   const relay = (event: Record<string, unknown>) => relayImplementerEvent(pi, ctx, behavior.id, position, event);
-  // T5: the kept-alive child absorbs hook-rejected/no-changes fixes as warm steers below WARM_STEER_CAP.
   let liveChild: RpcUnitClient | undefined;
-  let warmSteersUsed = 0;
-  let undeliveredStreak = 0; // T2: consecutive undelivered fix rounds; UNDELIVERED_HALT_THRESHOLD of them halt the run.
+  const fixTracker = createFixRoundTracker(); // T6: latest attempt contextPercent + fix index.
   const haltWithChild = async (behaviorId: string, error: string, pendingCommand?: PendingCommand) => {
     await shutdownWarmChild(liveChild); liveChild = undefined;
     return halt(behaviorId, error, pendingCommand);
@@ -99,6 +97,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
   const adoptRound = () => {
     attemptProgress = recorder.progress(); attemptHeadBefore = recorder.headBefore();
     timeoutStreak = attempt.timedOut ? timeoutStreak + 1 : 0; // T5: any non-timeout attempt resets the consecutive-timeout count.
+    noteAttemptContext(fixTracker, attempt.contextPercent); // T6: the latest attempt's context usage feeds the next fix-round session choice.
   };
   let attempt = await recorder.runFresh(baseTask);
   liveChild = attempt.client;
@@ -109,34 +108,20 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
 
   /** Run one fresh follow-up attempt (continuation or retry) with the given task text.
    * `thinking` is the retry escalation floor (medium/high); continuations pass none. */
-  const runFollowUp = async (taskText: string, thinking?: string) => {
+  const runFollowUp = async (taskText: string, thinking?: string, session = resume.session) => {
     await shutdownWarmChild(liveChild); liveChild = undefined; // never leak a stale kept-alive child across fresh spawns
-    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind, session: resume.session, ...(thinking ? { thinking } : {}) });
+    attempt = await recorder.runFresh({ behaviorId: behavior.id, taskText, kind: behavior.kind, session, ...(thinking ? { thinking } : {}) });
     liveChild = attempt.client; adoptRound(); result.unitsRun++;
   };
   const runRetry = async (taskText: string) => {
     // T2: escalate thinking across retry spawns (fresh spawns only).
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`); await runFollowUp(taskText, attempt.timedOut ? undefined : retry === 1 ? "medium" : "high"); retry++; // T14: timeouts never escalate thinking
   };
-  /**
-   * One fix-forward round: warm-steer the live test-kind child below the cap, else fresh-spawn.
-   * T2: an undelivered steer refunds the warm steer, is not charged to the retry counter, falls
-   * back to a fresh spawn, and UNDELIVERED_HALT_THRESHOLD consecutive rounds halt the run.
-   * @returns "undelivered", a halt result, or undefined for an ordinary round.
-   */
-  const runFixRound = async (taskText: string): Promise<OrchestratorResult | "undelivered" | undefined> => {
-    if (behavior.kind === "test" && canSteerWarmChild(liveChild, warmSteersUsed)) {
-      warmSteersUsed++;
-      attempt = await recorder.runSteer(liveChild!, taskText);
-      adoptRound();
-      if (attempt.undeliveredSteer) { // T2: the child never picked the round up (isStreaming false, no new stdout)
-        warmSteersUsed--; // an undelivered round consumes no warm steer
-        if (++undeliveredStreak >= UNDELIVERED_HALT_THRESHOLD) return haltWithChild(behavior.id, buildUndeliveredHaltText(behavior.id, undeliveredStreak));
-        await runFollowUp(taskText); // fresh spawn for the same behavior; the retry counter stays put
-        return "undelivered";
-      }
-      undeliveredStreak = 0;
-    } else await runFollowUp(taskText);
+  /** One fix-forward round (T6): fresh spawn on the chosen session (fork or fresh), never a warm steer.
+   * @returns undefined (the fresh spawn carries the attempt). */
+  const runFixRound = async (taskText: string, trigger: FixTrigger): Promise<undefined> => {
+    const plan = chooseBehaviorFixSession(fixTracker, resume.session, trigger);
+    await runFollowUp(taskText, undefined, { dir: resume.session.dir, ...plan });
     return undefined;
   };
   const trySplit = async (trigger: SplitTrigger, haltText: string) => { await shutdownWarmChild(liveChild); liveChild = undefined; return splitOrHalt({ pi, ctx, state, behaviorId: behavior.id, trigger }, haltText, { halt: (text) => halt(behavior.id, text), runChild: (id) => runSplitChild(state, id, (c, t) => runBehaviorLoop(c, unitIndex, totalUnits, { ...deps, task: t }), () => saveState(pi, state)) }); }; // T24: runtime split; children, vetoes and rejections halt
@@ -247,9 +232,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         if (retry > RETRY_BUDGET) return haltWithChild(behavior.id, redGateHaltText(gate));
         ctx.ui.notify(redGateNotifyText(gate, retry), "warning");
         ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): scope-gate fix ${retry}/${RETRY_BUDGET}…`);
-        const gateFix = await runFixRound(buildScopeGateFixTask(gate, retry, baseCore) + noteSection + findingsSection());
-        if (gateFix === "undelivered") continue; // T2: the retry counter stays put; the fresh fallback carries the attempt
-        if (gateFix) return gateFix;
+        await runFixRound(buildScopeGateFixTask(gate, retry, baseCore) + noteSection + findingsSection(), "scope-gate");
         retry++;
         continue;
       }
@@ -304,12 +287,9 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
 
     if (retry > RETRY_BUDGET) return haltWithChild(behavior.id, `${retryExhaustedDetail(commit.outcome.kind, behavior.id)}\n\n${commit.outcome.investigation}`);
 
-    // T5/T8: hook-rejected/no-changes and red scope-gate fixes steer into the live test-kind child below the cap; else fresh-spawn.
     const fixText = buildFixTask(behavior, task, baseCore, commit.outcome, retry) + findingsSection();
     ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): retry ${retry}/${RETRY_BUDGET}…`);
-    const fixRound = await runFixRound(fixText);
-    if (fixRound === "undelivered") continue; // T2: the retry counter stays put; the fresh fallback carries the attempt
-    if (fixRound) return fixRound;
+    await runFixRound(fixText, commit.outcome.kind);
     retry++;
   }
   return undefined;

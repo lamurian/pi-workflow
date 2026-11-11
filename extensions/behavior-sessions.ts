@@ -8,6 +8,9 @@
  */
 
 import { unitSessionDir, unitSessionFile, type UnitSessionSpec } from "./unit-session.ts";
+import { chooseFixSession, type FixSessionPlan, type FixTrigger } from "./fix-session.ts";
+
+export type { FixTrigger } from "./fix-session.ts";
 
 /**
  * Derive the deterministic resume session id for one behavior.
@@ -53,4 +56,60 @@ export function resolveBehaviorSession(
   const dir = unitSessionDir(cwd);
   const id = behaviorSessionId(behaviorId, baselineHead);
   return { session: { dir, id }, exists: unitSessionFile(dir, id) !== undefined };
+}
+
+/** Fix-round tracking for one behavior (T6): latest attempt context usage and fix index. */
+export interface FixRoundTracker {
+  /** Latest context usage percent reported by the behavior's attempts; undefined when unknown. */
+  contextPercent: number | undefined;
+  /** Fix rounds started so far (0 before the first). */
+  fixIndex: number;
+}
+
+/**
+ * Create an empty fix-round tracker for one behavior.
+ *
+ * @returns A tracker with unknown context and fix index 0.
+ */
+export function createFixRoundTracker(): FixRoundTracker {
+  return { contextPercent: undefined, fixIndex: 0 };
+}
+
+/**
+ * Record the latest attempt's context usage on the behavior's tracker.
+ *
+ * @param tracker       - The behavior's fix-round tracker.
+ * @param contextPercent - Percent read from the attempt; undefined overwrites with "unknown".
+ */
+export function noteAttemptContext(tracker: FixRoundTracker, contextPercent: number | undefined): void {
+  tracker.contextPercent = contextPercent;
+}
+
+/**
+ * Choose the session for the behavior's next fix round.
+ *
+ * Advances the fix index, resolves the implementation transcript to its
+ * absolute `.jsonl` path via `unitSessionFile`, and delegates to
+ * `chooseFixSession` — the fork source is always the implementation session,
+ * never an earlier fix session.
+ *
+ * @param tracker - The behavior's tracker (context percent + fix index, mutated in place).
+ * @param session - The behavior's implementation session spec (dir + id).
+ * @param trigger - What made this round fail.
+ * @returns The fix session plan for a new child spawn.
+ */
+export function chooseBehaviorFixSession(
+  tracker: FixRoundTracker,
+  session: UnitSessionSpec,
+  trigger: FixTrigger,
+): FixSessionPlan {
+  tracker.fixIndex += 1;
+  const sourceFile = unitSessionFile(session.dir, session.id);
+  return chooseFixSession({
+    trigger,
+    contextPercent: tracker.contextPercent,
+    implSessionId: session.id,
+    fixIndex: tracker.fixIndex,
+    sourceFile,
+  });
 }
