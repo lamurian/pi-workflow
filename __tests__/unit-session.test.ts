@@ -1,8 +1,12 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { runOrchestratedImplement, type UnitRunner } from "../extensions/implement-loop.ts";
+import type { WorkflowState } from "../extensions/state.ts";
+import { mockPi } from "./helpers/implement-harness.ts";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // T1 — persistent session CLI args and session file resolution
@@ -128,4 +132,137 @@ describe("unitSessionDir / unitSessionFile (T1)", () => {
     assert.equal(unitSessionFile(sessions, "zzzz"), undefined);
     assert.equal(unitSessionFile(join(sessions, "absent"), "ab12"), undefined);
   });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T4 — session cleanup: landed behaviors drop transcripts, halts keep them
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/** Behavior session id used by the T4 tests (`<behaviorId>-<head first 8>`). */
+const BEHAVIOR_SESSION_ID = "T1-abcdef12";
+
+/** Mock context rooted at a temp cwd carrying the given workflow state. */
+function t4Ctx(state: WorkflowState, cwd: string): ExtensionContext {
+  return {
+    cwd,
+    sessionManager: {
+      getBranch: () => [{ type: "custom", customType: "workflow-state", data: state }],
+    },
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setWidget: () => {},
+      setTitle: () => {},
+      theme: { fg: (_c: string, t: string) => t },
+      addAutocompleteProvider: () => {},
+    },
+  } as unknown as ExtensionContext;
+}
+
+/** Finalizing state with the baseline head that keys the resume session. */
+function t4State(): WorkflowState {
+  return {
+    phase: "finalizing",
+    specText: "topic",
+    baselineHead: "abcdef1234567890",
+    task: {
+      title: "T4 Task",
+      instruction: "do things",
+      files: [{ path: "src/a.ts", status: "M" }],
+      done: "tests pass",
+      behaviors: [
+        { id: "T1", description: "x", expectedOutput: "y", kind: "test", status: "active" },
+      ],
+    },
+  };
+}
+
+/** Mock API whose git exec answers rev-parse (head advances on commit) and commit. */
+function t4Pi(): ExtensionAPI {
+  const pi = mockPi();
+  let headCounter = 0;
+  pi.exec = (async (cmd: string, args: string[]) => {
+    if (cmd === "git" && args[0] === "rev-parse") {
+      return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+    }
+    if (cmd === "git" && args[0] === "commit") {
+      headCounter++;
+      return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+    }
+    return { stdout: "", stderr: "", code: 0, killed: false };
+  }) as ExtensionAPI["exec"];
+  return pi;
+}
+
+describe("removeBehaviorSessions (T4)", () => {
+  it("deletes the behavior's implementation and fix session files and leaves other behaviors' session files untouched", async () => {
+    const { removeBehaviorSessions } = await import("../extensions/unit-session.ts");
+    const dir = mkdtempSync(join(tmpdir(), "pi-sess-remove-"));
+    const impl = join(dir, `agent_${BEHAVIOR_SESSION_ID}.jsonl`);
+    const fix1 = join(dir, `agent_${BEHAVIOR_SESSION_ID}-fix1.jsonl`);
+    const nestedDir = join(dir, "team");
+    mkdirSync(nestedDir, { recursive: true });
+    const fix2 = join(nestedDir, `log_${BEHAVIOR_SESSION_ID}-fix2.jsonl`);
+    const other = join(dir, "agent_T2-abcdef12.jsonl");
+    const notJsonl = join(dir, `note_${BEHAVIOR_SESSION_ID}.txt`);
+    for (const f of [impl, fix1, fix2, other, notJsonl]) writeFileSync(f, "");
+
+    removeBehaviorSessions(dir, BEHAVIOR_SESSION_ID);
+
+    assert.ok(!existsSync(impl), "implementation session file must be deleted");
+    assert.ok(!existsSync(fix1), "fix session file must be deleted");
+    assert.ok(!existsSync(fix2), "nested fix session file must be deleted");
+    assert.ok(existsSync(other), "another behavior's session file must survive");
+    assert.ok(existsSync(notJsonl), "non-.jsonl files must survive");
+    // Missing dir is a no-op.
+    removeBehaviorSessions(join(dir, "absent"), BEHAVIOR_SESSION_ID);
+  });
+});
+
+describe("behavior-loop session cleanup (T4)", () => {
+  it("a landed behavior has no session files left under .pi/workflow/sessions, while a halted behavior keeps its session files", async () => {
+    // Landed run: base attempt succeeds and the commit lands → transcripts removed.
+    const landedCwd = mkdtempSync(join(tmpdir(), "pi-sess-landed-"));
+    const landedSessions = join(landedCwd, ".pi", "workflow", "sessions");
+    mkdirSync(landedSessions, { recursive: true });
+    const landedImpl = join(landedSessions, `prev_${BEHAVIOR_SESSION_ID}.jsonl`);
+    const landedFix = join(landedSessions, `prev_${BEHAVIOR_SESSION_ID}-fix1.jsonl`);
+    const landedOther = join(landedSessions, "prev_T2-abcdef12.jsonl");
+    for (const f of [landedImpl, landedFix, landedOther]) writeFileSync(f, "");
+    const landedState = t4State();
+    const landedRunner: UnitRunner = async () => ({
+      summary: "implemented T1",
+      suggestedCommit: "feat(core): add behavior",
+    });
+    const landedResult = await runOrchestratedImplement(
+      t4Pi(),
+      t4Ctx(landedState, landedCwd),
+      landedState,
+      landedState.task!,
+      landedRunner,
+    );
+    assert.equal(landedResult.complete, true, `landed run must complete: ${landedResult.error}`);
+    assert.ok(!existsSync(landedImpl), "landed behavior's implementation session must be gone");
+    assert.ok(!existsSync(landedFix), "landed behavior's fix session must be gone");
+    assert.ok(existsSync(landedOther), "other behavior's session file must survive the landing");
+
+    // Halted run: the unit fails every attempt → halt keeps the transcripts for resume.
+    const haltedCwd = mkdtempSync(join(tmpdir(), "pi-sess-halted-"));
+    const haltedSessions = join(haltedCwd, ".pi", "workflow", "sessions");
+    mkdirSync(haltedSessions, { recursive: true });
+    const haltedImpl = join(haltedSessions, `prev_${BEHAVIOR_SESSION_ID}.jsonl`);
+    writeFileSync(haltedImpl, "");
+    const haltedState = t4State();
+    const haltedRunner: UnitRunner = async () => ({ summary: "failed", error: "unit crashed" });
+    const haltedResult = await runOrchestratedImplement(
+      t4Pi(),
+      t4Ctx(haltedState, haltedCwd),
+      haltedState,
+      haltedState.task!,
+      haltedRunner,
+    );
+    assert.equal(haltedResult.complete, false, "halted run must not complete");
+    assert.ok(haltedResult.error, "halted run must report the halt error");
+    assert.ok(existsSync(haltedImpl), "halted behavior must keep its session files for /implement resume");
+  }, 60_000);
 });

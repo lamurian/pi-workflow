@@ -14,6 +14,7 @@ import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
 import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
 import { resolveBehaviorSession } from "./behavior-sessions.ts";
+import { removeBehaviorSessions } from "./unit-session.ts";
 import { commitScopeGate } from "./test-gate-run.ts";
 import { buildScopeGateFixTask, redGateHaltText, redGateNotifyText } from "./test-gate-report.ts";
 import type { UnitRunner, OrchestratorResult } from "./implement-loop.ts";
@@ -203,6 +204,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     if (isAlreadySatisfied({ alreadySatisfied: attempt.alreadySatisfied, headBefore: attemptHeadBefore, headNow: await readGitHead(pi, cwd), treeStatus: await readTreeState(pi, cwd) })) {
       recorder.sealLast("landed");
       await completeAlreadySatisfied({ pi, ctx, state, behavior, result, position, client: liveChild }); liveChild = undefined;
+      removeBehaviorSessions(resume.session.dir, resume.session.id); // T4: landed — drop the behavior's transcripts (halt paths keep them for resume).
       break;
     }
 
@@ -210,6 +212,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
     if (isOutOfRepoBehavior(behavior, cwd)) {
       recorder.sealLast("landed");
       await completeLeftUncommitted({ pi, ctx, state, behavior, result, position, client: liveChild }); liveChild = undefined;
+      removeBehaviorSessions(resume.session.dir, resume.session.id); // T4: landed without a commit — transcripts are no longer resumable state.
       break;
     }
 
@@ -258,6 +261,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         state.pendingManualChecks = [...(state.pendingManualChecks ?? []), check];
         result.pendingManualChecks = [...(result.pendingManualChecks ?? []), check];
       }
+      removeBehaviorSessions(resume.session.dir, resume.session.id); // T4: commit landed — implementation + fix sessions are finished state.
       ctx.ui.setStatus("implement", `✦ ${behavior.id} (${position}): landed`);
       state.lastMarkedHead = (await readGitHead(pi, cwd)) ?? state.lastMarkedHead;
       state.lastHalt = undefined;

@@ -6,7 +6,7 @@
  * `--session-dir`/`--session-id` (plus `--fork <path>` when forking).
  */
 
-import { mkdirSync, readdirSync, type Dirent } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync, type Dirent } from "node:fs";
 import { join, resolve } from "node:path";
 import { ensureWorkflowRuntimeDir } from "./contract-guard-file.ts";
 import { WORKFLOW_RUNTIME_DIR } from "./contract-guard-core.ts";
@@ -79,4 +79,45 @@ export function unitSessionFile(dir: string, sessionId: string): string | undefi
     return undefined;
   };
   return walk(root);
+}
+
+/**
+ * Delete every session transcript belonging to one behavior.
+ *
+ * Walks `dir` recursively and unlinks each `.jsonl` whose session id starts
+ * with `behaviorSessionId` — the behavior's implementation session plus any
+ * fix sessions sharing the id stem (flat or nested layout). Other behaviors'
+ * transcripts and non-`.jsonl` files are left untouched; a missing dir is a
+ * no-op. Halts must NOT call this so /implement can resume the transcript.
+ *
+ * @param dir               - Sessions directory to clean (may be missing).
+ * @param behaviorSessionId - Behavior session id prefix (`<behaviorId>-<head8>`).
+ */
+export function removeBehaviorSessions(dir: string, behaviorSessionId: string): void {
+  if (!behaviorSessionId) return;
+  const root = resolve(dir);
+  const walk = (current: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        const stem = entry.name.slice(0, -".jsonl".length);
+        if (stem.startsWith(behaviorSessionId) || stem.includes(`_${behaviorSessionId}`)) {
+          try {
+            unlinkSync(full);
+          } catch {
+            // Already gone (concurrent cleanup) — treat as deleted.
+          }
+        }
+      }
+    }
+  };
+  walk(root);
 }
