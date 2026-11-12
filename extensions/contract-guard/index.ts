@@ -5,7 +5,7 @@
  * It enforces the contract's file allowlist in-turn:
  *
  * - lets `read`, `grep`, `find`, `ls` and the generated `test` tool through
- *   untouched;
+ *   (search tools are first checked against the project-directory scope);
  * - checks `write`, `edit` and `delete_file` against the pure allowlist
  *   core (`extensions/contract-guard-core.ts`) using the payload written
  *   by the orchestrator to the file named by `PI_UNIT_FILE` (T5;
@@ -26,6 +26,7 @@ import { Type } from "typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createRunTool } from "./run-tool.ts";
 import { checkToolAction, type DeclaredFile } from "../contract-guard-core.ts";
+import { checkSearchScope } from "../contract-guard-search-scope.ts";
 
 /** Validated guard payload (subset of the JSON file's fields). */
 interface GuardPayload {
@@ -169,6 +170,16 @@ export async function guardToolCall(
   event: ToolCallLike,
 ): Promise<{ block: true; reason: string } | undefined> {
   const toolName = typeof event.toolName === "string" ? event.toolName : "";
+  if (toolName === "grep" || toolName === "find") {
+    const input =
+      typeof event.input === "object" && event.input !== null
+        ? (event.input as Record<string, unknown>)
+        : {};
+    // Read-only search never fails closed: without a payload fall back to cwd.
+    const payload = readGuardPayload(env);
+    const scopeReason = checkSearchScope(toolName, input, payload?.repoRoot ?? process.cwd());
+    if (scopeReason) return { block: true, reason: scopeReason };
+  }
   if (toolName && PASSTHROUGH_TOOLS.has(toolName)) return undefined;
   if (toolName === "bash") {
     return {

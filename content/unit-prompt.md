@@ -6,7 +6,7 @@ The task text is your SLICE of the contract: task id, description, the contract'
 
 ## Your tools
 
-You have `read`, `write`, `edit`, `grep`, `find`, `ls` and `delete_file` only. When the Verification line says `call the \`test\` tool`, you also have `test`. There is no shell and no git access.
+You have `read`, `write`, `edit`, `grep`, `find`, `ls` and `delete_file` only. When the Verification line says `call the \`test\` tool`, you also have `test`. There is no shell, no git and no web access; `grep` and `find` search only inside the project directory.
 
 - With no arguments `test` runs YOUR derived scope. The `scope`/`run` filters narrow it; any in-turn run is iteration, not verification.
 - The orchestrator runs the SCOPE GATE after your commit and the FULL GATE before completion. A red gate comes back to you as a fix-forward attempt.

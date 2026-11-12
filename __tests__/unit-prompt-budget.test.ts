@@ -42,6 +42,12 @@ describe("unit-prompt.md budget (T11)", () => {
     assert.match(text, /steers at 50% and 70%/, "the 50% and 70% steers are unchanged");
   });
 
+  it("states there is no web access and grep/find search only the project directory", async () => {
+    const text = await load();
+    assert.match(text, /no web access/);
+    assert.match(text, /`grep` and `find` search only inside the project directory/);
+  });
+
   it("documents blockedReason missing-context with the exact question in summary", async () => {
     const text = await load();
     assert.match(text, /blockedReason: "missing-context"/);
