@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
-import { shutdownWarmChild } from "../extensions/warm-unit.ts";
+import { shutdownWarmChild, createAttemptRecorder } from "../extensions/warm-unit.ts";
+import type { AttemptRecord } from "../extensions/halt-report.ts";
 import {
   runOrchestratedImplement,
   type OrchestratorResult,
@@ -231,6 +232,124 @@ describe("warm-steer fix machinery removed (T7)", () => {
       history: [],
     });
     assert.equal("runSteer" in recorder, false, "runSteer is removed from the attempt recorder");
+  });
+});
+
+// ═══ T1: progress = tree change only (fix A) ═══
+describe("attempt recorder progress (fix A)", () => {
+  /** Build a recorder over a scripted runUnit/fingerprint; records ledger calls. */
+  function recorderFor(opts: {
+    fingerprint: () => Promise<string>;
+    runUnit: UnitRunner;
+    recordFindings?: (texts: string[] | undefined) => boolean;
+  }) {
+    const ledger: Array<string[] | undefined> = [];
+    const history: AttemptRecord[] = [];
+    const recorder = createAttemptRecorder({
+      behaviorId: "T1",
+      cwd: "/tmp/test",
+      runUnit: opts.runUnit,
+      relay: () => {},
+      recordFindings: (_behaviorId, texts) => {
+        ledger.push(texts);
+        return opts.recordFindings ? opts.recordFindings(texts) : true;
+      },
+      fingerprint: opts.fingerprint,
+      head: async () => null,
+      history,
+    });
+    return { recorder, ledger, history };
+  }
+
+  const TASK: UnitTask = { behaviorId: "T1", taskText: "task" };
+
+  it("records progress false for a timed-out attempt that appends findings while the fingerprint stays unchanged", async () => {
+    const { recorder, history } = recorderFor({
+      fingerprint: async () => "fp-unchanged",
+      runUnit: async () => ({
+        summary: "",
+        error: "timed out after 900000ms",
+        timedOut: true,
+        findings: ["fact: the parser lives in report.ts"],
+      }),
+      recordFindings: () => true,
+    });
+    await recorder.runFresh(TASK);
+    assert.equal(recorder.progress(), false, "findings alone are not progress (fix A)");
+    assert.equal(history[0]!.progress, false, "the recorded attempt row says no progress");
+    assert.equal(history[0]!.outcome, "timeout");
+  });
+
+  it("records progress false for a timed-out attempt whose tool-call digest is appended while the fingerprint stays unchanged", async () => {
+    const { recorder, ledger, history } = recorderFor({
+      fingerprint: async () => "fp-unchanged",
+      runUnit: async (_unit, _cwd, _signal, onEvent) => {
+        onEvent?.({
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", name: "read", arguments: { path: "src/a.ts" } }],
+          },
+        });
+        return { summary: "", error: "timed out after 900000ms", timedOut: true };
+      },
+      recordFindings: () => true,
+    });
+    await recorder.runFresh(TASK);
+    assert.ok(
+      ledger.some((texts) => texts?.[0]?.startsWith("previous attempt touched:")),
+      "the tool-call digest reached the ledger",
+    );
+    assert.equal(recorder.progress(), false, "the digest alone is not progress (fix A)");
+    assert.equal(history[0]!.progress, false, "the recorded attempt row says no progress");
+  });
+
+  it("records progress false for a partial attempt that appends findings while the fingerprint stays unchanged", async () => {
+    const { recorder, history } = recorderFor({
+      fingerprint: async () => "fp-unchanged",
+      runUnit: async () => ({
+        summary: "explored the parser",
+        status: "partial",
+        nextSteps: "keep going",
+        findings: ["fact: the parser lives in report.ts"],
+      }),
+      recordFindings: () => true,
+    });
+    await recorder.runFresh(TASK);
+    assert.equal(recorder.progress(), false, "findings alone are not progress (fix A)");
+    assert.equal(history[0]!.progress, false, "the recorded attempt row says no progress");
+    assert.equal(history[0]!.outcome, "partial");
+  });
+
+  it("records progress true for a partial or timed-out attempt whose tree fingerprint changed", async () => {
+    let partialReads = 0;
+    const { recorder: partial, history } = recorderFor({
+      fingerprint: async () => (++partialReads === 1 ? "fp-before" : "fp-after"),
+      runUnit: async () => ({
+        summary: "explored the parser",
+        status: "partial",
+        nextSteps: "keep going",
+        findings: ["fact: the parser lives in report.ts"],
+      }),
+      recordFindings: () => true,
+    });
+    await partial.runFresh(TASK);
+    assert.equal(partial.progress(), true, "a moved tree fingerprint is progress (fix A)");
+    assert.equal(history[0]!.progress, true, "the recorded attempt row says progress");
+
+    let timeoutReads = 0;
+    const { recorder: timedOut } = recorderFor({
+      fingerprint: async () => (++timeoutReads === 1 ? "fp-before" : "fp-after"),
+      runUnit: async () => ({
+        summary: "",
+        error: "timed out after 900000ms",
+        timedOut: true,
+        findings: ["fact: the parser lives in report.ts"],
+      }),
+      recordFindings: () => true,
+    });
+    await timedOut.runFresh(TASK);
+    assert.equal(timedOut.progress(), true, "a moved tree fingerprint is progress on a timeout");
   });
 });
 

@@ -93,10 +93,12 @@ export function createAttemptRecorder(hooks: AttemptRecorderHooks): AttemptRecor
       }
     }
     const outcome = classifyAttemptOutcome(out);
-    progress = newFindings;
+    // Fix A: progress is the tree fingerprint change alone — findings and the
+    // tool-call digest never OR into it, so an unchanged tree is no progress.
+    progress = false;
     if (outcome === "timeout" || outcome === "partial") {
       progress = classifyProgress({ fingerprintBefore,
-        fingerprintAfter: await hooks.fingerprint(), newFindings }) || newFindings;
+        fingerprintAfter: await hooks.fingerprint(), newFindings });
     }
     hooks.history.push({ attempt: hooks.history.length + 1, outcome,
       durationSec: Math.max(0, Math.round((Date.now() - startedAt) / 1000)), progress,

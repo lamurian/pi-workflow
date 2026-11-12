@@ -56,14 +56,25 @@ function ctxAt(state: WorkflowState, cwd: string): ExtensionContext {
   } as unknown as ExtensionContext;
 }
 
-/** Mock API whose git exec answers rev-parse/commit and logs commits. */
+/** Mock API whose git exec answers rev-parse/commit and logs commits.
+ * `moveTree()` changes the `git status --short` output so the tree fingerprint
+ * moves between an attempt's before/after reads (fix A: progress = tree change). */
 function piHarness() {
   const pi = mockPi();
   let headCounter = 0;
+  let treeVersion = 0;
   const commits: string[] = [];
   pi.exec = (async (cmd: string, args: string[]) => {
     if (cmd === "git" && args[0] === "rev-parse") {
       return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+    }
+    if (cmd === "git" && args[0] === "status") {
+      return {
+        stdout: treeVersion > 0 ? ` M src/a.ts v${treeVersion}\n` : "",
+        stderr: "",
+        code: 0,
+        killed: false,
+      };
     }
     if (cmd === "git" && args[0] === "commit") {
       headCounter++;
@@ -72,21 +83,30 @@ function piHarness() {
     }
     return { stdout: "", stderr: "", code: 0, killed: false };
   }) as ExtensionAPI["exec"];
-  return { pi, commits };
+  /** Move the working-tree fingerprint (call inside a runner before it returns). */
+  const moveTree = () => {
+    treeVersion++;
+  };
+  return { pi, commits, moveTree };
 }
 
 /**
  * Runner recording every spawned unit and replaying a scripted outcome per
- * spawn index: partial-with-findings, partial-without-progress, success.
+ * spawn index: partial-with-findings (which moves the tree fingerprint via
+ * moveTree — fix A: progress = tree change, not findings),
+ * partial-without-progress, success.
  */
-function scriptedRunner(spawns: UnitTask[]): UnitRunner {
+function scriptedRunner(spawns: UnitTask[], moveTree: () => void): UnitRunner {
   const steps: Array<() => UnitAttempt> = [
-    () => ({
-      summary: "explored the codebase",
-      status: "partial",
-      nextSteps: "keep going",
-      findings: ["fact: explored the parser"],
-    }),
+    () => {
+      moveTree();
+      return {
+        summary: "explored the codebase",
+        status: "partial",
+        nextSteps: "keep going",
+        findings: ["fact: explored the parser"],
+      };
+    },
     () => ({
       summary: "could not make progress",
       status: "partial",
@@ -102,10 +122,10 @@ function scriptedRunner(spawns: UnitTask[]): UnitRunner {
 
 /** Run one base→continuation→retry→success sequence in a fresh temp repo. */
 async function runSequence(spawns: UnitTask[], cwd: string) {
-  const { pi, commits } = piHarness();
+  const { pi, commits, moveTree } = piHarness();
   const state = resumeState();
   const ctx = ctxAt(state, cwd);
-  const result = await runOrchestratedImplement(pi, ctx, state, state.task!, scriptedRunner(spawns));
+  const result = await runOrchestratedImplement(pi, ctx, state, state.task!, scriptedRunner(spawns, moveTree));
   return { result, state, commits };
 }
 

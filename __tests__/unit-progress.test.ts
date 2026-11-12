@@ -89,15 +89,26 @@ function singleBehaviorState(): WorkflowState {
   return { phase: "finalizing", specText: "topic", task: singleBehaviorTask() };
 }
 
-/** Exec mock with a call log and a HEAD that advances on git commit. */
+/** Exec mock with a call log and a HEAD that advances on git commit.
+ * `moveTree()` changes the `git status --short` output so the tree fingerprint
+ * moves between an attempt's before/after reads (fix A: progress = tree change). */
 function piHarness() {
   const pi = mockPi();
   const execLog: Array<{ cmd: string; args: string[] }> = [];
   let headCounter = 0;
+  let treeVersion = 0;
   pi.exec = (async (cmd: string, args: string[]) => {
     execLog.push({ cmd, args });
     if (cmd === "git" && args[0] === "rev-parse") {
       return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+    }
+    if (cmd === "git" && args[0] === "status") {
+      return {
+        stdout: treeVersion > 0 ? ` M src/a.ts v${treeVersion}\n` : "",
+        stderr: "",
+        code: 0,
+        killed: false,
+      };
     }
     if (cmd === "git" && args[0] === "commit") {
       headCounter++;
@@ -107,7 +118,11 @@ function piHarness() {
   }) as ExtensionAPI["exec"];
   const commits = () =>
     execLog.filter((entry) => entry.cmd === "git" && entry.args[0] === "commit");
-  return { pi, execLog, commits };
+  /** Move the working-tree fingerprint (call inside a runner before it returns). */
+  const moveTree = () => {
+    treeVersion++;
+  };
+  return { pi, execLog, commits, moveTree };
 }
 
 // ═══ Pure progress classification ═══
@@ -194,7 +209,7 @@ describe("unit-progress: partial continuation wiring", () => {
   }
 
   it("a partial report never commits; with progress a continuation runs without consuming retries", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -202,6 +217,7 @@ describe("unit-progress: partial continuation wiring", () => {
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       if (spawns.length === 1) {
+        moveTree(); // fix A: progress comes from the tree change, not the findings
         return {
           summary: "explored the codebase",
           status: "partial",
@@ -230,7 +246,7 @@ describe("unit-progress: partial continuation wiring", () => {
   });
 
   it("after 4 continuations further partials consume retries", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -238,6 +254,7 @@ describe("unit-progress: partial continuation wiring", () => {
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       if (spawns.length <= 5) {
+        moveTree(); // fix A: every partial attempt advances the tree
         return {
           summary: `partial work ${spawns.length}`,
           status: "partial",
@@ -295,7 +312,7 @@ describe("unit-progress: partial continuation wiring", () => {
   });
 
   it("a timed-out attempt with progress continues without committing", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -303,6 +320,7 @@ describe("unit-progress: partial continuation wiring", () => {
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       if (spawns.length === 1) {
+        moveTree(); // fix A: the timeout advanced the tree, so it continues
         return {
           summary: "",
           error: "timed out after 900000ms",
@@ -342,6 +360,42 @@ describe("unit-progress: partial continuation wiring", () => {
     assert.match(spawns[1]!.taskText, /infrastructure timeout, not a check failure/i);
     assert.match(spawns[1]!.taskText, /retry 1\/5/);
     assert.ok(!spawns[1]!.taskText.includes("## Continue previous partial attempt"));
+  });
+
+  it("a timed-out attempt with findings but an unchanged tree fingerprint retries instead of continuing (fix A)", async () => {
+    const { pi, commits } = piHarness();
+    const state = singleBehaviorState();
+    const ctx = ctxWithState(state);
+    const spawns: Spawn[] = [];
+
+    const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
+      spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length === 1) {
+        // Findings are recorded, but moveTree is never called: the fingerprint stays put.
+        return {
+          summary: "",
+          error: "timed out after 900000ms",
+          timedOut: true,
+          findings: ["fact: the report parser lives in report.ts"],
+        };
+      }
+      return { summary: "implemented T1", suggestedCommit: "feat(core): add behavior" };
+    };
+
+    const result = await runOrchestratedImplement(pi, ctx, state, state.task!, runner);
+
+    assert.equal(result.complete, true, result.error ?? "");
+    assert.equal(spawns.length, 2, "the no-progress timeout consumed one retry");
+    assert.match(
+      spawns[1]!.taskText,
+      /was killed at the time limit \(retry 1\/5\)/,
+      "the retry path, not a continuation",
+    );
+    assert.ok(
+      !spawns[1]!.taskText.includes("## Continue previous partial attempt"),
+      "findings alone never spawn a continuation while the tree fingerprint is unchanged (fix A)",
+    );
+    assert.equal(commits().length, 1, "the successful retry lands the commit");
   });
 
   it("plain unit errors still retry exactly as before", async () => {
@@ -419,7 +473,7 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
   });
 
   it("progress between no-progress attempts resets the streak", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -430,6 +484,7 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
         return { summary: `stuck ${spawns.length}`, status: "partial", nextSteps: "stuck" };
       }
       if (spawns.length === 2) {
+        moveTree(); // fix A: only the middle attempt moves the tree
         return {
           summary: "explored further",
           status: "partial",
@@ -475,13 +530,14 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
   });
 
   it("timed-out attempts that each made progress continue as continuations, then split or halt with unit-too-large once the budget is exhausted", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
 
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      moveTree(); // fix A: every timeout advances the tree
       return {
         summary: `timed out ${spawns.length}`,
         error: "timed out after 900000ms",
@@ -512,7 +568,7 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
   });
 
   it("a timeout followed by a successful attempt still lands the commit", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -520,6 +576,7 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
       if (spawns.length === 1) {
+        moveTree(); // fix A: the timeout advanced the tree
         return {
           summary: "",
           error: "timed out after 900000ms",
@@ -540,13 +597,14 @@ describe("unit-progress: consecutive timeout halt (T5)", () => {
   });
 
   it("timeout, non-timeout partial with progress, timeout does not halt on the timeout rule (streak reset)", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, moveTree } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
 
     const runner: UnitRunner = async (unit): Promise<UnitAttemptResult> => {
       spawns.push({ behaviorId: unit.behaviorId, taskText: unit.taskText });
+      if (spawns.length <= 3) moveTree(); // fix A: each of the first three attempts advances the tree
       if (spawns.length === 2) {
         return {
           summary: "explored further",
