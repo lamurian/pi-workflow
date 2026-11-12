@@ -504,9 +504,12 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
     assert.equal(result.complete, false);
     assert.equal(spawns.length, 2, "timeouts without progress halt after 2 attempts");
     assert.equal(result.haltedOn, "T1");
-    // T2/fix B: the no-write timeout streak routes to the runtime split planner (empty harness output means the split is not applied).
+    // T2/fix B: the no-write timeout streak routes to the runtime split planner.
+    // The harness returns an empty proposal, which by design triggers the one
+    // repair round (f51a6e8): initial attempt + repair = 2 planner calls, then
+    // the split is not applied.
     const plannerCalls = execLog.filter((entry) => entry.cmd === "pi");
-    assert.equal(plannerCalls.length, 1, "the runtime split planner runs exactly once");
+    assert.equal(plannerCalls.length, 2, "the split planner runs once, then one repair round");
     assert.ok(
       plannerCalls[0]!.args.includes("--system-prompt") &&
         plannerCalls[0]!.args.some((arg) => arg.includes("split planner")),
