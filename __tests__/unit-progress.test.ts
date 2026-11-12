@@ -198,6 +198,24 @@ describe("unit-progress: pure classification", () => {
     assert.match(text, /M src\/a\.ts/, "git status snapshot reaches the continuation");
     assert.match(text, /Implement ONE behavior: T1\./, "original task text is included");
     assert.match(text, /UNCOMMITTED/, "the continuation is told the work stays uncommitted");
+    // fix C, part 2: no git instructions units cannot follow (T4) —
+    // the snapshot heading is the only place a git command may appear.
+    const outsideSnapshotHeading = text
+      .split("### Working tree after the previous attempt")
+      .join("");
+    assert.ok(
+      !outsideSnapshotHeading.includes("git status"),
+      "no 'git status' instruction outside the snapshot heading",
+    );
+    assert.ok(
+      !outsideSnapshotHeading.includes("git diff"),
+      "no 'git diff' instruction outside the snapshot heading",
+    );
+    assert.match(
+      text,
+      /use the working-tree snapshot below/i,
+      "the unit is pointed at the snapshot instead of git exploration",
+    );
   });
 });
 

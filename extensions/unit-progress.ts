@@ -205,9 +205,10 @@ export interface ContinuationReport {
  * Build the task text for a continuation unit.
  *
  * Carries the heading, the previous unit's nextSteps and last summary, a
- * `git status --short` snapshot, and the original task text. States that
- * the prior work stays UNCOMMITTED on disk and must be inspected first,
- * never redone from scratch. Retry numbering never appears: a continuation
+ * working-tree snapshot, and the original task text. States that the prior
+ * work stays UNCOMMITTED on disk and must be read via the snapshot below,
+ * never redone from scratch — no git commands are named (units cannot run
+ * them; fix C, part 2 / T4). Retry numbering never appears: a continuation
  * does not consume the retry budget.
  *
  * @param behaviorId     - Behavior the continuation implements.
@@ -229,7 +230,7 @@ export function buildContinuationTaskText(
     CONTINUATION_HEADING,
     "",
     headline,
-    "Inspect the on-disk work (git status, git diff) first — do NOT redo the exploration from scratch.",
+    "Use the working-tree snapshot below first — do NOT redo the exploration from scratch.",
     "",
     "### Next steps from the previous unit",
     report.nextSteps?.trim() || "(none reported)",

@@ -221,7 +221,8 @@ export function buildUnitTask(
  *
  * Three branches keyed off structured flags on the prior attempt:
  * - `timedOut` → infrastructure timeout at the wall clock, not a check
- *   failure; the retry inspects the on-disk work first, fixes one blocker,
+ *   failure; the retry reads the owned files first (earlier writes are
+ *   already on disk), fixes one blocker,
  *   and reports even if verification is incomplete (context = last
  *   assistant text from the runner, not raw JSONL).
  * - `missingReport` → the unit ended without the mandatory JSON report;
@@ -250,8 +251,8 @@ export function buildRetryTask(
       `## Previous attempt was killed at the time limit (retry ${attempt}/${RETRY_BUDGET})\n` +
       `The previous run hit the hard wall-clock timeout (PI_IMPLEMENT_TIMEOUT_MS, 600 s default) and was ` +
       `killed mid-investigation — this was an infrastructure timeout, not a check failure.\n\n` +
-      `Your work from that run is likely already on disk. Do NOT redo it from scratch: inspect git status ` +
-      `and git diff first, then fix exactly one blocking issue. ` +
+      `Your work from that run is likely already on disk. Do NOT redo it from scratch: read your owned files ` +
+      `first — earlier writes are already on disk — then fix exactly one blocking issue. ` +
       `Emit the JSON report even if verification is incomplete.\n\n` +
       `## Last assistant text before the kill\n` +
       failure +

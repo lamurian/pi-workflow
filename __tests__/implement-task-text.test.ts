@@ -117,7 +117,7 @@ describe("buildRetryTask: timeout and missingReport branches", () => {
     return { behavior: task.behaviors[0]!, task };
   }
 
-  it("timedOut prior renders the wall-clock branch: not a check failure, diff-first, report even if unverified", () => {
+  it("timedOut prior renders the wall-clock branch: not a check failure, files-first, report even if unverified", () => {
     const { behavior, task } = fixture();
     const prior = {
       summary: "investigating the uncaught exception",
@@ -130,7 +130,14 @@ describe("buildRetryTask: timeout and missingReport branches", () => {
 
     assert.match(text, /wall.clock|time limit/i, "wall-clock wording present");
     assert.match(text, /infrastructure timeout, not a check failure/i, "classified as infrastructure");
-    assert.match(text, /git status and git diff first|inspect .*diff first/i, "diff-first instruction");
+    assert.ok(!text.includes("git status"), "no 'git status' instruction (units cannot run it)");
+    assert.ok(!text.includes("git diff"), "no 'git diff' instruction (units cannot run it)");
+    assert.match(text, /read your owned files first/i, "files-first instruction");
+    assert.match(
+      text,
+      /earlier writes are already on disk/i,
+      "explains why reading the owned files suffices",
+    );
     assert.match(text, /do NOT redo it from scratch/i, "no-redo instruction");
     assert.match(text, /fix exactly one blocking issue/i, "one-blocker instruction");
     assert.match(
