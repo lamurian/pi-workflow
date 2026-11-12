@@ -133,10 +133,11 @@ function sliceVerificationLine(
 /**
  * Build the slice-only task text for one v2 unit (T5).
  *
- * Renders ONLY the unit's slice: task id, description, one expectedOutput
- * line per assertion (verbatim from the v2 task unit), the owned
- * sources/tests, the owned M/D preloads and the Verification line. The full
- * contract is never embedded.
+ * Renders ONLY the unit's slice: task id, description, the contract's
+ * `instruction` as a `## Shared context` section, one expectedOutput line
+ * per assertion (verbatim from the v2 task unit), the owned sources/tests,
+ * the owned M/D preloads and the Verification line. `done`, other tasks and
+ * the rest of the contract are never embedded.
  *
  * @param behavior - The behavior to implement (its id keys the slice).
  * @param contract - The v2 contract the slice derives from.
@@ -154,6 +155,9 @@ function buildSliceTask(
   return [
     `Implement ONE behavior: ${behavior.id}.`,
     `Description: ${unit?.description ?? behavior.description}`,
+    contract.instruction.trim()
+      ? ["", "## Shared context", contract.instruction.trimEnd()].join("\n")
+      : "",
     "",
     "## Expected output (the test's contract — one line per assertion)",
     ...assertions.map((a) => `- ${a}`),

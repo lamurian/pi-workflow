@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { runImplement } from "../extensions/implement.ts";
 import type { UnitRunner } from "../extensions/implement-loop.ts";
 import { buildRetryTask, buildUnitTask } from "../extensions/unit-task-text.ts";
-import type { WorkflowState, TaskContract, Behavior } from "../extensions/state.ts";
+import type { WorkflowState, TaskContract, Behavior, ContractV2 } from "../extensions/state.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { mockPi, ctxWithState, runOrchestratedViaSeam } from "./helpers/implement-harness.ts";
 
@@ -440,6 +440,73 @@ describe("engineer's note: retry and fix task texts", () => {
       assert.match(spawn.taskText, /Raw hook output/, "raw hook output section present");
       assert.match(spawn.taskText, /golangci-lint run failed/, "hook stderr quoted");
     }
+  });
+});
+
+// ═══ v2 slice: shared context = contract.instruction (T1) ═══
+describe("v2 slice shared context (T1)", () => {
+  /** Minimal v2 contract with a two-task slice split. */
+  function contract(instruction: string): ContractV2 {
+    return {
+      title: "Shared Context Task",
+      instruction,
+      done: "tests pass",
+      sources: [
+        { path: "src/a.ts", status: "M", tasks: ["T1"] },
+        { path: "src/b.ts", status: "M", tasks: ["T2"] },
+      ],
+      tests: [{ path: "tests/a.test.ts", status: "A", tasks: ["T1"] }],
+      tasks: [
+        { id: "T1", description: "slice A", expectedOutput: ["assertion one"], status: "active" },
+        { id: "T2", description: "slice B", expectedOutput: ["other assertion"], status: "active" },
+      ],
+    };
+  }
+
+  /** The v1 behavior/task pair used to drive the v2 slice render. */
+  function v1(): { behavior: Behavior; task: TaskContract } {
+    const task: TaskContract = {
+      title: "Shared Context Task",
+      instruction: "shared context only",
+      files: [{ path: "src/a.ts", status: "M" }],
+      done: "tests pass",
+      behaviors: [
+        { id: "T1", description: "slice A", expectedOutput: "assertion one", kind: "test", status: "active" },
+      ],
+    };
+    return { behavior: task.behaviors[0]!, task };
+  }
+
+  it("renders contract.instruction verbatim under ## Shared context before ## Expected output", () => {
+    const { behavior, task } = v1();
+    const instruction = "Replace Makefile targets with mise tasks in mise.toml.\n\nLong commands live in POSIX sh scripts.";
+    const text = buildUnitTask(behavior, task, { contract: contract(instruction) });
+
+    assert.match(text, /## Shared context/, "the section heading is present");
+    const shared = text.indexOf("## Shared context");
+    const expected = text.indexOf("## Expected output");
+    assert.ok(shared >= 0 && expected >= 0 && shared < expected, "shared context precedes expected output");
+    assert.ok(
+      text.slice(shared, expected).includes(instruction),
+      "the instruction text is verbatim inside the section",
+    );
+  });
+
+  it("still omits done, other tasks and the full contract block", () => {
+    const { behavior, task } = v1();
+    const text = buildUnitTask(behavior, task, { contract: contract("do the thing") });
+
+    assert.doesNotMatch(text, /## Contract \(for reference\)/, "the full contract is not embedded");
+    assert.doesNotMatch(text, /slice B/, "the other task's description is never embedded");
+    assert.doesNotMatch(text, /Definition of done/, "contract.done stays out of the slice");
+  });
+
+  it("omits the section entirely when instruction is blank", () => {
+    const { behavior, task } = v1();
+    const text = buildUnitTask(behavior, task, { contract: contract("   ") });
+
+    assert.doesNotMatch(text, /## Shared context/, "a blank instruction renders no section");
+    assert.match(text, /## Expected output/, "the slice is otherwise intact");
   });
 });
 

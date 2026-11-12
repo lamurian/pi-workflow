@@ -42,6 +42,11 @@ describe("unit-prompt.md budget (T11)", () => {
     assert.match(text, /steers at 50% and 70%/, "the 50% and 70% steers are unchanged");
   });
 
+  it("says the slice task text carries the contract's shared context (instruction)", async () => {
+    const text = await load();
+    assert.match(text, /shared context \(instruction\)/i);
+  });
+
   it("documents status blocked with blockedReason capability or too-large", async () => {
     const text = await load();
     assert.match(text, /"blocked"/);
