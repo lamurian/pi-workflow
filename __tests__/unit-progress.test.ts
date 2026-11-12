@@ -429,7 +429,7 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
   }
 
   it("two consecutive no-progress partial attempts halt after 2 attempts with a diagnosis", async () => {
-    const { pi, commits } = piHarness();
+    const { pi, commits, execLog } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -449,10 +449,14 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
     assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation");
     assert.equal(commits().length, 0, "no commit for a no-progress halt");
     assert.match(state.lastHalt?.error ?? "", /exploration not converging/, "halt persists in state");
+    assert.ok(
+      !execLog.some((entry) => entry.cmd === "pi"),
+      "non-timeout partial streaks never invoke the split planner",
+    );
   });
 
   it("two consecutive no-progress timed-out attempts halt early too", async () => {
-    const { pi } = piHarness();
+    const { pi, execLog } = piHarness();
     const state = singleBehaviorState();
     const ctx = ctxWithState(state);
     const spawns: Spawn[] = [];
@@ -467,9 +471,22 @@ describe("unit-progress: early halt on no-progress timeouts", () => {
     assert.equal(result.complete, false);
     assert.equal(spawns.length, 2, "timeouts without progress halt after 2 attempts");
     assert.equal(result.haltedOn, "T1");
+    // T2/fix B: the no-write timeout streak routes to the runtime split planner (empty harness output means the split is not applied).
+    const plannerCalls = execLog.filter((entry) => entry.cmd === "pi");
+    assert.equal(plannerCalls.length, 1, "the runtime split planner runs exactly once");
+    assert.ok(
+      plannerCalls[0]!.args.includes("--system-prompt") &&
+        plannerCalls[0]!.args.some((arg) => arg.includes("split planner")),
+      "the planner child carries the split-planner system prompt",
+    );
     assert.match(result.error ?? "", /exploration not converging/);
     assert.match(result.error ?? "", /\/discuss -> \/finalize/);
     assert.match(result.error ?? "", /PI_IMPLEMENT_TIMEOUT_MS/);
+    assert.match(
+      result.error ?? "",
+      /Runtime split not applied: [^\n]+$/,
+      "the halt ends with the split-not-applied reason line",
+    );
   });
 
   it("progress between no-progress attempts resets the streak", async () => {

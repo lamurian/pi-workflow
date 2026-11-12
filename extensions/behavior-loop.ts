@@ -139,7 +139,10 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
         noProgressStreak = 0;
       } else if (shouldHaltEarly(++noProgressStreak)) {
         // T7: repeated identical timeouts/partial reports waste hours — halt with an actionable diagnosis instead of burning retries.
-        return haltWithChild(behavior.id, buildEarlyHaltError(behavior.id, noProgressStreak));
+        const earlyText = buildEarlyHaltError(behavior.id, noProgressStreak);
+        // T2/fix B: two consecutive no-write timeouts route to the runtime split; non-timeout partial streaks keep the plain early halt.
+        if (attempt.timedOut && timeoutStreak >= 2) { const r = await trySplit("timeout", earlyText); if (r) return r; behavior.status = "done"; setTaskStatus(state, behavior.id, "done"); return undefined; }
+        return haltWithChild(behavior.id, earlyText);
       }
       if (decideContinuation({ progressed, continuations }) === "continue") {
         continuations++;
