@@ -11,8 +11,10 @@ function setup(
     behaviorId?: string;
     /** Injected confirm behavior (throw / resolve with no answer). */
     confirm?: () => Promise<boolean | undefined>;
-    /** Injected planner behavior (throw / return unparseable output). */
-    planner?: () => Promise<string>;
+    /** Injected planner behavior (throw / return unparseable output); receives the task text. */
+    planner?: (taskText: string) => Promise<string>;
+    /** Dry-run save rejections: the i-th dry call rejects with texts[i]; later calls succeed. */
+    dryRejectTexts?: string[];
   } = {},
 ) {
   const calls: { payload: Record<string, unknown>; caller: string; dry: boolean }[] = [];
@@ -42,17 +44,27 @@ function setup(
       },
     },
   } as never;
+  let dryCount = 0;
   const save = async (s: { task: { behaviors: { id: string }[] } }, payload: Record<string, unknown>, o: { caller: string }) => {
-    calls.push({ payload, caller: o.caller, dry: s !== state });
+    const dry = s !== state;
+    calls.push({ payload, caller: o.caller, dry });
     if (opts.saveOk === false) return { ok: false, text: "rejected" };
+    if (dry) {
+      const text = opts.dryRejectTexts?.[dryCount];
+      dryCount += 1;
+      if (text !== undefined) return { ok: false, text };
+    }
     s.task.behaviors = [{ id: "T1.1" }, { id: "T1.2" }];
     return { ok: true, text: "ok" };
   };
+  const plannerTexts: string[] = [];
+  const innerPlanner = opts.planner ?? (async () => PROPOSAL);
   const options: RuntimeSplitOptions = {
     pi: {} as never, ctx, state, behaviorId: opts.behaviorId ?? "T1", trigger: "timeout",
-    planner: opts.planner ?? (async () => PROPOSAL), save: save as never,
+    planner: async (taskText) => { plannerTexts.push(taskText); return innerPlanner(taskText); },
+    save: save as never,
   };
-  return { calls, confirms, options };
+  return { calls, confirms, plannerTexts, options };
 }
 
 describe("runtime split planner", () => {
@@ -144,9 +156,10 @@ describe("runtime split planner", () => {
   });
 
   it("appends the save_task rejection text to the halt text when the proposal is rejected", async () => {
-    const { options } = setup({ saveOk: false });
+    const { options, plannerTexts } = setup({ saveOk: false });
     const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
     assert.equal(res, "too large\nRuntime split not applied: rejected");
+    assert.equal(plannerTexts.length, 2, "the rejection triggers exactly one repair re-run");
   });
 
   it("appends the underlying planner error when the planner fails", async () => {
@@ -156,9 +169,42 @@ describe("runtime split planner", () => {
   });
 
   it("appends the missing-proposal reason when the planner returns no proposal", async () => {
-    const { options } = setup({ planner: async () => "not a proposal" });
+    const { options, plannerTexts } = setup({ planner: async () => "not a proposal" });
     const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
     assert.equal(res, "too large\nRuntime split not applied: planner returned no proposal");
+    assert.equal(plannerTexts.length, 2, "the missing proposal triggers exactly one repair re-run");
+  });
+
+  it("re-runs the planner with the dry-run rejection reason and applies a valid second proposal", async () => {
+    const second = '```json\n{"tasks":[{"description":"c","expectedOutput":[0],"paths":["c.ts"]}]}\n```';
+    let plannerRuns = 0;
+    const { calls, plannerTexts, options } = setup({
+      dryRejectTexts: ["first rejection"],
+      planner: async () => (++plannerRuns === 1 ? PROPOSAL : second),
+    });
+    const ran: string[] = [];
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async (id) => { ran.push(id); return undefined; } });
+    assert.equal(plannerTexts.length, 2, "the planner is called a second time");
+    assert.match(plannerTexts[1]!, /first rejection/, "the second task text carries the rejection reason");
+    assert.equal(res, undefined, "the second proposal applies");
+    assert.deepEqual(ran, ["T1.1", "T1.2"]);
+    const applied = calls.filter((c) => !c.dry);
+    assert.equal(applied.length, 1, "exactly one real save applies the split");
+    assert.deepEqual(applied[0]!.payload.tasks, [
+      { description: "c", expectedOutput: ["alpha assertion"], paths: ["c.ts"] },
+    ]);
+  });
+
+  it("a failing second proposal ends the round with its reason and no third planner call", async () => {
+    const { plannerTexts, options } = setup({
+      dryRejectTexts: ["first rejection", "second rejection"],
+    });
+    const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
+    assert.equal(plannerTexts.length, 2, "the planner is not called a third time");
+    assert.ok(
+      typeof res === "string" && res.endsWith("Runtime split not applied: second rejection"),
+      `halt text ends with the second reason: ${String(res)}`,
+    );
   });
 
   it("a throwing confirm is treated as no veto and the split proceeds", async () => {

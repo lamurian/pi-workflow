@@ -172,6 +172,9 @@ async function defaultPlanner(pi: ExtensionAPI, cwd: string, taskText: string): 
  * Plan, dry-run, offer a timed veto, then apply a runtime split of one task.
  * The veto window is non-blocking: a throwing confirm counts as no veto and a
  * confirm that resolves after its timeout without an answer proceeds.
+ * T6/fix D: a missing proposal, an invalid index or a dry-run save_task
+ * rejection re-runs the planner exactly once with the reason appended to the
+ * task text; the second outcome is final.
  *
  * @param opts - State, ids, trigger and optional injected planner.
  * @returns Whether the split was applied, with the child ids and, on failure,
@@ -180,60 +183,80 @@ async function defaultPlanner(pi: ExtensionAPI, cwd: string, taskText: string): 
 export async function runRuntimeSplit(opts: RuntimeSplitOptions): Promise<RuntimeSplitResult> {
   const { pi, ctx, state, behaviorId, trigger } = opts;
   if (isSplitChild(behaviorId)) return { applied: false, childIds: [], reason: "split child" };
-  const taskText = buildPlannerTask(state, behaviorId, trigger);
-  let output: string;
-  try {
-    output = await (opts.planner ?? ((t) => defaultPlanner(pi, ctx.cwd, t)))(taskText);
-  } catch (err) {
-    return { applied: false, childIds: [], reason: `planner failed: ${String(err)}` };
-  }
-  const tasks = parseSplitProposal(output);
-  if (!tasks) return { applied: false, childIds: [], reason: "planner returned no proposal" };
-  // T5/fix D: children carry 0-based indices into the parent's assertions;
-  // map them to the exact strings before any save_task call, rejecting a
-  // non-integer or out-of-range index without submitting the proposal.
-  const assertions = state.contractV2?.tasks.find((t) => t.id === behaviorId)?.expectedOutput ?? [];
-  const resolved: unknown[] = [];
-  for (let i = 0; i < tasks.length; i++) {
-    const child = tasks[i];
-    if (!child || typeof child !== "object") {
-      resolved.push(child);
-      continue;
-    }
-    const record = child as Record<string, unknown>;
-    const indices = record.expectedOutput;
-    if (!Array.isArray(indices)) {
-      resolved.push(record); // save_task rejects the shape with its own reason.
-      continue;
-    }
-    const mapped: string[] = [];
-    for (const entry of indices) {
-      if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || entry >= assertions.length) {
-        return {
-          applied: false,
-          childIds: [],
-          reason: `invalid expectedOutput index ${JSON.stringify(entry)} in child ${i + 1}`,
-        };
-      }
-      mapped.push(assertions[entry]);
-    }
-    resolved.push({ ...record, expectedOutput: mapped });
-  }
-  const payload = { operation: "split", parentId: behaviorId, tasks: resolved };
+  const baseText = buildPlannerTask(state, behaviorId, trigger);
+  const planner = opts.planner ?? ((t: string) => defaultPlanner(pi, ctx.cwd, t));
   const save = opts.save ?? runSaveTask;
-  const dry = await save(structuredClone(state), payload, { pi, ctx, caller: "orchestrator" });
-  if (!dry.ok) return { applied: false, childIds: [], reason: dry.text };
-  const vetoMs = opts.vetoMs ?? SPLIT_VETO_MS;
-  const notice = `Split ${behaviorId} into ${tasks.length} tasks; applying in ${Math.round(vetoMs / 1000)}s unless vetoed.`;
-  let vetoed = false;
-  try {
-    vetoed = Boolean(await ctx.ui.confirm("Veto split?", notice, { timeout: vetoMs }));
-  } catch {
-    vetoed = false; // UI failure or timeout without an answer: proceed with the split.
+  // T6/fix D: one repair round — a missing proposal, an invalid index or a
+  // dry-run rejection re-runs the planner once with the reason appended; the
+  // second outcome is final (round 1's `continue` falls out of the loop).
+  let reason: string | undefined;
+  for (let round = 0; round < 2; round++) {
+    const taskText =
+      reason === undefined
+        ? baseText
+        : `${baseText}\n\nPrevious attempt failed: ${reason}\nPropose a new split; this second proposal is final.`;
+    let output: string;
+    try {
+      output = await planner(taskText);
+    } catch (err) {
+      return { applied: false, childIds: [], reason: `planner failed: ${String(err)}` };
+    }
+    const tasks = parseSplitProposal(output);
+    if (!tasks) {
+      reason = "planner returned no proposal";
+      continue;
+    }
+    // T5/fix D: children carry 0-based indices into the parent's assertions;
+    // map them to the exact strings before any save_task call, rejecting a
+    // non-integer or out-of-range index without submitting the proposal.
+    const assertions = state.contractV2?.tasks.find((t) => t.id === behaviorId)?.expectedOutput ?? [];
+    const resolved: unknown[] = [];
+    let invalid: string | undefined;
+    for (let i = 0; i < tasks.length && invalid === undefined; i++) {
+      const child = tasks[i];
+      if (!child || typeof child !== "object") {
+        resolved.push(child);
+        continue;
+      }
+      const record = child as Record<string, unknown>;
+      const indices = record.expectedOutput;
+      if (!Array.isArray(indices)) {
+        resolved.push(record); // save_task rejects the shape with its own reason.
+        continue;
+      }
+      const mapped: string[] = [];
+      for (const entry of indices) {
+        if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || entry >= assertions.length) {
+          invalid = `invalid expectedOutput index ${JSON.stringify(entry)} in child ${i + 1}`;
+          break;
+        }
+        mapped.push(assertions[entry]);
+      }
+      if (invalid === undefined) resolved.push({ ...record, expectedOutput: mapped });
+    }
+    if (invalid !== undefined) {
+      reason = invalid;
+      continue;
+    }
+    const payload = { operation: "split", parentId: behaviorId, tasks: resolved };
+    const dry = await save(structuredClone(state), payload, { pi, ctx, caller: "orchestrator" });
+    if (!dry.ok) {
+      reason = dry.text;
+      continue;
+    }
+    const vetoMs = opts.vetoMs ?? SPLIT_VETO_MS;
+    const notice = `Split ${behaviorId} into ${tasks.length} tasks; applying in ${Math.round(vetoMs / 1000)}s unless vetoed.`;
+    let vetoed = false;
+    try {
+      vetoed = Boolean(await ctx.ui.confirm("Veto split?", notice, { timeout: vetoMs }));
+    } catch {
+      vetoed = false; // UI failure or timeout without an answer: proceed with the split.
+    }
+    if (vetoed) return { applied: false, childIds: [], reason: "vetoed" };
+    const applied = await save(state, payload, { pi, ctx, caller: "orchestrator" });
+    if (!applied.ok) return { applied: false, childIds: [], reason: applied.text };
+    const childIds = (state.task?.behaviors ?? []).map((b) => b.id).filter((id) => id.startsWith(`${behaviorId}.`));
+    return { applied: true, childIds };
   }
-  if (vetoed) return { applied: false, childIds: [], reason: "vetoed" };
-  const applied = await save(state, payload, { pi, ctx, caller: "orchestrator" });
-  if (!applied.ok) return { applied: false, childIds: [], reason: applied.text };
-  const childIds = (state.task?.behaviors ?? []).map((b) => b.id).filter((id) => id.startsWith(`${behaviorId}.`));
-  return { applied: true, childIds };
+  return { applied: false, childIds: [], reason: reason ?? "unknown" };
 }
