@@ -7,6 +7,7 @@ import { resolveTestExtensionPath } from "./test-tool-ensure.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import type { UnitSessionSpec } from "./unit-session.ts";
 import { REPORT_REMINDER_MESSAGE, reportReminderAction } from "./report-reminder.ts";
+import { armSteerTimers } from "./unit-steers.ts";
 import { readContextPercent } from "./session-stats.ts";
 
 /** One orchestrator unit: a behavior plus the task text handed to its subprocess. */
@@ -23,27 +24,14 @@ export interface UnitTask {
   session?: UnitSessionSpec;
 }
 
-/** Fraction of the per-unit time budget at which the wrap-up steer fires. */
-export const SOFT_DEADLINE_RATIO = 0.7;
-
-/** Fraction of the per-unit time budget at which the progress-check steer fires. */
-export const PROGRESS_CHECK_RATIO = 0.5;
-
-/** Progress-check steer delivered once at half the time budget. */
-export const PROGRESS_STEER_MESSAGE =
-  "progress check: half the time budget is used; focus on the remaining work " +
-  "and plan to emit the JSON report before the deadline";
-
-/**
- * Wrap-up steer delivered once when a unit nears its hard-kill deadline.
- *
- * Asks the unit to stop exploring, persist its work uncommitted, and emit
- * the JSON report with status partial, findings and nextSteps so a
- * continuation unit can pick up where it left off.
- */
-export const WRAP_UP_STEER_MESSAGE =
-  "time budget nearly exhausted: stop exploring, write what you have to disk, " +
-  "emit the JSON report with status partial, findings, nextSteps";
+// Steer policy (ratios, messages, write detection, timer arming) lives in
+// unit-steers.ts; re-exported here so existing import sites keep working.
+export {
+  SOFT_DEADLINE_RATIO,
+  PROGRESS_CHECK_RATIO,
+  PROGRESS_STEER_MESSAGE,
+  WRAP_UP_STEER_MESSAGE,
+} from "./unit-steers.ts";
 
 /** Options for the client-injected unit runner. */
 export interface UnitRunnerOptions {
@@ -135,12 +123,15 @@ export async function runImplementerUnit(
  * Run one implementer unit on an already-spawned client.
  *
  * Shared core behind runImplementerUnit; exported as the test seam for
- * fake-timer tests with an injected client. Arms two timers when
+ * fake-timer tests with an injected client. Arms four timers when
  * `timeoutMs > 0`:
  *
- * - a soft deadline at SOFT_DEADLINE_RATIO (70%) of the budget that
- *   steers the unit once with WRAP_UP_STEER_MESSAGE so it can wrap up
- *   with a status-partial report before the kill;
+ * - a write-check steer at WRITE_CHECK_RATIO (40%) unless a write, edit or
+ *   delete_file tool call was observed first (unit-steers);
+ * - a progress steer at PROGRESS_CHECK_RATIO (50%) and a soft deadline at
+ *   SOFT_DEADLINE_RATIO (70%) that steers the unit once with
+ *   WRAP_UP_STEER_MESSAGE so it can wrap up with a status-partial report
+ *   before the kill;
  * - the wall clock at `timeoutMs` that runs runDeadlineHandover instead of
  *   SIGKILLing outright: up to three abort/prompt rounds; a report during a
  *   round settles the attempt with that report (timedOut=true), and only
@@ -184,8 +175,12 @@ export async function runImplementerUnitWithClient(
     }
   };
 
+  // Steer policy delegated to unit-steers: write-check at 40% (unless a
+  // write already landed), progress at 50%, wrap-up at 70%.
+  const steerTimers = armSteerTimers(client, timeoutMs);
   const unsubEvents = client.onEvent((event) => {
     onEvent?.(event);
+    steerTimers.onEvent(event);
     checkReport();
     // T3: track this attempt's work, then let the pure helper decide the abort.
     if (String(event.type).startsWith("tool_")) toolActivitySeen = true;
@@ -217,7 +212,6 @@ export async function runImplementerUnitWithClient(
     exitCode = info.code;
     if (!reportSeen) settleWait();
   });
-
   // Parent abort: SIGKILL immediately, never through handover rounds.
   const killNow = () => {
     timedOut = true;
@@ -231,21 +225,6 @@ export async function runImplementerUnitWithClient(
     handoverDone = runDeadlineHandover(client);
   };
   const timer = timeoutMs > 0 ? setTimeout(onDeadline, timeoutMs) : undefined;
-  // Progress check at 50%, then one wrap-up steer at 70%, before the hard kill.
-  const progressTimer =
-    timeoutMs > 0
-      ? setTimeout(
-          () => client.prompt(PROGRESS_STEER_MESSAGE, "steer"),
-          Math.floor(timeoutMs * PROGRESS_CHECK_RATIO),
-        )
-      : undefined;
-  const softTimer =
-    timeoutMs > 0
-      ? setTimeout(
-          () => client.prompt(WRAP_UP_STEER_MESSAGE, "steer"),
-          Math.floor(timeoutMs * SOFT_DEADLINE_RATIO),
-        )
-      : undefined;
   const onAbort = () => killNow();
   if (signal) {
     if (signal.aborted) onAbort();
@@ -255,8 +234,7 @@ export async function runImplementerUnitWithClient(
   client.prompt(taskText);
   await waitDone;
   if (timer) clearTimeout(timer);
-  if (softTimer) clearTimeout(softTimer);
-  if (progressTimer) clearTimeout(progressTimer);
+  steerTimers.clear();
   signal?.removeEventListener("abort", onAbort);
   unsubEvents();
   unsubExit();

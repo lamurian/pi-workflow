@@ -34,7 +34,7 @@ For `manual` behaviors: implement, verify by inspection, describe how you verifi
 
 ## Time discipline
 
-- Your budget is 600 s (PI_IMPLEMENT_TIMEOUT_MS, 600 s default). You receive steers at 50% and 70% of it.
+- Your budget is 600 s (PI_IMPLEMENT_TIMEOUT_MS, 600 s default). You receive steers at 50% and 70% of it. At 40% a write-check steer nudges you to start writing files when no write tool call has been observed yet.
 - Write a first skeleton of your owned files within about 3 minutes; explore only what the slice requires.
 - Do not repeat verification you already did: one green `test` run after your last edit is enough.
 - At the deadline the runner aborts and asks for the JSON report (status partial, findings, nextSteps); emit it at once.

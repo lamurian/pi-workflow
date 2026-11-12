@@ -35,6 +35,13 @@ describe("unit-prompt.md budget (T11)", () => {
     assert.match(text, /status partial, findings, nextSteps/i);
   });
 
+  it("mentions the 40% write-check steer alongside the 50% and 70% steers", async () => {
+    const text = await load();
+    assert.match(text, /40%/);
+    assert.match(text, /write-check steer/i);
+    assert.match(text, /steers at 50% and 70%/, "the 50% and 70% steers are unchanged");
+  });
+
   it("documents status blocked with blockedReason capability or too-large", async () => {
     const text = await load();
     assert.match(text, /"blocked"/);

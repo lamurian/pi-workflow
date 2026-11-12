@@ -458,6 +458,15 @@ function stubClient(stderr = "") {
       raw += JSON.stringify(event) + "\n";
       for (const listener of eventListeners) listener(event);
     },
+    /** Emit an assistant message_end carrying a tool call (default: write). */
+    emitWriteTool(name = "write") {
+      const message = {
+        role: "assistant",
+        content: [{ type: "toolCall", name, arguments: { path: "src/a.ts" } }],
+      };
+      raw += JSON.stringify({ type: "message_end", message }) + "\n";
+      for (const listener of eventListeners) listener({ type: "message_end", message });
+    },
   };
 }
 
@@ -471,10 +480,18 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     );
     const { DEADLINE_HANDOVER_MESSAGE, DEADLINE_IDLE_TIMEOUT_MS, DEADLINE_REPORT_TIMEOUT_MS } =
       await import("../extensions/deadline-handover.ts");
+    const { NO_WRITE_STEER_MESSAGE } = await import("../extensions/unit-steers.ts");
     const client = stubClient();
     const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(0);
+    client.emitWriteTool(); // a write toolCall before 400ms disarms the write-check steer
     await vi.advanceTimersByTimeAsync(499);
     assert.equal(client.steerPrompts.length, 0, "no steer before the 50% mark");
+    assert.equal(
+      client.steerPrompts.includes(NO_WRITE_STEER_MESSAGE),
+      false,
+      "no write-check steer when a write already happened",
+    );
     await vi.advanceTimersByTimeAsync(1);
     assert.deepEqual(client.steerPrompts, [PROGRESS_STEER_MESSAGE], "progress steer at 500ms");
     await vi.advanceTimersByTimeAsync(199);
@@ -498,6 +515,35 @@ describe("runImplementerUnit soft deadline (T3)", () => {
     assert.match(res.error ?? "", /timed out after 1000ms/);
     assert.equal(client.steerPrompts.length, 2, "each steer fires exactly once");
     assert.equal(client.steers.length, 0, "timed messages never use client.steer");
+  });
+
+  it("sends NO_WRITE_STEER_MESSAGE at 400ms before the progress steer when no write happened", async () => {
+    vi.useFakeTimers();
+    const { runImplementerUnitWithClient, PROGRESS_STEER_MESSAGE } = await import(
+      "../extensions/implementer-runner.ts"
+    );
+    const { NO_WRITE_STEER_MESSAGE } = await import("../extensions/unit-steers.ts");
+    const client = stubClient();
+    const promise = runImplementerUnitWithClient(client, "task", { timeoutMs: 1_000 });
+    await vi.advanceTimersByTimeAsync(399);
+    assert.equal(client.steerPrompts.length, 0, "no write-check steer before the 40% mark");
+    await vi.advanceTimersByTimeAsync(1); // 400ms
+    assert.deepEqual(client.steerPrompts, [NO_WRITE_STEER_MESSAGE], "write-check steer at 400ms");
+    await vi.advanceTimersByTimeAsync(100); // 500ms
+    assert.deepEqual(
+      client.steerPrompts,
+      [NO_WRITE_STEER_MESSAGE, PROGRESS_STEER_MESSAGE],
+      "the progress steer follows the write-check steer",
+    );
+    assert.equal(
+      client.steerPrompts.filter((m) => m === NO_WRITE_STEER_MESSAGE).length,
+      1,
+      "the write-check steer fires exactly once, as a steer prompt",
+    );
+    client.emitAssistant("done.\n```json\n{\"summary\": \"ok\"}\n```");
+    const res = await promise;
+    assert.equal(res.summary, "ok", "the attempt still settles on its report");
+    assert.equal(res.timedOut, undefined);
   });
 
   it("does not steer when timeoutMs is 0", async () => {
@@ -554,6 +600,27 @@ describe("runImplementerUnit soft deadline (T3)", () => {
 // ═══════════════════════════════════════════════════════════════════════════════
 // T3 — fail fast when a settled run produced nothing (provider model rejection)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+describe("isWriteToolEvent (T3 write-check steer)", () => {
+  const msg = (name: string) => ({
+    type: "message_end",
+    message: { role: "assistant", content: [{ type: "toolCall", name, arguments: {} }] },
+  });
+
+  it("matches write, edit and delete_file tool calls and ignores other events", async () => {
+    const { isWriteToolEvent } = await import("../extensions/unit-steers.ts");
+    assert.equal(isWriteToolEvent(msg("write")), true, "write counts");
+    assert.equal(isWriteToolEvent(msg("edit")), true, "edit counts");
+    assert.equal(isWriteToolEvent(msg("delete_file")), true, "delete_file counts");
+    assert.equal(isWriteToolEvent(msg("read")), false, "read is not a write");
+    assert.equal(isWriteToolEvent({ type: "tool_execution_start" }), false, "no tool name on the event");
+    assert.equal(
+      isWriteToolEvent({ type: "message_end", message: { role: "user", content: [msg("write").message.content[0]] } }),
+      false,
+      "only assistant messages count",
+    );
+  });
+});
 
 describe("runImplementerUnit fail-fast on a dead run (T3)", () => {
   afterEach(() => vi.useRealTimers());
