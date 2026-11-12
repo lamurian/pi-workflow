@@ -17,6 +17,7 @@ import { ensureTestTool } from "./test-tool-ensure.ts";
 import { commitTestExtensionChore } from "./test-extension-chore.ts";
 import { TEST_EXTENSION_RELATIVE } from "./test-extension-constants.ts";
 import { dirtyTreeSaveWarnings } from "./dirty-tree-check.ts";
+import { supersededTestWarnings } from "./superseded-tests.ts";
 import { runContractScan } from "./contract-scan.ts";
 import { renderEvidence } from "./test-scan-render.ts";
 import { buildRunPlan, renderRunPlan } from "./run-plan.ts";
@@ -202,6 +203,7 @@ export async function runSaveTask(
     ...(detection.warnings ?? []),
     ...(scan?.warnings ?? []),
     ...(await dirtyTreeSaveWarnings(pi, ctx.cwd, preserved.contract)),
+    ...supersededTestWarnings(preserved.contract, tracked),
   ];
   state.contractHistory = [
     ...(state.contractHistory ?? []),

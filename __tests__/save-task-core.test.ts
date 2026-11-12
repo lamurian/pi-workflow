@@ -64,6 +64,25 @@ describe("runSaveTask", () => {
     assert.equal(s.contractHistory, undefined);
   });
 
+  it("lists a superseded-unnamed advisory warning when git ls-tree reports the test path tracked", async () => {
+    const s: WorkflowState = { phase: "discussing", specText: "t" };
+    const pi = {
+      ...mockPi(),
+      exec: async (_cmd: string, args: string[]) => ({
+        stdout: args[0] === "ls-tree" ? "tests/a.test.ts\n" : "",
+        stderr: "",
+        code: 0,
+        killed: false,
+      }),
+    } as unknown as ExtensionAPI;
+    const res = await runSaveTask(s, VALID, { caller: "agent", pi, ctx: mockCtx() });
+    assert.equal(res.ok, true, res.text);
+    assert.match(res.text, /Warnings \(advisory/, "the advisory warnings block is present");
+    assert.match(res.text, /superseded-unnamed/, "carries the warning kind");
+    assert.match(res.text, /tests\/a\.test\.ts/, "names the path");
+    assert.match(res.text, /T1/, "names the owning task id");
+  });
+
   it("appends a contractHistory entry per successful call", async () => {
     const s: WorkflowState = { phase: "discussing", specText: "t" };
     await runSaveTask(s, VALID, { caller: "agent", pi: mockPi(), ctx: mockCtx() });
