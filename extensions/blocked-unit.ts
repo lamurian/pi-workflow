@@ -1,5 +1,5 @@
 /** Reasons a unit may report itself blocked. */
-export type BlockedReason = "capability" | "too-large";
+export type BlockedReason = "capability" | "too-large" | "missing-context";
 
 /** Minimal attempt shape inspected for a blocked report. */
 export interface BlockedAttemptLike {
@@ -19,6 +19,10 @@ export interface BlockedAttemptLike {
 export function blockedHaltText(behaviorId: string, attempt: BlockedAttemptLike): string | undefined {
   if (attempt.status !== "blocked") return undefined;
   const reason = attempt.blockedReason ?? "unspecified";
+  const remedy =
+    reason === "missing-context"
+      ? "Add the missing context (e.g. a paste-ready snippet) to the task description via /discuss -> /finalize, then /implement resumes."
+      : "Resolve the blocker (or split the task via /discuss -> /finalize), then /implement resumes.";
   return `Unit ${behaviorId} reported blocked (blockedReason: ${reason}): ${attempt.summary || "no summary"}. ` +
-    `Resolve the blocker (or split the task via /discuss -> /finalize), then /implement resumes.`;
+    remedy;
 }

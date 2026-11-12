@@ -9,7 +9,7 @@ function jsonl(report: Record<string, unknown>): string {
 
 describe("blocked status", () => {
   it("parseReport keeps blocked with a valid blockedReason", () => {
-    for (const reason of ["capability", "too-large"]) {
+    for (const reason of ["capability", "too-large", "missing-context"]) {
       const r = parseImplementerReport(jsonl({ summary: "s", status: "blocked", blockedReason: reason }));
       expect(r.status).toBe("blocked");
       expect(r.blockedReason).toBe(reason);
@@ -20,6 +20,19 @@ describe("blocked status", () => {
     const r = parseImplementerReport(jsonl({ summary: "s", status: "blocked", blockedReason: "bored" }));
     expect(r.status).toBe("blocked");
     expect(r.blockedReason).toBeUndefined();
+  });
+
+  it("missing-context halt text points at the task description, not a split", () => {
+    const text = blockedHaltText("T3", {
+      status: "blocked",
+      blockedReason: "missing-context",
+      summary: "needs the mise usage variadic syntax",
+    })!;
+    expect(text).toContain("blockedReason: missing-context");
+    expect(text).toContain("needs the mise usage variadic syntax");
+    expect(text).toContain("task description");
+    expect(text).toContain("/discuss -> /finalize");
+    expect(text).not.toContain("split");
   });
 
   it("halt text names the blockedReason and the summary", () => {

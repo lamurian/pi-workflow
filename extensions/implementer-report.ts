@@ -28,7 +28,7 @@ export interface ImplementerReport {
   /** Completion state: "partial" when wrapping up unfinished work, "complete" when done. */
   status?: "complete" | "partial" | "blocked";
   /** Why the unit is blocked; only set with status "blocked". */
-  blockedReason?: "capability" | "too-large";
+  blockedReason?: "capability" | "too-large" | "missing-context";
   /** Short reusable facts (file paths, signatures, verified tool behavior) for later units. */
   findings?: string[];
   /** Findings useful to every later unit; recorded under the global id. */
@@ -243,7 +243,9 @@ export function parseImplementerReport(stdout: string): ImplementerReport {
           ...(status ? { status } : {}),
           ...(findings ? { findings } : {}),
           ...(sharedFindings ? { sharedFindings } : {}),
-          ...(parsed.blockedReason === "capability" || parsed.blockedReason === "too-large"
+          ...(parsed.blockedReason === "capability" ||
+          parsed.blockedReason === "too-large" ||
+          parsed.blockedReason === "missing-context"
             ? { blockedReason: parsed.blockedReason }
             : {}),
           ...(typeof parsed.nextSteps === "string" ? { nextSteps: parsed.nextSteps } : {}),

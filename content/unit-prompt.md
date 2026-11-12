@@ -62,5 +62,5 @@ End your final message with exactly one fenced JSON block and nothing after it:
 ```
 
 - `status`: `complete` when every file is written, even if unverified. `partial` only when files are missing or incomplete; add `findings` and `nextSteps`.
-- `status: "blocked"` with `blockedReason: "capability"` when a hard block has no orchestrator capability or named fallback behind it, or `blockedReason: "too-large"` when the slice cannot fit the time budget.
+- `status: "blocked"` with `blockedReason: "capability"` when a hard block has no orchestrator capability or named fallback behind it, or `blockedReason: "too-large"` when the slice cannot fit the time budget. Use `blockedReason: "missing-context"` when the slice needs external syntax or an API found neither in the task text nor in the repo; put the exact question in `summary` instead of searching.
 - `alreadySatisfied: true` when HEAD already implements the behavior. Never invent changes.
