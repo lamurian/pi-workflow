@@ -207,6 +207,7 @@ describe("halt-report: pure rendering", () => {
     ];
     const diagnosis = deriveDiagnosis(stalled, "");
     assert.equal(diagnosis.diagnosis, "exploration not converging");
+    assert.match(diagnosis.recommendation, /paste-ready snippet/, "the missing-context remedy comes first");
     assert.match(diagnosis.recommendation, /\/discuss -> \/finalize/);
     assert.match(diagnosis.recommendation, /PI_IMPLEMENT_TIMEOUT_MS/);
   });

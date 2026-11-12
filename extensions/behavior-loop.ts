@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { saveState, updateUi, type WorkflowState, type TaskContract, type PendingCommand, type PendingManualCheck, type Behavior } from "./state.ts";
-import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
+import { buildContinuationTaskText, decideContinuation, isAlreadySatisfied, isPartialAttempt, shouldHaltEarly, buildEarlyHaltError, buildRetryBudgetHaltError, shouldHaltOnTimeout, buildTimeoutHaltError } from "./unit-progress.ts";
 import { crossOwnershipHalt } from "./cross-ownership.ts"; import { blockedHaltText } from "./blocked-unit.ts"; import { splitOrHalt, runSplitChild, type SplitTrigger } from "./split-planner.ts";
 import { isIdenticalRejection, buildIdenticalRejectionHalt, type RejectionSnapshot } from "./identical-rejection.ts";
 import type { AttemptRecord } from "./halt-report.ts"; import { setTaskStatus } from "./task-status.ts";
@@ -154,8 +154,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
       if (!attempt.error) {
         // A partial report without progress consumes one retry as today.
         if (retry > RETRY_BUDGET) {
-          return haltWithChild(behavior.id,
-            `Unit ${behavior.id} reported partial work after ${RETRY_BUDGET} retries without advancing the tree or adding findings: ${attempt.summary ?? "no summary"}`);
+          return haltWithChild(behavior.id, buildRetryBudgetHaltError(behavior.id, RETRY_BUDGET, attempt.summary));
         }
         await runRetry(stripRetryBase(buildRetryTask(behavior, task, attempt, retry, unitOptions)) + noteSection + findingsSection());
         continue;

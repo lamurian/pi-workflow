@@ -9,6 +9,7 @@ import {
   buildContinuationTaskText,
   shouldHaltEarly,
   buildEarlyHaltError,
+  buildRetryBudgetHaltError,
   TIMEOUT_HALT_THRESHOLD,
   shouldHaltOnTimeout,
   buildTimeoutHaltError,
@@ -177,12 +178,26 @@ describe("unit-progress: pure classification", () => {
     assert.equal(shouldHaltEarly(3), true);
   });
 
-  it("buildEarlyHaltError names the diagnosis and both recommendations", () => {
+  it("buildEarlyHaltError names the diagnosis and all three recommendations", () => {
     const text = buildEarlyHaltError("T2", 2);
     assert.match(text, /T2/, "the halted behavior is named");
     assert.match(text, /exploration not converging/, "diagnosis is present");
+    assert.match(text, /without advancing the working tree/, "progress means the tree moved");
+    assert.doesNotMatch(text, /adding findings/, "findings have not counted as progress since T14");
+    assert.match(text, /paste-ready snippet/, "the missing-context remedy is named");
+    assert.match(text, /task description/, "the remedy points at the task description");
     assert.match(text, /\/discuss -> \/finalize/, "split recommendation is present");
     assert.match(text, /PI_IMPLEMENT_TIMEOUT_MS/, "timeout recommendation is present");
+  });
+
+  it("buildRetryBudgetHaltError reports tree-only progress with the summary", () => {
+    const text = buildRetryBudgetHaltError("T4", 5, "kept exploring");
+    assert.match(text, /T4/);
+    assert.match(text, /after 5 retries/);
+    assert.match(text, /without advancing the working tree/, "progress means the tree moved");
+    assert.doesNotMatch(text, /adding findings/, "findings do not count as progress");
+    assert.match(text, /kept exploring/, "the summary is quoted");
+    assert.match(buildRetryBudgetHaltError("T4", 5), /no summary/, "summary defaults");
   });
 
   it("buildContinuationTaskText carries the heading, nextSteps, summary, tree and original task", () => {

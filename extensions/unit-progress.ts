@@ -5,7 +5,7 @@
  * never reach the commit gate: their work stays UNCOMMITTED for a
  * continuation unit. Progress is classified from the working-tree
  * fingerprint (git status --short + git diff --stat) changed since before
- * the attempt, or new findings appended to the shared ledger. With
+ * the attempt. With
  * progress the loop spawns a continuation unit without consuming the retry
  * budget, bounded by {@link MAX_CONTINUATIONS} per behavior; without
  * progress the attempt consumes one retry as before. {@link shouldHaltEarly}
@@ -115,8 +115,8 @@ export function decideContinuation(input: {
 /**
  * Whether consecutive no-progress attempts should halt the behavior early.
  *
- * Counts consecutive timed-out/partial attempts that neither moved the tree
- * fingerprint nor appended findings. At {@link EARLY_HALT_THRESHOLD} (2) the
+ * Counts consecutive timed-out/partial attempts that did not move the tree
+ * fingerprint. At {@link EARLY_HALT_THRESHOLD} (2) the
  * loop halts immediately instead of burning the retry budget on attempts
  * that explore identically every time.
  *
@@ -130,9 +130,10 @@ export function shouldHaltEarly(consecutiveNoProgress: number): boolean {
 /**
  * Build the early-halt error text for a non-converging behavior.
  *
- * Names the diagnosis ("exploration not converging") and both actionable
- * recommendations: split the behavior via /discuss -> /finalize, or raise
- * PI_IMPLEMENT_TIMEOUT_MS so the unit gets more time.
+ * Names the diagnosis ("exploration not converging") and three
+ * recommendations: a paste-ready snippet in the task description via
+ * /discuss -> /finalize when the unit lacked external syntax or an API,
+ * splitting via /discuss -> /finalize, or raising PI_IMPLEMENT_TIMEOUT_MS.
  *
  * @param behaviorId - The halted behavior.
  * @param attempts   - Consecutive no-progress attempts that triggered the halt.
@@ -141,10 +142,28 @@ export function shouldHaltEarly(consecutiveNoProgress: number): boolean {
 export function buildEarlyHaltError(behaviorId: string, attempts: number): string {
   return (
     `Unit ${behaviorId}: ${attempts} consecutive attempts reported partial work or hit the ` +
-    `time limit without advancing the working tree or adding findings — ` +
-    `diagnosis: ${EARLY_HALT_DIAGNOSIS}. ` +
-    `Split this behavior into smaller behaviors via /discuss -> /finalize, or raise ` +
-    `PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.`
+    `time limit without advancing the working tree — diagnosis: ${EARLY_HALT_DIAGNOSIS}. ` +
+    `If the unit lacked external syntax or an API (see its findings), add a paste-ready ` +
+    `snippet to the task description via /discuss -> /finalize; otherwise split this ` +
+    `behavior via /discuss -> /finalize, or raise PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.`
+  );
+}
+
+/**
+ * Build the halt text for a retry-budget exhaustion without progress.
+ *
+ * Progress means the tree fingerprint moved; findings alone are not
+ * progress (T14).
+ *
+ * @param behaviorId - The halted behavior.
+ * @param retries    - The retry budget that was consumed.
+ * @param summary    - The unit's last report summary, when present.
+ * @returns The halt error text.
+ */
+export function buildRetryBudgetHaltError(behaviorId: string, retries: number, summary?: string): string {
+  return (
+    `Unit ${behaviorId} reported partial work after ${retries} retries ` +
+    `without advancing the working tree: ${summary ?? "no summary"}`
   );
 }
 

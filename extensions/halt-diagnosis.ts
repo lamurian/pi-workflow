@@ -143,8 +143,9 @@ const DIAGNOSIS_RULES: DiagnosisRule[] = [
     },
     diagnosis: EARLY_HALT_DIAGNOSIS,
     recommendation:
-      "Split this behavior into smaller behaviors via /discuss -> /finalize, " +
-      "or raise PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.",
+      "If the unit lacked external syntax or an API (see its findings), add a paste-ready snippet " +
+      "to the task description via /discuss -> /finalize; otherwise split this behavior via " +
+      "/discuss -> /finalize, or raise PI_IMPLEMENT_TIMEOUT_MS so the unit has more time to converge.",
   },
   outcomeRule(
     "contract-guard",
