@@ -70,7 +70,7 @@ const VALID = {
   sources: [{ path: "src/a.ts", tasks: ["T1"] }],
   tests: [{ path: "tests/a.test.ts", tasks: ["T1"] }],
   tasks: [
-    { id: "T1", description: "x", expectedOutput: ["returns x"], status: "active", commit: "feat: implement x" },
+    { id: "T1", description: "returns x for a.test.ts", expectedOutput: ["returns x"], status: "active", commit: "feat: implement x" },
   ],
 };
 
