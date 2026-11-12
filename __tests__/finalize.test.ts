@@ -747,6 +747,19 @@ describe("finalize-prompt.md content assertions (T6)", () => {
     assert.match(content, /files/);
   });
 
+  it("describes instruction as shared context rendered into every unit's task text", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /shared context rendered into every unit's task text/);
+  });
+
+  it("drafting rules pin third-party syntax as a paste-ready snippet in the description", async () => {
+    const content = await loadContent("finalize-prompt.md");
+    assert.match(content, /paste-ready snippet/);
+    assert.match(content, /third-party config or API syntax/);
+    assert.match(content, /offline with no web access/);
+    assert.match(content, /search only the project directory/);
+  });
+
   it("the blanket do-not-re-explore wording is gone, replaced by evidence flow", async () => {
     const content = await loadContent("finalize-prompt.md");
     assert.doesNotMatch(

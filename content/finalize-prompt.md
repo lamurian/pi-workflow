@@ -14,7 +14,7 @@ You are drafting the atomic implementation contract (contract v2) from this disc
 The contract is normalized: `sources` and `tests` are the two path lists and the single source of truth — the guard's allowlist, each unit's scope and the path ownership map are all derived from them. Declare each fact exactly once; never restate a path list anywhere else.
 
 - `title` — short task name.
-- `instruction` — shared context only: what the contract implements overall. Never put file lists here; paths belong in `sources`/`tests`.
+- `instruction` — shared context rendered into every unit's task text: what the contract implements overall. Never put file lists here; paths belong in `sources`/`tests`.
 - `done` — aggregate definition of done (manual verification for non-test work).
 - `sources[]` — implementation files. Each entry: `{ path, status?, tasks }`.
 - `tests[]` — test and fixture files. Each entry: `{ path, status?, tasks }`.
@@ -95,6 +95,7 @@ An `unverified` confidence tag means derivation found no hit (default export, in
 1. **Index-membership manual tasks sequence before all implementation tasks.** Untrack, rename and every other `D`-entry task are index-membership work: a `D` declaration only materializes when `git rm --cached` is staged, so a D task ordered after implementation tasks trips the allowlist guard of every commit before it. List these manual tasks first in `tasks[]` so the loop runs them first.
 2. **Never ship a unit-side hard block before the orchestrator capability that satisfies it.** If the contract implies an unconditional guard block, the orchestrator-side capability that satisfies it must exist in the same release — otherwise the block's message must name the manual fallback a unit can use. A block with no owner deadlocks the run.
 3. **Grep the tests when changing an orchestrator rule.** When the contract changes an orchestrator rule (gate, retry, loop, status, guard, detection), grep the project's tests for that rule's message strings, function names and harness names — including dogfood tests that assert this repo's own detected configuration — and classify every hit. Scan evidence matches by symbol/basename and misses rule-level assertions in shared test files.
+4. **Pin external syntax in the task description.** Units run offline with no web access and search only the project directory. When a task depends on third-party config or API syntax (for example a mise `usage` spec), put a paste-ready snippet in that task's `description` so the unit has nothing to research.
 
 ## Rules
 
