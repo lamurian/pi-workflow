@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowState, Behavior, TaskContract } from "./state.ts";
+import { renderFindingsSection } from "./findings-ledger.ts";
 import { runSaveTask } from "./save-task-core.ts";
 import { setTaskStatus } from "./task-status.ts";
 
@@ -130,7 +131,11 @@ export function parseSplitProposal(text: string): unknown[] | undefined {
 /**
  * Build the planner child's task text for one parent task.
  *
- * @param state      - Workflow state holding the contract.
+ * Lists the parent's expectedOutput assertions numbered from 0 (children
+ * reference them by integer index) and appends the behavior's findings
+ * ledger section (own + global entries, scoped like unit task texts).
+ *
+ * @param state      - Workflow state holding the contract and findings.
  * @param behaviorId - Parent task id.
  * @param trigger    - Why the split was triggered.
  * @returns The task text.
@@ -138,7 +143,21 @@ export function parseSplitProposal(text: string): unknown[] | undefined {
 export function buildPlannerTask(state: WorkflowState, behaviorId: string, trigger: SplitTrigger): string {
   const task = state.contractV2?.tasks.find((t) => t.id === behaviorId);
   const why = trigger === "timeout" ? "hit the timeout halt threshold" : "reported blocked (too-large)";
-  return `Task ${behaviorId} ${why}. Propose a split.\n\nParent task:\n${JSON.stringify(task ?? { id: behaviorId }, null, 2)}`;
+  const assertions = task?.expectedOutput ?? [];
+  // expectedOutput is dropped from the JSON parent: it renders as the numbered list below.
+  const parentJson = JSON.stringify(task ? { ...task, expectedOutput: undefined } : { id: behaviorId }, null, 2);
+  const numbered = assertions.map((assertion, i) => `${i}: ${assertion}`);
+  const sections = [
+    `Task ${behaviorId} ${why}. Propose a split.`,
+    `Parent task:\n${parentJson}`,
+    numbered.length > 0
+      ? "Parent expectedOutput assertions, numbered from 0 — children reference them by " +
+        "integer index in expectedOutput and never restate the assertion text:\n" +
+        numbered.join("\n")
+      : "",
+    renderFindingsSection(state.findings, behaviorId),
+  ];
+  return sections.filter((section) => section.length > 0).join("\n\n");
 }
 
 /** Default planner: a read-only pi child limited to PLANNER_TOOLS. */
@@ -170,7 +189,37 @@ export async function runRuntimeSplit(opts: RuntimeSplitOptions): Promise<Runtim
   }
   const tasks = parseSplitProposal(output);
   if (!tasks) return { applied: false, childIds: [], reason: "planner returned no proposal" };
-  const payload = { operation: "split", parentId: behaviorId, tasks };
+  // T5/fix D: children carry 0-based indices into the parent's assertions;
+  // map them to the exact strings before any save_task call, rejecting a
+  // non-integer or out-of-range index without submitting the proposal.
+  const assertions = state.contractV2?.tasks.find((t) => t.id === behaviorId)?.expectedOutput ?? [];
+  const resolved: unknown[] = [];
+  for (let i = 0; i < tasks.length; i++) {
+    const child = tasks[i];
+    if (!child || typeof child !== "object") {
+      resolved.push(child);
+      continue;
+    }
+    const record = child as Record<string, unknown>;
+    const indices = record.expectedOutput;
+    if (!Array.isArray(indices)) {
+      resolved.push(record); // save_task rejects the shape with its own reason.
+      continue;
+    }
+    const mapped: string[] = [];
+    for (const entry of indices) {
+      if (typeof entry !== "number" || !Number.isInteger(entry) || entry < 0 || entry >= assertions.length) {
+        return {
+          applied: false,
+          childIds: [],
+          reason: `invalid expectedOutput index ${JSON.stringify(entry)} in child ${i + 1}`,
+        };
+      }
+      mapped.push(assertions[entry]);
+    }
+    resolved.push({ ...record, expectedOutput: mapped });
+  }
+  const payload = { operation: "split", parentId: behaviorId, tasks: resolved };
   const save = opts.save ?? runSaveTask;
   const dry = await save(structuredClone(state), payload, { pi, ctx, caller: "orchestrator" });
   if (!dry.ok) return { applied: false, childIds: [], reason: dry.text };

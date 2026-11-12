@@ -1,8 +1,8 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { isSplitChild, parseSplitProposal, splitOrHalt, runSplitChild, type RuntimeSplitOptions } from "../extensions/split-planner.ts";
+import { buildPlannerTask, isSplitChild, parseSplitProposal, splitOrHalt, runSplitChild, type RuntimeSplitOptions } from "../extensions/split-planner.ts";
 
-const PROPOSAL = '```json\n{"tasks":[{"description":"a","expectedOutput":["x"],"paths":["a.ts"]},{"description":"b","expectedOutput":["y"],"paths":["b.ts"]}]}\n```';
+const PROPOSAL = '```json\n{"tasks":[{"description":"a","expectedOutput":[1,0],"paths":["a.ts"]},{"description":"b","expectedOutput":[0],"paths":["b.ts"]}]}\n```';
 
 function setup(
   opts: {
@@ -17,7 +17,20 @@ function setup(
 ) {
   const calls: { payload: Record<string, unknown>; caller: string; dry: boolean }[] = [];
   const confirms: { timeout?: number }[] = [];
-  const state = { phase: "implementing", task: { behaviors: [{ id: "T1" }] }, contractV2: { tasks: [{ id: "T1" }] } } as never;
+  const state = {
+    phase: "implementing",
+    task: { behaviors: [{ id: "T1" }] },
+    contractV2: {
+      tasks: [
+        {
+          id: "T1",
+          description: "parent task",
+          expectedOutput: ["alpha assertion", "beta assertion"],
+          status: "active",
+        },
+      ],
+    },
+  } as never;
   const ctx = {
     cwd: "/tmp",
     ui: {
@@ -53,6 +66,65 @@ describe("runtime split planner", () => {
       assert.equal(c.payload.parentId, "T1");
       assert.equal(c.caller, "orchestrator");
     }
+  });
+
+  it("maps child expectedOutput indices to the parent's exact assertion strings before save_task", async () => {
+    const { calls, options } = setup();
+    await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => undefined });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls[0]!.payload.tasks, [
+      { description: "a", expectedOutput: ["beta assertion", "alpha assertion"], paths: ["a.ts"] },
+      { description: "b", expectedOutput: ["alpha assertion"], paths: ["b.ts"] },
+    ]);
+    assert.deepEqual(calls[1]!.payload.tasks, calls[0]!.payload.tasks);
+  });
+
+  it("never submits a proposal with a non-integer or out-of-range index and the reason names it", async () => {
+    const cases: ReadonlyArray<readonly [indices: string, named: string]> = [
+      ['"x"', '"x"'],
+      ["7", "7"],
+      ["0.5", "0.5"],
+      ["-1", "-1"],
+    ];
+    for (const [indices, named] of cases) {
+      const { calls, options } = setup({
+        planner: async () => `{"tasks":[{"description":"a","expectedOutput":[${indices}],"paths":["a.ts"]}]}`,
+      });
+      const res = await splitOrHalt(options, "too large", { halt: async (t) => t, runChild: async () => "child" });
+      assert.equal(calls.length, 0, `index ${indices} never reaches save_task`);
+      assert.equal(
+        res,
+        `too large\nRuntime split not applied: invalid expectedOutput index ${named} in child 1`,
+      );
+    }
+  });
+
+  it("buildPlannerTask numbers the parent's assertions from 0 and appends the behavior's findings ledger", () => {
+    const state = {
+      phase: "implementing",
+      contractV2: {
+        tasks: [
+          {
+            id: "T1",
+            description: "parent task",
+            expectedOutput: ["alpha assertion", "beta assertion"],
+            status: "active",
+          },
+        ],
+      },
+      findings: [
+        { behaviorId: "T1", text: "lint lives in .golangci.yml" },
+        { behaviorId: "global", text: "shared fact from the orchestrator" },
+        { behaviorId: "T2", text: "private fact of another behavior" },
+      ],
+    } as never;
+    const text = buildPlannerTask(state, "T1", "timeout");
+    assert.match(text, /\n0: alpha assertion/);
+    assert.match(text, /\n1: beta assertion/);
+    assert.ok(!text.includes("private fact of another behavior"));
+    assert.match(text, /## Known findings from earlier units/);
+    assert.match(text, /- \[T1\] lint lives in \.golangci\.yml/);
+    assert.match(text, /- \[global\] shared fact from the orchestrator/);
   });
 
   it("applies after a 60s veto window without veto and runs children in order", async () => {
