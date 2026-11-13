@@ -34,27 +34,61 @@ interface ExecResult {
   killed: boolean;
 }
 
+/** Options recorded per exec call (the shared budget rides in `timeout`). */
+interface RecordedExecOptions {
+  cwd?: string;
+  timeout?: number;
+}
+
 function mockPi(
   results: ExecResult[],
-): ExtensionAPI & { calls: string[]; saved: WorkflowState[] } {
+  onExec?: (index: number) => void,
+): ExtensionAPI & { calls: string[]; opts: RecordedExecOptions[]; saved: WorkflowState[] } {
   const calls: string[] = [];
+  const opts: RecordedExecOptions[] = [];
   const saved: WorkflowState[] = [];
   let i = 0;
   return {
-    exec: (async (cmd: string) => {
+    exec: (async (cmd: string, _args: string[], options?: RecordedExecOptions) => {
+      const index = i++;
       calls.push(cmd);
-      return results[i++] ?? { stdout: "", stderr: "", code: 0, killed: false };
+      opts.push(options ?? {});
+      onExec?.(index);
+      return results[index] ?? { stdout: "", stderr: "", code: 0, killed: false };
     }) as ExtensionAPI["exec"],
     appendEntry: ((_t: string, data: WorkflowState) => {
       saved.push(structuredClone(data));
     }) as ExtensionAPI["appendEntry"],
     calls,
+    opts,
     saved,
-  } as unknown as ExtensionAPI & { calls: string[]; saved: WorkflowState[] };
+  } as unknown as ExtensionAPI & {
+    calls: string[];
+    opts: RecordedExecOptions[];
+    saved: WorkflowState[];
+  };
 }
 
 function state(extra: Partial<WorkflowState>): WorkflowState {
   return { ...extra } as WorkflowState;
+}
+
+/** Run `body` with only the Date clock faked and PI_BASELINE_TIMEOUT_MS set. */
+async function withBudgetClock(
+  budgetMs: number | undefined,
+  body: () => Promise<void>,
+): Promise<void> {
+  const prev = process.env.PI_BASELINE_TIMEOUT_MS;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  if (budgetMs === undefined) delete process.env.PI_BASELINE_TIMEOUT_MS;
+  else process.env.PI_BASELINE_TIMEOUT_MS = String(budgetMs);
+  try {
+    await body();
+  } finally {
+    if (prev === undefined) delete process.env.PI_BASELINE_TIMEOUT_MS;
+    else process.env.PI_BASELINE_TIMEOUT_MS = prev;
+    vi.useRealTimers();
+  }
 }
 
 describe("baseline capture wiring in /implement", () => {
@@ -142,7 +176,7 @@ describe("captureBaselineFailures", () => {
     const pi = mockPi([]);
     const set = state({
       baselineFailures: ["x"],
-      testTool: { source: "detected", suites: [], fullSuites: [A] },
+      testTool: { source: "detected", suites: [A], fullSuites: [A] },
     });
     await captureBaselineFailures(pi, "/repo", set);
     assert.deepEqual(set.baselineFailures, ["x"]);
@@ -151,5 +185,57 @@ describe("captureBaselineFailures", () => {
     await captureBaselineFailures(pi, "/repo", state({}));
     assert.equal(pi.calls.length, 0);
     assert.equal(pi.saved.length, 0);
+  });
+
+  it("passes each full-suite exec the remaining budget as its timeout (600000 default)", async () => {
+    await withBudgetClock(undefined, async () => {
+      const pi = mockPi([], (index) => {
+        if (index === 0) vi.setSystemTime(Date.now() + 5_000); // first suite "took" 5s
+      });
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+      await captureBaselineFailures(pi, "/repo", s);
+      assert.equal(pi.opts.length, 2, "both suites ran");
+      assert.equal(pi.opts[0]?.timeout, 600_000, "first suite gets the full budget");
+      assert.equal(pi.opts[1]?.timeout, 595_000, "second suite gets what remains");
+    });
+  });
+
+  it("PI_BASELINE_TIMEOUT_MS overrides the shared budget", async () => {
+    await withBudgetClock(123_456, async () => {
+      const pi = mockPi([]);
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A] } });
+      await captureBaselineFailures(pi, "/repo", s);
+      assert.equal(pi.opts[0]?.timeout, 123_456);
+    });
+  });
+
+  it("a killed suite contributes no paths while completed suites still accumulate", async () => {
+    const pi = mockPi([
+      { stdout: "FAIL __tests__/killed.test.ts > partial", stderr: "", code: 124, killed: true },
+      { stdout: "FAIL __tests__/red.test.ts > y", stderr: "", code: 1, killed: false },
+    ]);
+    const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+    await captureBaselineFailures(pi, "/repo", s);
+    assert.equal(pi.calls.length, 2, "the killed suite still ran to completion");
+    assert.deepEqual(s.baselineFailures, ["__tests__/red.test.ts"]);
+    assert.equal(pi.saved.length, 1, "one saveState at the end");
+    assert.deepEqual(pi.saved[0]?.baselineFailures, ["__tests__/red.test.ts"]);
+  });
+
+  it("never execs a suite that would start after the deadline", async () => {
+    await withBudgetClock(10_000, async () => {
+      const pi = mockPi(
+        [{ stdout: "FAIL __tests__/a.test.ts > x", stderr: "", code: 1, killed: false }],
+        (index) => {
+          if (index === 0) vi.setSystemTime(Date.now() + 10_001); // budget now exhausted
+        },
+      );
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+      await captureBaselineFailures(pi, "/repo", s);
+      assert.equal(pi.calls.length, 1, "B is skipped without exec");
+      assert.equal(pi.opts[0]?.timeout, 10_000);
+      assert.deepEqual(s.baselineFailures, ["__tests__/a.test.ts"], "ran suites still accumulate");
+      assert.equal(pi.saved.length, 1, "persistence is unchanged: one saveState");
+    });
   });
 });
