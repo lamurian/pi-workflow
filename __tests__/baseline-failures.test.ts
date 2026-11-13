@@ -159,8 +159,10 @@ describe("captureBaselineFailures", () => {
     await captureBaselineFailures(pi, "/repo", s);
     assert.equal(pi.calls.length, 2);
     assert.deepEqual(s.baselineFailures, ["__tests__/a.test.ts", "__tests__/z.test.ts"]);
-    assert.equal(pi.saved.length, 1);
-    assert.deepEqual(pi.saved[0]?.baselineFailures, s.baselineFailures);
+    assert.equal(pi.saved.length, 2, "marker save first, result save last");
+    assert.equal(pi.saved[0]?.baselineAttempted, true, "marker persisted before the first suite");
+    assert.equal(pi.saved[0]?.baselineFailures, undefined, "marker save carries no result");
+    assert.deepEqual(pi.saved[1]?.baselineFailures, s.baselineFailures);
   });
 
   it("stores an empty array when every full suite is green", async () => {
@@ -169,7 +171,9 @@ describe("captureBaselineFailures", () => {
     await captureBaselineFailures(pi, "/repo", s);
     assert.equal(pi.calls.length, 2);
     assert.deepEqual(s.baselineFailures, []);
-    assert.equal(pi.saved.length, 1);
+    assert.equal(pi.saved.length, 2, "marker save first, result save last");
+    assert.equal(pi.saved[0]?.baselineAttempted, true);
+    assert.deepEqual(pi.saved[1]?.baselineFailures, []);
   });
 
   it("runs nothing when baseline already set or no full suites recorded", async () => {
@@ -185,6 +189,18 @@ describe("captureBaselineFailures", () => {
     await captureBaselineFailures(pi, "/repo", state({}));
     assert.equal(pi.calls.length, 0);
     assert.equal(pi.saved.length, 0);
+  });
+
+  it("skips when baselineAttempted is set even though baselineFailures is unset", async () => {
+    const pi = mockPi([]);
+    const s = state({
+      baselineAttempted: true,
+      testTool: { source: "detected", suites: [A], fullSuites: [A] },
+    });
+    await captureBaselineFailures(pi, "/repo", s);
+    assert.equal(pi.calls.length, 0, "no suite exec");
+    assert.equal(s.baselineFailures, undefined, "baselineFailures stays untouched");
+    assert.equal(pi.saved.length, 0, "a skipped attempt saves nothing");
   });
 
   it("passes each full-suite exec the remaining budget as its timeout (600000 default)", async () => {
@@ -218,8 +234,9 @@ describe("captureBaselineFailures", () => {
     await captureBaselineFailures(pi, "/repo", s);
     assert.equal(pi.calls.length, 2, "the killed suite still ran to completion");
     assert.deepEqual(s.baselineFailures, ["__tests__/red.test.ts"]);
-    assert.equal(pi.saved.length, 1, "one saveState at the end");
-    assert.deepEqual(pi.saved[0]?.baselineFailures, ["__tests__/red.test.ts"]);
+    assert.equal(pi.saved.length, 2, "marker save first, result save last");
+    assert.equal(pi.saved[0]?.baselineAttempted, true);
+    assert.deepEqual(pi.saved[1]?.baselineFailures, ["__tests__/red.test.ts"]);
   });
 
   it("never execs a suite that would start after the deadline", async () => {
@@ -235,7 +252,9 @@ describe("captureBaselineFailures", () => {
       assert.equal(pi.calls.length, 1, "B is skipped without exec");
       assert.equal(pi.opts[0]?.timeout, 10_000);
       assert.deepEqual(s.baselineFailures, ["__tests__/a.test.ts"], "ran suites still accumulate");
-      assert.equal(pi.saved.length, 1, "persistence is unchanged: one saveState");
+      assert.equal(pi.saved.length, 2, "marker save first, result save last");
+      assert.equal(pi.saved[0]?.baselineAttempted, true);
+      assert.deepEqual(pi.saved[1]?.baselineFailures, ["__tests__/a.test.ts"]);
     });
   });
 
@@ -407,7 +426,8 @@ describe("captureBaselineFailures", () => {
     });
     assert.equal(pi.calls.length, 2, "all suites still ran");
     assert.deepEqual(s.baselineFailures, ["__tests__/a.test.ts"], "baseline is recorded");
-    assert.equal(pi.saved.length, 1, "baselineFailures is persisted exactly once");
-    assert.deepEqual(pi.saved[0]?.baselineFailures, ["__tests__/a.test.ts"]);
+    assert.equal(pi.saved.length, 2, "marker save first, baselineFailures persisted exactly once");
+    assert.equal(pi.saved[0]?.baselineAttempted, true);
+    assert.deepEqual(pi.saved[1]?.baselineFailures, ["__tests__/a.test.ts"]);
   });
 });

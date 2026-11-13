@@ -154,6 +154,14 @@ export interface WorkflowState {
    * final gate tolerates twice-red suites failing only on these. Optional.
    */
   baselineFailures?: string[];
+  /**
+   * Baseline capture attempt marker (T4): set and persisted before the first
+   * suite of a fresh capture runs, so an attempt interrupted mid-capture
+   * (e.g. by a /reload) never repeats the baseline check on the next
+   * /implement. Optional: absent on sessions persisted before this field
+   * existed.
+   */
+  baselineAttempted?: boolean;
 }
 
 /** One recorded contract mutation by runSaveTask. */

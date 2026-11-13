@@ -64,15 +64,21 @@ export function baselineBudgetMs(
  * Capture baseline failing test paths by running each recorded full suite once,
  * under a shared wall-clock budget (PI_BASELINE_TIMEOUT_MS, 600000 ms default).
  *
- * Runs nothing when state.baselineFailures is already set or no non-empty
- * fullSuites list is recorded. The budget is resolved once and a deadline is
- * computed before the suite loop: every exec receives the remaining time as
- * its `timeout` so a hanging suite is SIGTERM'd instead of parking the chain;
- * a `killed` result marks the suite unknown (its partial output is never
- * triaged, so it contributes no failing paths); and a suite that would start
- * after the deadline is skipped entirely (no exec). Persistence semantics are
- * unchanged: one saveState at the end with the accumulated paths of the
- * suites that ran. Best-effort: never throws.
+ * Runs nothing when state.baselineFailures is already set, when the
+ * state.baselineAttempted marker is already set (an interrupted previous
+ * attempt whose result was never written), or when no non-empty fullSuites
+ * list is recorded. After the guards pass, the marker is set and persisted
+ * BEFORE the first suite runs, so a /reload mid-capture never repeats the
+ * baseline check; because the guards return first, the marker save can never
+ * overwrite an existing baselineFailures value. The budget is resolved once
+ * and a deadline is computed before the suite loop: every exec receives the
+ * remaining time as its `timeout` so a hanging suite is SIGTERM'd instead of
+ * parking the chain; a `killed` result marks the suite unknown (its partial
+ * output is never triaged, so it contributes no failing paths); and a suite
+ * that would start after the deadline is skipped entirely (no exec).
+ * Persistence is two saveState calls: the attempt marker first, the result
+ * last with the accumulated paths of the suites that ran. Best-effort: never
+ * throws.
  *
  * Progress notifications (T2), all best-effort through `notify`:
  * - start, before the first suite: number of full suites + total budget in
@@ -89,7 +95,8 @@ export function baselineBudgetMs(
  *
  * @param pi     - ExtensionAPI used for exec and state persistence.
  * @param cwd    - Repository working directory.
- * @param state  - Workflow state; baselineFailures is set and persisted.
+ * @param state  - Workflow state; baselineAttempted and baselineFailures
+ *                 are set and persisted.
  * @param notify - Optional progress notifier; omitting it keeps capture silent.
  * @returns Resolves when capture is done (or skipped).
  */
@@ -102,8 +109,18 @@ export async function captureBaselineFailures(
   let heartbeat: HeartbeatHandle | undefined;
   try {
     if (state.baselineFailures !== undefined) return;
+    if (state.baselineAttempted) return;
     const suites = state.testTool?.fullSuites;
     if (!suites || suites.length === 0) return;
+    // Persist the attempt marker before the first suite runs so an
+    // interrupted capture is never repeated. The guards above guarantee
+    // baselineFailures is unset here, so this save cannot overwrite it.
+    state.baselineAttempted = true;
+    try {
+      saveState(pi, state);
+    } catch {
+      // Best-effort: a failing marker save must not abort the capture.
+    }
     const budgetMs = baselineBudgetMs();
     const startedAt = Date.now();
     const deadline = startedAt + budgetMs;
