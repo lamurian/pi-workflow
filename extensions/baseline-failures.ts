@@ -13,6 +13,12 @@ import { extractFailingPaths } from "./full-gate-triage.ts";
 /** Default shared wall-clock budget for baseline capture, in milliseconds. */
 const DEFAULT_BASELINE_BUDGET_MS = 600_000;
 
+/** Heartbeat interval while a capture is running, in milliseconds (T3). */
+const HEARTBEAT_INTERVAL_MS = 300_000;
+
+/** Timer handle that works whether setInterval yields a Node Timeout or a DOM number. */
+type HeartbeatHandle = ReturnType<typeof setInterval> & { unref?: () => void };
+
 /**
  * Progress notifier for baseline capture (T2). `level` defaults to `info`.
  * Callers that omit it stay silent.
@@ -74,7 +80,12 @@ export function baselineBudgetMs(
  * - a warning per suite killed by timeout and per suite skipped by budget
  *   exhaustion, naming that suite as unknown (level `warning`);
  * - completion after persisting: elapsed time, recorded failing-path count
- *   and unknown-suite count (level `info`).
+ *   and unknown-suite count (level `info`);
+ * - a heartbeat every five minutes while the capture is still running,
+ *   reporting elapsed minutes (level `info`), so a long suite can be noticed
+ *   and the session /reloaded (T3). The heartbeat timer is unref'd so it can
+ *   never hold the process open, and it is cleared in a `finally` block so it
+ *   never outlives the capture — on completion, skip, and exception alike.
  *
  * @param pi     - ExtensionAPI used for exec and state persistence.
  * @param cwd    - Repository working directory.
@@ -88,6 +99,7 @@ export async function captureBaselineFailures(
   state: WorkflowState,
   notify?: BaselineNotify,
 ): Promise<void> {
+  let heartbeat: HeartbeatHandle | undefined;
   try {
     if (state.baselineFailures !== undefined) return;
     const suites = state.testTool?.fullSuites;
@@ -102,6 +114,16 @@ export async function captureBaselineFailures(
         `total budget ${budgetMinutes} minute(s).`,
       "info",
     );
+    heartbeat = setInterval(() => {
+      const elapsedMinutes = Math.floor((Date.now() - startedAt) / 60_000);
+      safeNotify(
+        notify,
+        `Baseline capture: heartbeat after ${elapsedMinutes} minute(s), ` +
+          "still running — consider /reload if a suite is stuck.",
+        "info",
+      );
+    }, HEARTBEAT_INTERVAL_MS) as HeartbeatHandle;
+    heartbeat.unref?.();
     const failing = new Set<string>();
     let unknown = 0;
     for (const suite of suites) {
@@ -157,5 +179,7 @@ export async function captureBaselineFailures(
     );
   } catch {
     // Best-effort: never throw.
+  } finally {
+    if (heartbeat !== undefined) clearInterval(heartbeat);
   }
 }

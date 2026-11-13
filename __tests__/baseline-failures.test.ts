@@ -320,6 +320,82 @@ describe("captureBaselineFailures", () => {
     });
   });
 
+  it("fires a heartbeat every five minutes while capture is pending and stops after completion", async () => {
+    vi.useFakeTimers();
+    try {
+      const notes: Array<{ message: string; level?: string }> = [];
+      let settleFirst: (() => void) | undefined;
+      const firstExec = new Promise<void>((resolve) => {
+        settleFirst = resolve;
+      });
+      let calls = 0;
+      const pi = {
+        exec: (async () => {
+          calls++;
+          if (calls === 1) await firstExec;
+          return { stdout: "", stderr: "", code: 0, killed: false };
+        }) as ExtensionAPI["exec"],
+        appendEntry: (() => {}) as ExtensionAPI["appendEntry"],
+      } as unknown as ExtensionAPI;
+      const heartbeats = () => notes.filter((n) => /heartbeat/i.test(n.message));
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+      const run = captureBaselineFailures(pi, "/repo", s, (message, level) => {
+        notes.push({ message, level });
+      });
+      await vi.advanceTimersByTimeAsync(300_000); // five minutes, first exec still pending
+      assert.equal(heartbeats().length, 1, "exactly one heartbeat after five minutes");
+      assert.match(
+        heartbeats()[0]!.message,
+        /5 minute/,
+        "the heartbeat reports elapsed minutes",
+      );
+      settleFirst!();
+      await run;
+      await vi.advanceTimersByTimeAsync(600_000); // ten more minutes past completion
+      assert.equal(heartbeats().length, 1, "no heartbeat fires after completion");
+      assert.equal(calls, 2, "both suites ran to completion");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears the heartbeat timer when capture throws (exception path)", async () => {
+    vi.useFakeTimers();
+    try {
+      const notes: Array<{ message: string; level?: string }> = [];
+      let settleFirst: (() => void) | undefined;
+      const firstExec = new Promise<void>((resolve) => {
+        settleFirst = resolve;
+      });
+      const pi = {
+        exec: (async () => {
+          await firstExec;
+          return { stdout: "", stderr: "", code: 0, killed: false };
+        }) as ExtensionAPI["exec"],
+        appendEntry: (() => {
+          throw new Error("persist boom");
+        }) as ExtensionAPI["appendEntry"],
+      } as unknown as ExtensionAPI;
+      const heartbeats = () => notes.filter((n) => /heartbeat/i.test(n.message));
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A] } });
+      const run = captureBaselineFailures(pi, "/repo", s, (message, level) => {
+        notes.push({ message, level });
+      });
+      await vi.advanceTimersByTimeAsync(300_000);
+      assert.equal(heartbeats().length, 1, "one heartbeat while pending");
+      settleFirst!();
+      await run; // the persist error is swallowed by the outer catch
+      await vi.advanceTimersByTimeAsync(600_000);
+      assert.equal(
+        heartbeats().length,
+        1,
+        "no heartbeat fires after the exception path",
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("a throwing notify leaves capture successful and baselineFailures persisted", async () => {
     const pi = mockPi([
       { stdout: "FAIL __tests__/a.test.ts > x", stderr: "", code: 1, killed: false },
