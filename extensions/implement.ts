@@ -204,7 +204,7 @@ async function runOrchestratedImplementSafely(
 ): Promise<Awaited<ReturnType<typeof runOrchestratedImplement>>> {
   if (!resuming) {
     try {
-      await captureBaselineFailures(pi, ctx.cwd, state);
+      await captureBaselineFailures(pi, ctx.cwd, state, ctx.ui.notify);
     } catch {
       // Capture failure leaves baselineFailures unset; the loop still starts.
     }

@@ -238,4 +238,100 @@ describe("captureBaselineFailures", () => {
       assert.equal(pi.saved.length, 1, "persistence is unchanged: one saveState");
     });
   });
+
+  it("emits the start notification naming suite count and budget before the first exec", async () => {
+    const events: string[] = [];
+    const notes: string[] = [];
+    const pi = mockPi([], () => events.push("exec"));
+    const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+    await captureBaselineFailures(pi, "/repo", s, (message, level) => {
+      events.push(`notify:${level ?? "info"}`);
+      notes.push(message);
+    });
+    assert.equal(events[0], "notify:info", "start fires before the first exec");
+    assert.match(notes[0]!, /2 full suite/, "start names the number of full suites");
+    assert.match(notes[0]!, /10 minute/, "start names the total budget in minutes");
+  });
+
+  it("warns naming a killed suite and a budget-skipped suite as unknown", async () => {
+    // Killed suite: exec returns killed for A.
+    const killedNotes: Array<{ message: string; level?: string }> = [];
+    const piKilled = mockPi([
+      { stdout: "", stderr: "", code: 124, killed: true },
+      { stdout: "", stderr: "", code: 0, killed: false },
+    ]);
+    const sKilled = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+    await captureBaselineFailures(piKilled, "/repo", sKilled, (message, level) => {
+      killedNotes.push({ message, level });
+    });
+    const killedWarning = killedNotes.find((n) => n.level === "warning");
+    assert.ok(killedWarning, "a killed suite emits a warning");
+    assert.match(killedWarning.message, /"a"/, "the warning names the killed suite");
+    assert.match(killedWarning.message, /unknown/, "the warning counts it as unknown");
+
+    // Budget-skipped suite: first exec exhausts the budget, B is skipped.
+    const skippedNotes: Array<{ message: string; level?: string }> = [];
+    await withBudgetClock(10_000, async () => {
+      const piSkip = mockPi(
+        [{ stdout: "", stderr: "", code: 1, killed: false }],
+        (index) => {
+          if (index === 0) vi.setSystemTime(Date.now() + 10_001); // budget exhausted
+        },
+      );
+      const sSkip = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+      await captureBaselineFailures(piSkip, "/repo", sSkip, (message, level) => {
+        skippedNotes.push({ message, level });
+      });
+      assert.equal(piSkip.calls.length, 1, "B is skipped without exec");
+    });
+    const skipWarning = skippedNotes.find((n) => n.level === "warning");
+    assert.ok(skipWarning, "a budget-skipped suite emits a warning");
+    assert.match(skipWarning.message, /"b"/, "the warning names the skipped suite");
+    assert.match(skipWarning.message, /unknown/, "the warning counts it as unknown");
+  });
+
+  it("emits a completion notification with elapsed time, path count, and unknown count", async () => {
+    const notes: Array<{ message: string; level?: string }> = [];
+    await withBudgetClock(undefined, async () => {
+      const pi = mockPi(
+        [
+          { stdout: "FAIL __tests__/a.test.ts > x", stderr: "", code: 1, killed: false },
+          { stdout: "", stderr: "", code: 124, killed: true },
+        ],
+        (index) => {
+          if (index === 0) vi.setSystemTime(Date.now() + 5_000); // first suite took 5s
+        },
+      );
+      const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+      await captureBaselineFailures(pi, "/repo", s, (message, level) => {
+        notes.push({ message, level });
+      });
+      const completion = notes.at(-1);
+      assert.ok(completion, "a completion notification is emitted");
+      assert.equal(completion.level, "info", "completion is an info notification");
+      assert.match(completion.message, /complete/, "completion announces completion");
+      assert.match(completion.message, /5s/, "completion states elapsed time");
+      assert.match(
+        completion.message,
+        /1 failing path/,
+        "completion states the recorded failing-path count",
+      );
+      assert.match(completion.message, /1 suite\(s\) unknown/, "completion states the unknown-suite count");
+    });
+  });
+
+  it("a throwing notify leaves capture successful and baselineFailures persisted", async () => {
+    const pi = mockPi([
+      { stdout: "FAIL __tests__/a.test.ts > x", stderr: "", code: 1, killed: false },
+      { stdout: "", stderr: "", code: 0, killed: false },
+    ]);
+    const s = state({ testTool: { source: "detected", suites: [], fullSuites: [A, B] } });
+    await captureBaselineFailures(pi, "/repo", s, () => {
+      throw new Error("notify boom");
+    });
+    assert.equal(pi.calls.length, 2, "all suites still ran");
+    assert.deepEqual(s.baselineFailures, ["__tests__/a.test.ts"], "baseline is recorded");
+    assert.equal(pi.saved.length, 1, "baselineFailures is persisted exactly once");
+    assert.deepEqual(pi.saved[0]?.baselineFailures, ["__tests__/a.test.ts"]);
+  });
 });

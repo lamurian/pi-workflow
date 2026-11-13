@@ -14,6 +14,32 @@ import { extractFailingPaths } from "./full-gate-triage.ts";
 const DEFAULT_BASELINE_BUDGET_MS = 600_000;
 
 /**
+ * Progress notifier for baseline capture (T2). `level` defaults to `info`.
+ * Callers that omit it stay silent.
+ */
+export type BaselineNotify = (message: string, level?: "info" | "warning") => void;
+
+/**
+ * Emit a progress notification best-effort: a throwing notifier must never
+ * fail the capture.
+ *
+ * @param notify - Optional notifier; nothing happens when omitted.
+ * @param message - Notification text.
+ * @param level - Notification level (info or warning).
+ */
+function safeNotify(
+  notify: BaselineNotify | undefined,
+  message: string,
+  level: "info" | "warning",
+): void {
+  try {
+    notify?.(message, level);
+  } catch {
+    // Best-effort: notification failures are ignored.
+  }
+}
+
+/**
  * Resolve the shared wall-clock budget for baseline capture, honoring the
  * `PI_BASELINE_TIMEOUT_MS` environment variable override (milliseconds).
  * Invalid or missing values fall back to {@link DEFAULT_BASELINE_BUDGET_MS}.
@@ -42,30 +68,70 @@ export function baselineBudgetMs(
  * unchanged: one saveState at the end with the accumulated paths of the
  * suites that ran. Best-effort: never throws.
  *
- * @param pi    - ExtensionAPI used for exec and state persistence.
- * @param cwd   - Repository working directory.
- * @param state - Workflow state; baselineFailures is set and persisted.
+ * Progress notifications (T2), all best-effort through `notify`:
+ * - start, before the first suite: number of full suites + total budget in
+ *   minutes (level `info`);
+ * - a warning per suite killed by timeout and per suite skipped by budget
+ *   exhaustion, naming that suite as unknown (level `warning`);
+ * - completion after persisting: elapsed time, recorded failing-path count
+ *   and unknown-suite count (level `info`).
+ *
+ * @param pi     - ExtensionAPI used for exec and state persistence.
+ * @param cwd    - Repository working directory.
+ * @param state  - Workflow state; baselineFailures is set and persisted.
+ * @param notify - Optional progress notifier; omitting it keeps capture silent.
  * @returns Resolves when capture is done (or skipped).
  */
 export async function captureBaselineFailures(
   pi: ExtensionAPI,
   cwd: string,
   state: WorkflowState,
+  notify?: BaselineNotify,
 ): Promise<void> {
   try {
     if (state.baselineFailures !== undefined) return;
     const suites = state.testTool?.fullSuites;
     if (!suites || suites.length === 0) return;
-    const deadline = Date.now() + baselineBudgetMs();
+    const budgetMs = baselineBudgetMs();
+    const startedAt = Date.now();
+    const deadline = startedAt + budgetMs;
+    const budgetMinutes = Math.max(1, Math.round(budgetMs / 60_000));
+    safeNotify(
+      notify,
+      `Baseline capture: running ${suites.length} full suite(s), ` +
+        `total budget ${budgetMinutes} minute(s).`,
+      "info",
+    );
     const failing = new Set<string>();
+    let unknown = 0;
     for (const suite of suites) {
       const remainingMs = deadline - Date.now();
-      if (remainingMs <= 0) continue; // Budget exhausted: skip without exec.
+      if (remainingMs <= 0) {
+        // Budget exhausted: skip without exec, suite stays unknown.
+        unknown++;
+        safeNotify(
+          notify,
+          `Baseline capture: suite "${suite.label}" skipped (budget exhausted) ` +
+            "and counts as unknown.",
+          "warning",
+        );
+        continue;
+      }
       const [cmd = "", ...rest] = suite.argv;
       const suiteCwd = suite.cwd ? join(cwd, suite.cwd) : cwd;
       try {
         const r = await pi.exec(cmd, rest, { cwd: suiteCwd, timeout: remainingMs });
-        if (r.killed) continue; // Killed by the budget: unknown, no paths.
+        if (r.killed) {
+          // Killed by the budget: unknown, no paths.
+          unknown++;
+          safeNotify(
+            notify,
+            `Baseline capture: suite "${suite.label}" killed by timeout ` +
+              "and counts as unknown.",
+            "warning",
+          );
+          continue;
+        }
         if (r.code === 0) continue;
         const tail = gateTail([r.stdout ?? "", r.stderr ?? ""].filter(Boolean).join("\n"));
         const result = {
@@ -81,6 +147,14 @@ export async function captureBaselineFailures(
     }
     state.baselineFailures = [...failing].sort();
     saveState(pi, state);
+    const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
+    safeNotify(
+      notify,
+      `Baseline capture complete in ${elapsedSeconds}s: ` +
+        `${state.baselineFailures.length} failing path(s) recorded, ` +
+        `${unknown} suite(s) unknown.`,
+      "info",
+    );
   } catch {
     // Best-effort: never throw.
   }
