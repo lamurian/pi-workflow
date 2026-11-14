@@ -313,6 +313,18 @@ async function runOrchestratedImplementSafely(
     } catch {
       // Capture failure leaves baselineFailures unset; the loop still starts.
     }
+    // T9(a): cancellation checkpoint — a cancel observed during baseline
+    // capture must return before any unit spawn or lastHalt write; the
+    // .then cancelled-check above then suppresses reports/notifications.
+    if (isOrchestrationCancelled()) {
+      return {
+        complete: false,
+        cancelled: true,
+        unitsRun: 0,
+        landedCommits: [],
+        satisfiedWithoutCommit: [],
+      };
+    }
   }
   try {
     return await runOrchestratedImplement(pi, ctx, state, task, runUnit, engineerNote);
