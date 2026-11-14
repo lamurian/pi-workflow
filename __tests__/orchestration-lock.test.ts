@@ -1,14 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   claimOrchestration,
   releaseOrchestration,
   peekOrchestrationClaim,
+  readOrchestrationLock,
+  classifyOrchestrationLock,
   ORCHESTRATION_CLAIM_KEY,
   HEARTBEAT_INTERVAL_MS,
+  STALE_THRESHOLD_MS,
 } from "../extensions/orchestration-lock.ts";
 import type { Claim } from "../extensions/orchestration-lock.ts";
 
@@ -30,10 +40,22 @@ function claim(id: string): Claim {
   return { id, cancel: () => {}, settle: async () => {} };
 }
 
+/** Write a lock payload directly (no claim/timer) and return its path. */
+function writeLock(cwd: string, pid: number, heartbeatAt: number): string {
+  const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    JSON.stringify({ id: "lock-x", pid, startedAt: heartbeatAt, heartbeatAt }),
+  );
+  return file;
+}
+
 beforeEach(() => {
   prevLockEnv = process.env.PI_ORCHESTRATION_LOCK;
-  // Pin the mechanism on for these tests (the suite default may be off).
-  process.env.PI_ORCHESTRATION_LOCK = "on";
+  // Pin the mechanism on (empty, not "off") for these tests; the suite
+  // default may be off.
+  process.env.PI_ORCHESTRATION_LOCK = "";
 });
 
 afterEach(() => {
@@ -175,5 +197,101 @@ describe("orchestration release (T5.3)", () => {
     const lock = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
     expect(lock.id).toBe("claim-owner");
     expect(lock.pid).toBe(process.pid);
+  });
+});
+
+describe("orchestration lock reading (T6)", () => {
+  it("readOrchestrationLock parses a written lock", () => {
+    const cwd = tmpCwd();
+    claimOrchestration(cwd, claim("claim-read"));
+    const lock = readOrchestrationLock(cwd);
+    expect(lock).not.toBeNull();
+    expect(lock!.id).toBe("claim-read");
+    expect(lock!.pid).toBe(process.pid);
+    expect(typeof lock!.startedAt).toBe("number");
+    expect(typeof lock!.heartbeatAt).toBe("number");
+  });
+
+  it("readOrchestrationLock returns null when the lock file is missing", () => {
+    const cwd = tmpCwd();
+    expect(readOrchestrationLock(cwd)).toBeNull();
+  });
+
+  it("readOrchestrationLock returns null for corrupt content", () => {
+    const cwd = tmpCwd();
+    const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, "not-json{{{");
+    expect(readOrchestrationLock(cwd)).toBeNull();
+    // Valid JSON that is not a lock payload is corrupt too.
+    writeFileSync(file, JSON.stringify({ nope: true }));
+    expect(readOrchestrationLock(cwd)).toBeNull();
+  });
+});
+
+describe("orchestration lock classification (T6)", () => {
+  it("live: fresh heartbeat from a foreign pid", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid + 1, Date.now());
+    const state = classifyOrchestrationLock(cwd, false);
+    expect(state.kind).toBe("live");
+    if (state.kind === "live") {
+      expect(state.pid).toBe(process.pid + 1);
+      expect(state.ageMs).toBeGreaterThanOrEqual(0);
+      expect(state.ageMs).toBeLessThan(STALE_THRESHOLD_MS);
+    }
+  });
+
+  it("stale: heartbeat older than STALE_THRESHOLD_MS", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid + 1, Date.now() - STALE_THRESHOLD_MS - 1);
+    const state = classifyOrchestrationLock(cwd, false);
+    expect(state.kind).toBe("stale");
+    if (state.kind === "stale") {
+      expect(state.ageMs).toBeGreaterThan(STALE_THRESHOLD_MS);
+    }
+  });
+
+  it("stale: own pid while no registry claim is held", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid, Date.now());
+    expect(classifyOrchestrationLock(cwd, false).kind).toBe("stale");
+  });
+
+  it("not stale: own pid while the registry claim is held", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid, Date.now());
+    expect(classifyOrchestrationLock(cwd, true).kind).not.toBe("stale");
+  });
+
+  it("absent: no lock file", () => {
+    const cwd = tmpCwd();
+    expect(classifyOrchestrationLock(cwd, false)).toEqual({ kind: "absent" });
+  });
+});
+
+describe("orchestration lock off switch (T6)", () => {
+  it("releaseOrchestration is a no-op while off", () => {
+    const cwd = tmpCwd();
+    claimOrchestration(cwd, claim("claim-off-rel"));
+    const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+    assert.ok(existsSync(file), "lock written while enabled");
+    process.env.PI_ORCHESTRATION_LOCK = "off";
+    releaseOrchestration(cwd, "claim-off-rel");
+    assert.ok(existsSync(file), "off release must not touch the lock file");
+  });
+
+  it("readOrchestrationLock returns null while off even with a lock present", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid + 1, Date.now());
+    process.env.PI_ORCHESTRATION_LOCK = "off";
+    expect(readOrchestrationLock(cwd)).toBeNull();
+  });
+
+  it("classifyOrchestrationLock returns absent while off even with a fresh foreign lock", () => {
+    const cwd = tmpCwd();
+    writeLock(cwd, process.pid + 1, Date.now());
+    process.env.PI_ORCHESTRATION_LOCK = "off";
+    expect(classifyOrchestrationLock(cwd, false)).toEqual({ kind: "absent" });
   });
 });

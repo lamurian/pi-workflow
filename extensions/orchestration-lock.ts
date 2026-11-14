@@ -47,7 +47,7 @@ export interface Claim {
 }
 
 /** Payload written to the orchestration lock file. */
-interface LockFile {
+export interface LockFile {
   id: string;
   pid: number;
   startedAt: number;
@@ -215,4 +215,72 @@ export function peekOrchestrationClaim(): Claim | undefined {
     return undefined;
   }
   return candidate as Claim;
+}
+
+/**
+ * Read and parse the orchestration lock file for a working directory.
+ *
+ * No-op when `PI_ORCHESTRATION_LOCK=off` (returns null without touching
+ * the disk). Best-effort: a missing, unreadable, corrupt or wrongly shaped
+ * lock file returns null instead of throwing.
+ *
+ * @param cwd - Repository working directory.
+ * @returns The parsed lock payload, or null when absent or corrupt.
+ */
+export function readOrchestrationLock(cwd: string): LockFile | null {
+  if (!claimEnabled()) return null;
+  try {
+    const parsed = JSON.parse(
+      readFileSync(orchestrationLockFilePath(cwd), "utf8"),
+    ) as Partial<LockFile>;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      typeof parsed.pid !== "number" ||
+      typeof parsed.heartbeatAt !== "number"
+    ) {
+      return null;
+    }
+    return parsed as LockFile;
+  } catch {
+    // Missing, unreadable or unparseable lock file: treat as absent.
+    return null;
+  }
+}
+
+/** Classification of the orchestration lock for a working directory. */
+export type OrchestrationLockState =
+  /** No lock file (or the mechanism is off). */
+  | { kind: "absent" }
+  /** Fresh heartbeat owned by another live pid. */
+  | { kind: "live"; ageMs: number; pid: number }
+  /** Expired heartbeat, or this pid's lock without a registry claim. */
+  | { kind: "stale"; ageMs: number };
+
+/**
+ * Classify the orchestration lock for a working directory.
+ *
+ * No-op when `PI_ORCHESTRATION_LOCK=off` (returns `{kind: "absent"}`
+ * without touching the disk). Best-effort: a missing or corrupt lock file
+ * classifies as absent. Age is `Date.now() - heartbeatAt`; a lock is stale
+ * when the heartbeat is older than STALE_THRESHOLD_MS or when it is owned
+ * by this pid while no registry claim is held.
+ *
+ * @param cwd           - Repository working directory.
+ * @param claimOccupied - Whether this process holds the registry claim.
+ * @returns The lock classification.
+ */
+export function classifyOrchestrationLock(
+  cwd: string,
+  claimOccupied: boolean,
+): OrchestrationLockState {
+  if (!claimEnabled()) return { kind: "absent" };
+  const lock = readOrchestrationLock(cwd);
+  if (lock === null) return { kind: "absent" };
+  const ageMs = Date.now() - lock.heartbeatAt;
+  if (ageMs > STALE_THRESHOLD_MS) return { kind: "stale", ageMs };
+  if (lock.pid === process.pid && !claimOccupied) {
+    return { kind: "stale", ageMs };
+  }
+  return { kind: "live", ageMs, pid: lock.pid };
 }
