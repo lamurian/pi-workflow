@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,6 +7,7 @@ import {
   claimOrchestration,
   peekOrchestrationClaim,
   ORCHESTRATION_CLAIM_KEY,
+  HEARTBEAT_INTERVAL_MS,
 } from "../extensions/orchestration-lock.ts";
 import type { Claim } from "../extensions/orchestration-lock.ts";
 
@@ -74,5 +75,54 @@ describe("orchestration lock (T5.1)", () => {
     expect((globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY]).toBeUndefined();
     expect(peekOrchestrationClaim()).toBeUndefined();
     assert.ok(!existsSync(join(cwd, ".pi/workflow/orchestration-lock.json")));
+  });
+});
+
+describe("orchestration lock heartbeat (T5.2)", () => {
+  it("while claimed, an unref'd 60-second timer refreshes heartbeatAt in the lock file", () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmpCwd();
+      // Capture the interval handle the claim starts, to observe the unref'd timer.
+      const originalSetInterval = globalThis.setInterval;
+      let captured: { unref?: () => void; hasRef?: () => boolean } | undefined;
+      globalThis.setInterval = ((...args: unknown[]) => {
+        const handle = (
+          originalSetInterval as (...a: unknown[]) => unknown
+        )(...args);
+        captured = handle as typeof captured;
+        return handle;
+      }) as unknown as typeof setInterval;
+      try {
+        claimOrchestration(cwd, claim("claim-hb"));
+      } finally {
+        globalThis.setInterval = originalSetInterval;
+      }
+
+      const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+      const readLock = () => JSON.parse(readFileSync(file, "utf8")) as Record<string, number>;
+      const initial = readLock();
+
+      // The heartbeat timer is unref'd: it never keeps the process alive.
+      assert.ok(captured, "claimOrchestration must start the heartbeat interval");
+      assert.equal(typeof captured.hasRef, "function", "fake timer handle exposes hasRef");
+      assert.equal(captured.hasRef!(), false, "heartbeat timer is unref'd");
+
+      // No refresh before the 60-second mark, then heartbeatAt advances.
+      vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS - 1);
+      assert.equal(readLock().heartbeatAt, initial.heartbeatAt, "no refresh before 60s");
+      vi.advanceTimersByTime(1);
+      const refreshed = readLock();
+      assert.ok(
+        refreshed.heartbeatAt >= initial.heartbeatAt + HEARTBEAT_INTERVAL_MS,
+        `heartbeatAt refreshed after 60s (was ${initial.heartbeatAt}, now ${refreshed.heartbeatAt})`,
+      );
+      // Same claim: only heartbeatAt moves.
+      assert.equal(refreshed.id, "claim-hb", "lock still carries the claim id");
+      assert.equal(refreshed.pid, process.pid, "lock still carries this pid");
+      assert.equal(refreshed.startedAt, initial.startedAt, "startedAt is preserved");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

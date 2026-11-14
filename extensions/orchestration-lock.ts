@@ -18,6 +18,17 @@ export const STALE_THRESHOLD_MS = 180_000;
 /** Key of the orchestration claim slot on globalThis. */
 export const ORCHESTRATION_CLAIM_KEY = "__piWorkflowOrchestrationClaim";
 
+/** Timer handle that works whether setInterval yields a Node Timeout or a DOM number. */
+type HeartbeatHandle = ReturnType<typeof setInterval> & { unref?: () => void };
+
+/**
+ * Heartbeat timer of the active claim, if any. Cleared when the claim is
+ * released (the registry slot no longer holds it), when the mechanism is
+ * switched off, and when a new claim supersedes the old one, so the timer
+ * never outlives its claim.
+ */
+let heartbeat: HeartbeatHandle | undefined;
+
 /** Name of the lock file inside the workflow runtime dir. */
 const LOCK_FILE_NAME = "orchestration-lock.json";
 
@@ -65,6 +76,31 @@ export function orchestrationLockFilePath(cwd: string): string {
   return resolve(cwd, WORKFLOW_RUNTIME_DIR, LOCK_FILE_NAME);
 }
 
+/** Clear the active heartbeat timer, if one is running. */
+function clearHeartbeat(): void {
+  if (heartbeat !== undefined) {
+    clearInterval(heartbeat);
+    heartbeat = undefined;
+  }
+}
+
+/**
+ * Atomically write the lock payload (temp file, then rename). Best-effort:
+ * a failure never blocks the claim or the heartbeat.
+ *
+ * @param file - Absolute path of the lock file.
+ * @param lock - Payload to write.
+ */
+function writeLockFile(file: string, lock: LockFile): void {
+  try {
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(lock, null, 2));
+    renameSync(tmp, file);
+  } catch {
+    // Best-effort: a lock write failure must never block the claim.
+  }
+}
+
 /**
  * Store the orchestration claim on globalThis and atomically write the
  * lock file (write to a temp path, then rename) carrying `id`, `pid`,
@@ -79,23 +115,44 @@ export function orchestrationLockFilePath(cwd: string): string {
  */
 export function claimOrchestration(cwd: string, claim: Claim): void {
   if (!claimEnabled()) return;
+  // A new claim supersedes any previous one: release its heartbeat first.
+  clearHeartbeat();
   (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY] = claim;
+  let file: string;
+  const startedAt = Date.now();
   try {
     const dir = ensureWorkflowRuntimeDir(cwd);
-    const file = resolve(dir, LOCK_FILE_NAME);
-    const now = Date.now();
-    const lock: LockFile = {
+    file = resolve(dir, LOCK_FILE_NAME);
+    writeLockFile(file, {
       id: claim.id,
       pid: process.pid,
-      startedAt: now,
-      heartbeatAt: now,
-    };
-    const tmp = `${file}.${process.pid}.tmp`;
-    writeFileSync(tmp, JSON.stringify(lock, null, 2));
-    renameSync(tmp, file);
+      startedAt,
+      heartbeatAt: startedAt,
+    });
   } catch {
     // Best-effort: a lock write failure must never block the claim.
+    return;
   }
+  // T5.2: while claimed, rewrite heartbeatAt every minute so a later
+  // /implement can tell a live run from an orphan. The timer is unref'd so
+  // it can never hold the process open, and it clears itself once the claim
+  // is released (registry slot replaced or removed) or the mechanism is off.
+  heartbeat = setInterval(() => {
+    if (
+      !claimEnabled() ||
+      (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY] !== claim
+    ) {
+      clearHeartbeat();
+      return;
+    }
+    writeLockFile(file, {
+      id: claim.id,
+      pid: process.pid,
+      startedAt,
+      heartbeatAt: Date.now(),
+    });
+  }, HEARTBEAT_INTERVAL_MS) as HeartbeatHandle;
+  heartbeat.unref?.();
 }
 
 /**
