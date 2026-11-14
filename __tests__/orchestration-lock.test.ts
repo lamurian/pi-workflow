@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   claimOrchestration,
+  releaseOrchestration,
   peekOrchestrationClaim,
   ORCHESTRATION_CLAIM_KEY,
   HEARTBEAT_INTERVAL_MS,
@@ -124,5 +125,55 @@ describe("orchestration lock heartbeat (T5.2)", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("orchestration release (T5.3)", () => {
+  it("matching-id release stops the heartbeat, deletes the lock and clears the globalThis claim", () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmpCwd();
+      claimOrchestration(cwd, claim("claim-rel"));
+      const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+      assert.ok(existsSync(file), "lock file written by the claim");
+      // The claim started exactly one heartbeat timer.
+      expect(vi.getTimerCount()).toBe(1);
+
+      releaseOrchestration(cwd, "claim-rel");
+
+      // Heartbeat stopped.
+      expect(vi.getTimerCount()).toBe(0);
+      // Lock deleted.
+      assert.ok(!existsSync(file), "lock deleted on matching id");
+      // Claim cleared from the registry slot.
+      expect(peekOrchestrationClaim()).toBeUndefined();
+      expect(
+        (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY],
+      ).toBeUndefined();
+      // Nothing reschedules: advancing a full interval stays clean.
+      vi.advanceTimersByTime(HEARTBEAT_INTERVAL_MS * 2);
+      expect(vi.getTimerCount()).toBe(0);
+      assert.ok(!existsSync(file), "no lock recreated after release");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("foreign-id release leaves the lock and claim untouched", () => {
+    const cwd = tmpCwd();
+    const owner = claim("claim-owner");
+    claimOrchestration(cwd, owner);
+    const file = join(cwd, ".pi/workflow/orchestration-lock.json");
+    assert.ok(existsSync(file), "lock file written by the claim");
+
+    releaseOrchestration(cwd, "someone-else");
+
+    // Claim left in place: still the exact stored object.
+    expect(peekOrchestrationClaim()).toBe(owner);
+    // Lock left in place, still carrying the owner's id.
+    assert.ok(existsSync(file), "foreign lock left in place");
+    const lock = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+    expect(lock.id).toBe("claim-owner");
+    expect(lock.pid).toBe(process.pid);
   });
 });

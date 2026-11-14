@@ -4,7 +4,7 @@
 // mechanism (no slot, no lock I/O); every claim call is best-effort and
 // never blocks the launch.
 
-import { renameSync, writeFileSync } from "node:fs";
+import { readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { WORKFLOW_RUNTIME_DIR } from "./contract-guard-core.ts";
 import { ensureWorkflowRuntimeDir } from "./contract-guard-file.ts";
@@ -153,6 +153,45 @@ export function claimOrchestration(cwd: string, claim: Claim): void {
     });
   }, HEARTBEAT_INTERVAL_MS) as HeartbeatHandle;
   heartbeat.unref?.();
+}
+
+/**
+ * Release the orchestration claim carried by `id`.
+ *
+ * Stops the heartbeat and clears the globalThis slot only when the stored
+ * claim id matches, and deletes the lock file only when its stored id
+ * matches, so a foreign run's claim, heartbeat and lock are left untouched.
+ * No-op when `PI_ORCHESTRATION_LOCK=off`. Best-effort: a missing,
+ * unreadable or already-removed lock file never throws.
+ *
+ * @param cwd - Repository working directory.
+ * @param id  - Claim id being released.
+ */
+export function releaseOrchestration(cwd: string, id: string): void {
+  if (!claimEnabled()) return;
+  // Registry slot: stop the heartbeat and clear the slot only on id match.
+  const raw = (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY];
+  if (typeof raw === "object" && raw !== null) {
+    const stored = raw as Partial<Claim>;
+    if (stored.id === id) {
+      clearHeartbeat();
+      delete (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY];
+    }
+  }
+  // Lock file: delete only when the stored payload carries this id.
+  try {
+    const file = orchestrationLockFilePath(cwd);
+    const lock = JSON.parse(readFileSync(file, "utf8")) as Partial<LockFile>;
+    if (lock.id === id) {
+      try {
+        unlinkSync(file);
+      } catch {
+        // Best-effort: a failed delete must never block the caller.
+      }
+    }
+  } catch {
+    // Missing or unreadable lock file: nothing to delete.
+  }
 }
 
 /**
