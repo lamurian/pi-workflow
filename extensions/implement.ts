@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { loadContent } from "./utils.ts";
 import {
@@ -21,7 +22,20 @@ import { captureBaselineFailures } from "./baseline-failures.ts";
 import { preflightImplement } from "./implement-preflight.ts";
 import { cleanupOrchestration } from "./hitl-pause.ts";
 import { composeCompletionReport, composeHaltReport } from "./implement-report.ts";
-import { beginOrchestration, endOrchestration, isOrchestrationCancelled, isOrchestrationInFlight } from "./orchestration-cancel.ts";
+import {
+  beginOrchestration,
+  endOrchestration,
+  isOrchestrationCancelled,
+  isOrchestrationInFlight,
+  cancelOrchestration,
+  CANCEL_AWAIT_TIMEOUT_MS,
+} from "./orchestration-cancel.ts";
+import {
+  claimOrchestration,
+  releaseOrchestration,
+  peekOrchestrationClaim,
+  readOrchestrationLock,
+} from "./orchestration-lock.ts";
 
 // B2: contract-visible cancellation API (state lives in orchestration-cancel.ts).
 export { isOrchestrationInFlight, cancelOrchestration } from "./orchestration-cancel.ts";
@@ -65,6 +79,19 @@ const IN_FLIGHT_WARNING =
  * cleared in a finally when the background task settles, so a later
  * /implement resumes normally.
  *
+ * Cancel-and-takeover (T7): after preflight — and only when the in-flight
+ * guard above did not fire — an occupied orchestration claim (an orphan
+ * left by a previous runtime) is announced with its id and age, cancelled
+ * through its stored closure, and awaited boundedly
+ * (CANCEL_AWAIT_TIMEOUT_MS) before the launch proceeds, for both normal and
+ * `--solo` runs. The claim itself is taken only on the orchestrated path:
+ * the fire-and-forget launch stores `{id, cancel, settle}` on globalThis
+ * (plus the lock file) after the background chain is created and before the
+ * start notification, and the chain's finally releases it by id before
+ * endOrchestration so an old chain can never clobber a later claim.
+ * PI_ORCHESTRATION_LOCK=off disables the whole mechanism (no claim taken or
+ * peeked).
+ *
  * @param args        - Optional `--solo` flag plus engineer's note.
  * @param pi          - ExtensionAPI reference.
  * @param ctx         - Extension context.
@@ -105,6 +132,34 @@ export async function runImplement(
     ctx.ui.notify(refusal, "warning");
     return;
   }
+  // T7 cancel-and-takeover: the in-flight guard above keeps precedence, so
+  // this only ever sees an orphaned claim from a previous runtime. Runs for
+  // normal and --solo alike (an orphan must be cancelled either way).
+  const orphan = peekOrchestrationClaim();
+  if (orphan) {
+    const startedAt = readOrchestrationLock(ctx.cwd)?.startedAt ?? Date.now();
+    const ageSec = Math.round(Math.max(0, Date.now() - startedAt) / 1000);
+    ctx.ui.notify(
+      `Cancelling orphaned orchestration ${orphan.id} (age ${ageSec}s) ` +
+        `left by a previous runtime before starting a new run.`,
+      "warning",
+    );
+    // Stored cancel closure: sets the orphan's flag, settles its pause and
+    // kills its child; then wait boundedly for its settlement so a stuck
+    // orphan only delays the launch. Proceed regardless of which side wins:
+    // the old chain's id-matched release cannot clobber our later claim and
+    // its pre-spawn cancellation checkpoints stop it from spawning.
+    await Promise.resolve(orphan.cancel());
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, CANCEL_AWAIT_TIMEOUT_MS);
+    });
+    try {
+      await Promise.race([orphan.settle().then(() => undefined, () => undefined), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
   const resuming = state.phase === "implementing";
   if (!resuming) {
     transitionTo(pi, state, "implementing");
@@ -130,6 +185,7 @@ export async function runImplement(
 
   // Fire-and-forget: launch the loop in the background so this handler returns immediately (RPC deadline).
   const activeCount = task.behaviors.filter((b) => b.status === "active").length;
+  const claimId = randomUUID();
   const settled = runOrchestratedImplementSafely(
     pi,
     ctx,
@@ -167,7 +223,19 @@ export async function runImplement(
       return result;
     })
     // Cleared on settle (complete, halt, or crash) so a later /implement resumes.
-    .finally(() => endOrchestration());
+    .finally(() => {
+      // T7: release by id first (synchronously) so an id-matched release
+      // can never clobber a claim taken by a later run.
+      releaseOrchestration(ctx.cwd, claimId);
+      endOrchestration();
+    });
+  // T7: claim only on the orchestrated path (never on --solo), after the
+  // background chain exists and before the start notification is emitted.
+  claimOrchestration(ctx.cwd, {
+    id: claimId,
+    cancel: () => cancelOrchestration(ctx),
+    settle: () => settled.then(() => undefined),
+  });
   beginOrchestration(settled);
   onBackground?.(settled);
   ctx.ui.notify(

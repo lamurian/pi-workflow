@@ -464,6 +464,11 @@ describe("T5: slop gate wiring in the orchestrator loop", () => {
       "off",
       "vitest.config.ts test.env pins PI_SLOP_GATE=off",
     );
+    assert.equal(
+      process.env.PI_ORCHESTRATION_LOCK,
+      "off",
+      "vitest.config.ts test.env pins PI_ORCHESTRATION_LOCK=off",
+    );
   });
 });
 

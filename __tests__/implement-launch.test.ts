@@ -1,6 +1,16 @@
-import { describe, it } from "vitest";
+import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { runImplement } from "../extensions/implement.ts";
+import {
+  claimOrchestration,
+  releaseOrchestration,
+  peekOrchestrationClaim,
+  ORCHESTRATION_CLAIM_KEY,
+} from "../extensions/orchestration-lock.ts";
+import type { Claim } from "../extensions/orchestration-lock.ts";
 import {
   composeCompletionReport,
   composeHaltReport,
@@ -859,5 +869,284 @@ describe("B5: halt report as an agent turn", () => {
       "Unit T1 failed after 5 retries: always-fails: unit subprocess died",
       "lastHalt is persisted with the same detail as the report",
     );
+  });
+});
+
+// ═══ T7: orchestration claim wiring (opt-in) ═══
+describe("T7: orchestration claim wiring in the /implement launch", () => {
+  const REFUSAL_WARNING =
+    "An orchestrated implementation is already in flight. Wait for it to settle (watch status/notifications), then re-run /implement to resume.";
+
+  /** Prior PI_ORCHESTRATION_LOCK value, restored after each test. */
+  let prevLockEnv: string | undefined;
+  /** Temp cwd holding the lock file; removed after each test. */
+  let claimCwd = "";
+
+  beforeEach(() => {
+    prevLockEnv = process.env.PI_ORCHESTRATION_LOCK;
+    // Opt in: the suite default pins the claim mechanism off.
+    process.env.PI_ORCHESTRATION_LOCK = "";
+    claimCwd = mkdtempSync(join(tmpdir(), "pi-impl-claim-"));
+    delete (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY];
+  });
+
+  afterEach(() => {
+    const stored = (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY] as
+      | Claim
+      | undefined;
+    if (stored && typeof stored.id === "string") {
+      releaseOrchestration(claimCwd, stored.id);
+    }
+    delete (globalThis as Record<string, unknown>)[ORCHESTRATION_CLAIM_KEY];
+    if (prevLockEnv === undefined) delete process.env.PI_ORCHESTRATION_LOCK;
+    else process.env.PI_ORCHESTRATION_LOCK = prevLockEnv;
+    rmSync(claimCwd, { recursive: true, force: true });
+  });
+
+  /** Two-active-behavior finalizing state for the claim tests. */
+  function claimState(): WorkflowState {
+    return {
+      phase: "finalizing",
+      specText: "topic",
+      task: {
+        title: "Claim Task",
+        instruction: "do things",
+        files: [{ path: "src/a.ts", status: "M" }],
+        done: "all green",
+        behaviors: [
+          { id: "T1", description: "first", expectedOutput: "e1", kind: "test", status: "active" },
+          { id: "T2", description: "second", expectedOutput: "e2", kind: "test", status: "active" },
+        ],
+      },
+    };
+  }
+
+  /** Exec mock where git commit advances HEAD so the loop can land commits. */
+  function piWithAdvancingHead() {
+    const pi = mockPi();
+    let headCounter = 0;
+    pi.exec = (async (cmd: string, args: string[]) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: `head${headCounter}\n`, stderr: "", code: 0, killed: false };
+      }
+      if (cmd === "git" && args[0] === "commit") {
+        headCounter++;
+        return { stdout: "[main abc] committed", stderr: "", code: 0, killed: false };
+      }
+      return { stdout: "", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"];
+    return pi;
+  }
+
+  /** Unit runner that lands each behavior on the first attempt. */
+  const landingRunner = async (unit: { behaviorId: string }): Promise<ImplementerReport> => ({
+    summary: `implemented ${unit.behaviorId}`,
+    suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+  });
+
+  /**
+   * Plant an orphaned claim in the registry with its lock file's startedAt
+   * rewritten ~90 seconds into the past (the age source for the takeover
+   * notification).
+   *
+   * @returns The orphan id plus probes for its cancel closure.
+   */
+  function plantOrphan(): {
+    orphanId: string;
+    cancelDone: () => boolean;
+    cancelCalls: () => number;
+  } {
+    const orphanId = "orphan-123";
+    let done = false;
+    let calls = 0;
+    claimOrchestration(claimCwd, {
+      id: orphanId,
+      cancel: async () => {
+        calls++;
+        await new Promise((r) => setTimeout(r, 5));
+        done = true;
+      },
+      settle: async () => {
+        while (!done) await new Promise((r) => setTimeout(r, 1));
+      },
+    });
+    const lockPath = join(claimCwd, ".pi", "workflow", "orchestration-lock.json");
+    const lock = JSON.parse(readFileSync(lockPath, "utf8")) as Record<string, number>;
+    lock.startedAt = Date.now() - 90_000;
+    lock.heartbeatAt = lock.startedAt;
+    writeFileSync(lockPath, JSON.stringify(lock));
+    return { orphanId, cancelDone: () => done, cancelCalls: () => calls };
+  }
+
+  it("claims the registry and lock file before the start notification and releases both by id when the chain settles", async () => {
+    const pi = piWithAdvancingHead();
+    const state = claimState();
+    const ctx = ctxWithState(state);
+    Object.assign(ctx, { cwd: claimCwd });
+    const lockPath = join(claimCwd, ".pi", "workflow", "orchestration-lock.json");
+
+    const atStart: { claim?: Claim; lockId?: string } = {};
+    ctx.ui.notify = ((msg: string) => {
+      if (!/Orchestration started in background/.test(msg)) return;
+      atStart.claim = peekOrchestrationClaim();
+      try {
+        atStart.lockId = (JSON.parse(readFileSync(lockPath, "utf8")) as { id: string }).id;
+      } catch {
+        atStart.lockId = undefined;
+      }
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    let settled!: Promise<OrchestratorResult>;
+    await runImplement("", pi, ctx, landingRunner, (background) => {
+      settled = background;
+    });
+
+    const claimAtStart = atStart.claim;
+    assert.ok(claimAtStart, "the registry claim exists when the start notification fires");
+    assert.equal(
+      atStart.lockId,
+      claimAtStart.id,
+      "the lock file exists with the same id when the start notification fires",
+    );
+
+    const result = await settled;
+    assert.equal(result.complete, true, `the background run completes, got: ${result.error ?? ""}`);
+    assert.equal(peekOrchestrationClaim(), undefined, "the registry claim is released on settle");
+    assert.ok(!existsSync(lockPath), "the lock file is deleted on settle");
+  });
+
+  it("cancels an occupied claim through its stored closure and claims its own id only after that cancellation completes", async () => {
+    const { orphanId, cancelDone, cancelCalls } = plantOrphan();
+    const pi = piWithAdvancingHead();
+    const state = claimState();
+    const ctx = ctxWithState(state);
+    Object.assign(ctx, { cwd: claimCwd });
+
+    const launch: { settled?: Promise<OrchestratorResult>; claim?: Claim; cancelDone?: boolean } =
+      {};
+    await runImplement("", pi, ctx, landingRunner, (background) => {
+      launch.settled = background;
+      launch.claim = peekOrchestrationClaim();
+      launch.cancelDone = cancelDone();
+    });
+
+    assert.equal(cancelCalls(), 1, "the orphan's stored cancel closure was invoked exactly once");
+    assert.equal(launch.cancelDone, true, "cancellation completed before the new claim was taken");
+    const claim = launch.claim;
+    assert.ok(claim, "the new run holds a registry claim");
+    assert.notEqual(claim.id, orphanId, "the new run claims its own id, not the orphan's");
+
+    const result = await launch.settled!;
+    assert.equal(result.complete, true, `the new run completes, got: ${result.error ?? ""}`);
+    assert.equal(peekOrchestrationClaim(), undefined, "the new claim is released on settle");
+  });
+
+  it("takeover emits the orphan-cancel notification before the new run's start notification", async () => {
+    const { orphanId } = plantOrphan();
+    const pi = piWithAdvancingHead();
+    const state = claimState();
+    const ctx = ctxWithState(state);
+    Object.assign(ctx, { cwd: claimCwd });
+    const timeline: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      timeline.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    let settled!: Promise<OrchestratorResult>;
+    await runImplement("", pi, ctx, landingRunner, (background) => {
+      settled = background;
+    });
+
+    const orphanIdx = timeline.findIndex((m) => m.includes(orphanId));
+    const startIdx = timeline.findIndex((m) => /Orchestration started in background/.test(m));
+    assert.ok(orphanIdx >= 0, "the takeover notification names the cancelled orphan id");
+    assert.ok(startIdx >= 0, "the start notification fires");
+    assert.ok(orphanIdx < startIdx, "orphan-cancel notification precedes the start notification");
+    const age = timeline[orphanIdx]!.match(/age (\d+)s/);
+    assert.ok(age, "the takeover notification carries the orphan age");
+    const ageSec = Number(age[1]);
+    assert.ok(ageSec >= 89 && ageSec <= 130, `age derived from the lock startedAt, got ${ageSec}s`);
+
+    const result = await settled;
+    assert.equal(result.complete, true, `the new run completes after takeover, got: ${result.error ?? ""}`);
+  });
+
+  it("guard-before-takeover: a same-runtime second call emits only the pinned refusal warning", async () => {
+    const pi = piWithAdvancingHead();
+    const state = claimState();
+    const ctx = ctxWithState(state);
+    Object.assign(ctx, { cwd: claimCwd });
+    const timeline: string[] = [];
+    ctx.ui.notify = ((msg: string) => {
+      timeline.push(msg);
+    }) as unknown as ExtensionContext["ui"]["notify"];
+
+    // Hold the first run in flight behind a gate on its first unit.
+    let releaseFirst!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstSpawns: string[] = [];
+    const first: { settled?: Promise<OrchestratorResult>; claimId?: string } = {};
+    await runImplement(
+      "",
+      pi,
+      ctx,
+      async (unit: { behaviorId: string }): Promise<ImplementerReport> => {
+        firstSpawns.push(unit.behaviorId);
+        if (unit.behaviorId === "T1") await gate;
+        return {
+          summary: `implemented ${unit.behaviorId}`,
+          suggestedCommit: `feat(core): add ${unit.behaviorId}`,
+        };
+      },
+      (background) => {
+        first.settled = background;
+        first.claimId = peekOrchestrationClaim()?.id;
+      },
+    );
+    // Let the background loop reach the deferred unit so it is genuinely in flight.
+    let waited = 0;
+    while (!firstSpawns.includes("T1") && waited < 3000) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      waited += 10;
+    }
+    assert.ok(
+      firstSpawns.includes("T1"),
+      `first run is held in flight on T1 (spawns=[${firstSpawns.join(",")}], ` +
+        `launched=${first.settled !== undefined}, claimId=${first.claimId ?? "none"}, ` +
+        `notifies=${JSON.stringify(timeline)})`,
+    );
+    assert.ok(first.claimId, "the first run holds the registry claim");
+
+    // Second call while the first run is in flight: the guard must win.
+    timeline.length = 0;
+    const second: { settled?: Promise<OrchestratorResult> } = {};
+    await runImplement(
+      "",
+      pi,
+      ctx,
+      async () => ({ summary: "x", suggestedCommit: "feat: x" }),
+      (background) => {
+        second.settled = background;
+      },
+    );
+
+    assert.deepEqual(
+      timeline,
+      [REFUSAL_WARNING],
+      "the pinned refusal warning is the only output of a same-runtime second call",
+    );
+    assert.equal(second.settled, undefined, "no background task launched for the refused call");
+    assert.equal(
+      peekOrchestrationClaim()?.id,
+      first.claimId,
+      "the in-flight run's claim was neither cancelled nor clobbered",
+    );
+
+    releaseFirst();
+    const result = await first.settled!;
+    assert.equal(result.complete, true, `the first run completes after release, got: ${result.error ?? ""}`);
+    assert.equal(peekOrchestrationClaim(), undefined, "the first run's claim is released on settle");
   });
 });
