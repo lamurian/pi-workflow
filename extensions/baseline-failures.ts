@@ -9,6 +9,7 @@ import type { WorkflowState } from "./state-types.ts";
 import { saveState } from "./state.ts";
 import { gateTail } from "./test-gate-run.ts";
 import { extractFailingPaths } from "./full-gate-triage.ts";
+import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 
 /** Default shared wall-clock budget for baseline capture, in milliseconds. */
 const DEFAULT_BASELINE_BUDGET_MS = 600_000;
@@ -80,6 +81,14 @@ export function baselineBudgetMs(
  * last with the accumulated paths of the suites that ran. Best-effort: never
  * throws.
  *
+ * Cancellation checkpoints (T9(c)): the orchestration-cancel flag is checked
+ * before starting each remaining suite and again before the final result
+ * save, so a cancelled capture returns with baselineFailures never persisted
+ * (the baselineAttempted marker saved at the start stays). Tradeoff: a suite
+ * already inside exec cannot be interrupted by the checkpoint — it runs to
+ * its remaining-budget timeout — but it never spawns units and its result is
+ * never written to state.
+ *
  * Progress notifications (T2), all best-effort through `notify`:
  * - start, before the first suite: number of full suites + total budget in
  *   minutes (level `info`);
@@ -144,6 +153,10 @@ export async function captureBaselineFailures(
     const failing = new Set<string>();
     let unknown = 0;
     for (const suite of suites) {
+      // T9(c): checkpoint before starting each remaining suite — a
+      // cancelled capture starts no further suite and never reaches the
+      // final save below (the marker save above stays).
+      if (isOrchestrationCancelled()) return;
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         // Budget exhausted: skip without exec, suite stays unknown.
@@ -184,6 +197,9 @@ export async function captureBaselineFailures(
         // Spawn failure: no paths to record for this suite.
       }
     }
+    // T9(c): checkpoint before the final save — a cancelled capture must
+    // not persist baselineFailures; the baselineAttempted marker stays.
+    if (isOrchestrationCancelled()) return;
     state.baselineFailures = [...failing].sort();
     saveState(pi, state);
     const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);

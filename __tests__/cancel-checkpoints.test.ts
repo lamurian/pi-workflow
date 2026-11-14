@@ -1,12 +1,19 @@
 import { describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   mockPi,
   ctxWithState,
   finalizingState,
   runOrchestratedViaSeam,
 } from "./helpers/implement-harness.ts";
+import { captureBaselineFailures } from "../extensions/baseline-failures.ts";
+import {
+  beginOrchestration,
+  cancelOrchestration,
+  endOrchestration,
+} from "../extensions/orchestration-cancel.ts";
+import type { TestSuite } from "../extensions/test-tool-detect.ts";
 
 /**
  * Control for the partial baseline-failures mock: when armed, the mocked
@@ -167,6 +174,58 @@ describe("T9(b): cancellation checkpoint after the start ensure step", () => {
     } finally {
       control.cancelDuringEnsure = false;
       control.ctx = undefined;
+    }
+  });
+});
+
+// ═══ T9(c): cancellation checkpoints inside baseline capture ═══
+describe("T9(c): cancellation checkpoints inside baseline capture", () => {
+  it("a capture cancelled during the first suite runs no further suite and never persists baselineFailures", async () => {
+    // cancelOrchestration's flag is sticky and T9(a)/T9(b) leave it set:
+    // reset it so the capture starts uncancelled.
+    beginOrchestration(Promise.resolve());
+    endOrchestration();
+    const A: TestSuite = { label: "a", argv: ["npm", "test"] };
+    const B: TestSuite = { label: "b", argv: ["npx", "vitest"] };
+    const state = finalizingState();
+    state.testTool = { source: "detected", suites: [], fullSuites: [A, B] };
+    const ctx = ctxWithState(state);
+
+    const execs: string[] = [];
+    const saves: Array<{ baselineAttempted?: boolean; baselineFailures?: unknown }> = [];
+    const pi = {
+      exec: (async (cmd: string) => {
+        execs.push(cmd);
+        if (execs.length === 1) {
+          // Cancel through the real API while the first suite is running:
+          // claim the orchestration, then observe the cancellation.
+          beginOrchestration(Promise.resolve());
+          await cancelOrchestration(ctx);
+        }
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      }) as ExtensionAPI["exec"],
+      appendEntry: ((_t: string, data: typeof state) => {
+        saves.push(structuredClone(data));
+      }) as ExtensionAPI["appendEntry"],
+    } as unknown as ExtensionAPI;
+
+    try {
+      await captureBaselineFailures(pi, "/repo", state);
+
+      // Only the first suite was exec'd: the loop checkpoint stops before B.
+      assert.equal(execs.length, 1, "no suite starts after the cancellation");
+      // baselineFailures stays unset; the attempt marker stays set.
+      assert.equal(state.baselineFailures, undefined, "baselineFailures stays unset");
+      assert.equal(state.baselineAttempted, true, "baselineAttempted marker is set");
+      // No persisted workflow-state entry carries baselineFailures.
+      const resultSaves = saves.filter((s) => s.baselineFailures !== undefined);
+      assert.deepEqual(resultSaves, [], "no save carries baselineFailures");
+      assert.equal(saves.length, 1, "only the attempt-marker save happened");
+      assert.equal(saves[0]?.baselineAttempted, true, "the marker save carries the attempt flag");
+    } finally {
+      // cancelOrchestration's flag is sticky: reset it for later tests.
+      beginOrchestration(Promise.resolve());
+      endOrchestration();
     }
   });
 });
