@@ -3,13 +3,12 @@ import { saveState, type WorkflowState, type TaskContract, type PendingCommand, 
 import { evaluateCompletionGate } from "./completion-gate.ts";
 import { appendFindings, renderFindingsSection, GLOBAL_FINDINGS_ID, type Finding } from "./findings-ledger.ts";
 import type { AttemptRecord } from "./halt-report.ts";
-import { renderPreviousHaltSection } from "./resume-context.ts";
+import { buildResumePrelude } from "./resume-context.ts";
 import type { UnitTask } from "./implementer-runner.ts";
 import type { BlockedCommand, ImplementerReport } from "./implementer-report.ts";
 import type { RpcUnitClient } from "./rpc-unit-client.ts";
 import { registerWorkflowInputHandler } from "./hitl-pause.ts";
-import { readTreeState } from "./git-ops.ts";
-import { buildDirtyTreeAdvisoryText, buildDirtyTreeHaltText, dirtyTreePreflight } from "./dirty-tree-check.ts";
+import { dirtyTreePreflight, buildDirtyTreeHaltText, buildDirtyTreeAdvisoryText } from "./dirty-tree-check.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
@@ -194,36 +193,14 @@ export async function runOrchestratedImplement(
 
   // Steering (T4): user input during an open verification pause goes to the live child.
   registerWorkflowInputHandler(pi, ctx);
-  let resumeTreeContext = "";
-  if (state.phase === "implementing") {
-    const tree = await readTreeState(pi, cwd);
-    if (tree && tree !== "(unavailable)") {
-      resumeTreeContext =
-        `\n\n## Working tree is dirty (resumed session)\n` +
-        `The previous run left uncommitted changes. Inspect them before implementing:\n\n` +
-        "```\n" + tree + "\n```\n";
-    }
-  }
-
-  // Resume after a mustRunNow pause-halt: note attaches to the halted behavior only.
-  let pendingNote: { behaviorId: string; note: string } | undefined;
-  if (state.lastHalt?.pendingCommand) {
-    const pending = state.lastHalt.pendingCommand;
-    pendingNote = {
-      behaviorId: state.lastHalt.behaviorId,
-      note:
-        `\n\n## Previously blocked command — assumed run\n` +
-        `The user was asked to run this command outside the sandbox:\n\n` +
-        "```\n" + pending.command + "\n```\n\n" +
-        (pending.reason ? `It was blocked: ${pending.reason}.\n\n` : "") +
-        `Assume it has been executed. Do NOT attempt to run it yourself — your sandbox still blocks it. ` +
-        `Verify its effects by other means (read files, run allowed checks). ` +
-        `If its effects are missing, report that in your JSON report instead of retrying the command.`,
-    };
-  }
+  // Resume prelude (built in resume-context.ts): dirty-tree fence, the
+  // assumed-run pendingCommand note, and the rendered previous-halt section.
+  const prelude = await buildResumePrelude(pi, cwd, state);
+  let resumeTreeContext = prelude.resumeTreeContext;
+  let pendingNote = prelude.pendingNote;
+  let previousHaltSection = prelude.previousHaltSection;
   // T9: resume halt context, prepended to the first unit of the halted behavior only.
   const previousHalt = state.lastHalt;
-  let previousHaltSection = previousHalt ? renderPreviousHaltSection(previousHalt) : "";
   for (let unitIndex = 0; unitIndex < units.length; unitIndex++) {
     const behavior = units[unitIndex]!;
     currentBehaviorId = behavior.id;

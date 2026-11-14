@@ -653,9 +653,9 @@ describe("T9: implement-start test extension chore commit", () => {
 
 // "T8": implement-loop split into loop + default runner + halt builder.
 describe("implement-loop module split (T8)", () => {
-  it("implementLoopModulesWithinLineBudget: implement-loop and its two extracted modules are at most 250 lines", () => {
+  it("implementLoopModulesWithinLineBudget: implement-loop and its three extracted modules are at most 250 lines", () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
-    for (const file of ["implement-loop.ts", "unit-runner-default.ts", "orchestrator-halt.ts"]) {
+    for (const file of ["implement-loop.ts", "unit-runner-default.ts", "orchestrator-halt.ts", "resume-context.ts"]) {
       const lines = readFileSync(join(extDir, file), "utf8").split("\n").length;
       assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
     }
@@ -664,9 +664,9 @@ describe("implement-loop module split (T8)", () => {
 
 // "T13": implement.ts splits into implement + implement-solo.
 describe("implement module split (T13)", () => {
-  it("implementModulesWithinLineBudget: implement.ts and implement-solo.ts are each at most 250 lines", () => {
+  it("implementModulesWithinLineBudget: implement.ts, implement-solo.ts and implement-prelude.ts are each at most 250 lines", () => {
     const extDir = fileURLToPath(new URL("../extensions", import.meta.url));
-    for (const file of ["implement.ts", "implement-solo.ts"]) {
+    for (const file of ["implement.ts", "implement-solo.ts", "implement-prelude.ts"]) {
       const lines = readFileSync(join(extDir, file), "utf8").split("\n").length;
       assert.ok(lines <= 250, `${file} has ${lines} lines (budget 250)`);
     }
