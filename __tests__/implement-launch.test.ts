@@ -1,6 +1,13 @@
 import { describe, it, beforeEach, afterEach } from "vitest";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runImplement } from "../extensions/implement.ts";
@@ -1148,5 +1155,253 @@ describe("T7: orchestration claim wiring in the /implement launch", () => {
     const result = await first.settled!;
     assert.equal(result.complete, true, `the first run completes after release, got: ${result.error ?? ""}`);
     assert.equal(peekOrchestrationClaim(), undefined, "the first run's claim is released on settle");
+  });
+
+  // ═══ T8: lock classification (nested: reuses the opt-in env, cwd and helpers above) ═══
+  describe("T8: lock classification before the transition", () => {
+    /** Absolute path of the lock file inside the temp cwd. */
+    function lockPath(): string {
+      return join(claimCwd, ".pi", "workflow", "orchestration-lock.json");
+    }
+
+    /**
+     * Plant a lock file whose heartbeat (and start) is `ageMs` old.
+     *
+     * @param id    - Payload id written to the lock file.
+     * @param pid   - Owning pid (use a value !== process.pid for a foreign lock).
+     * @param ageMs - How many milliseconds ago the heartbeat happened.
+     * @returns The planted payload as written.
+     */
+    function plantLock(
+      id: string,
+      pid: number,
+      ageMs: number,
+    ): Record<string, number | string> {
+      mkdirSync(join(claimCwd, ".pi", "workflow"), { recursive: true });
+      const at = Date.now() - ageMs;
+      const lock = { id, pid, startedAt: at, heartbeatAt: at };
+      writeFileSync(lockPath(), JSON.stringify(lock));
+      return lock;
+    }
+
+    it("refuses a fresh foreign-pid lock with a warning naming its age; state and claim untouched", async () => {
+      const pi = piWithAdvancingHead();
+      const state = claimState();
+      const ctx = ctxWithState(state);
+      Object.assign(ctx, { cwd: claimCwd });
+      // Fresh heartbeat (100s < 180s threshold), owned by a foreign pid: live.
+      const planted = plantLock("foreign-live-1", process.pid + 1000, 100_000);
+
+      const notifies: Array<{ msg: string; type?: string }> = [];
+      ctx.ui.notify = ((msg: string, type?: string) => {
+        notifies.push({ msg, type });
+      }) as unknown as ExtensionContext["ui"]["notify"];
+
+      const savesBefore = (pi.calls["appendEntry"] ?? []).length;
+      const launched: Array<Promise<OrchestratorResult>> = [];
+
+      await runImplement("", pi, ctx, landingRunner, (background) => {
+        launched.push(background);
+      });
+
+      assert.equal(state.phase, "finalizing", "the phase never advances on a live foreign lock");
+      // loadState normalizes state in place (adds contractV2) on every call,
+      // so "unchanged" means: nothing was ever persisted and the phase never moved.
+      const workflowSaves = (
+        (pi.calls["appendEntry"] ?? []) as Array<[string, unknown]>
+      ).filter(([key]) => key === "workflow-state");
+      assert.deepEqual(
+        workflowSaves,
+        [],
+        "workflow state is never written by the refused call",
+      );
+      assert.equal(
+        (pi.calls["appendEntry"] ?? []).length,
+        savesBefore,
+        "no state persisted by the refused call",
+      );
+      assert.equal(launched.length, 0, "no background task launched");
+      assert.equal(peekOrchestrationClaim(), undefined, "no registry claim written");
+      assert.equal(
+        notifies.length,
+        1,
+        `exactly the refusal warning, got: ${JSON.stringify(notifies)}`,
+      );
+      assert.equal(notifies[0]!.type, "warning", "the refusal is a warning notification");
+      const age = notifies[0]!.msg.match(/running for (\d+) minute/);
+      assert.ok(
+        age,
+        `the warning names how long the orchestration has been running, got: ${notifies[0]!.msg}`,
+      );
+      assert.equal(
+        Number(age[1]),
+        2,
+        "age in minutes derived from the ~100s-old heartbeat",
+      );
+      assert.deepEqual(
+        JSON.parse(readFileSync(lockPath(), "utf8")),
+        planted,
+        "the foreign lock file is left untouched",
+      );
+    });
+
+    it("clears a stale lock with its age notification and proceeds to claim its own id", async () => {
+      const pi = piWithAdvancingHead();
+      const state = claimState();
+      const ctx = ctxWithState(state);
+      Object.assign(ctx, { cwd: claimCwd });
+      // Heartbeat 300s old (> 180s threshold), foreign pid: stale.
+      plantLock("stale-foreign-1", process.pid + 1000, 300_000);
+
+      const msgs: string[] = [];
+      const atStart: { lockId?: string } = {};
+      ctx.ui.notify = ((msg: string) => {
+        msgs.push(msg);
+        if (!/Orchestration started in background/.test(msg)) return;
+        try {
+          atStart.lockId = (JSON.parse(readFileSync(lockPath(), "utf8")) as { id: string }).id;
+        } catch {
+          atStart.lockId = undefined;
+        }
+      }) as unknown as ExtensionContext["ui"]["notify"];
+
+      let settled!: Promise<OrchestratorResult>;
+      await runImplement("", pi, ctx, landingRunner, (background) => {
+        settled = background;
+      });
+
+      const clearIdx = msgs.findIndex((m) => /Clearing stale orchestration lock/.test(m));
+      assert.ok(clearIdx >= 0, `stale-clear notification fires, got: ${JSON.stringify(msgs)}`);
+      const age = msgs[clearIdx]!.match(/age (\d+) minute/);
+      assert.ok(age, `the stale-clear notification includes the lock age, got: ${msgs[clearIdx]}`);
+      assert.equal(Number(age[1]), 5, "age in minutes derived from the ~300s-old heartbeat");
+      const startIdx = msgs.findIndex((m) => /Orchestration started in background/.test(m));
+      assert.ok(
+        startIdx > clearIdx,
+        "the stale-clear notification precedes the start notification",
+      );
+      assert.ok(
+        atStart.lockId && atStart.lockId !== "stale-foreign-1",
+        `the launch overwrites the stale lock with its own claim id, got: ${String(atStart.lockId)}`,
+      );
+
+      const result = await settled;
+      assert.equal(result.complete, true, `the launch proceeds and completes, got: ${result.error ?? ""}`);
+      assert.ok(!existsSync(lockPath()), "our own claim's lock is deleted on settle");
+    });
+
+    it("treats a same-pid lock with no registry claim as stale and proceeds", async () => {
+      const pi = piWithAdvancingHead();
+      const state = claimState();
+      const ctx = ctxWithState(state);
+      Object.assign(ctx, { cwd: claimCwd });
+      // Fresh heartbeat but owned by this pid while no claim is held: stale.
+      plantLock("own-stale-1", process.pid, 5_000);
+      assert.equal(peekOrchestrationClaim(), undefined, "precondition: no registry claim");
+
+      const msgs: string[] = [];
+      const atStart: { lockId?: string } = {};
+      ctx.ui.notify = ((msg: string) => {
+        msgs.push(msg);
+        if (!/Orchestration started in background/.test(msg)) return;
+        try {
+          atStart.lockId = (JSON.parse(readFileSync(lockPath(), "utf8")) as { id: string }).id;
+        } catch {
+          atStart.lockId = undefined;
+        }
+      }) as unknown as ExtensionContext["ui"]["notify"];
+
+      let settled!: Promise<OrchestratorResult>;
+      await runImplement("", pi, ctx, landingRunner, (background) => {
+        settled = background;
+      });
+
+      const clearIdx = msgs.findIndex((m) => /Clearing stale orchestration lock/.test(m));
+      assert.ok(
+        clearIdx >= 0,
+        `own-pid lock without a claim is cleared with a notification, got: ${JSON.stringify(msgs)}`,
+      );
+      assert.match(msgs[clearIdx]!, /age \d+ minute/, "the notification includes the lock age");
+      assert.ok(
+        atStart.lockId && atStart.lockId !== "own-stale-1",
+        `the launch proceeds and claims its own id, got: ${String(atStart.lockId)}`,
+      );
+
+      const result = await settled;
+      assert.equal(result.complete, true, `the launch completes, got: ${result.error ?? ""}`);
+    });
+
+    it("with PI_ORCHESTRATION_LOCK=off the lock file is untouched and neither notification fires", async () => {
+      const pi = piWithAdvancingHead();
+      const state = claimState();
+      const ctx = ctxWithState(state);
+      Object.assign(ctx, { cwd: claimCwd });
+      // A fresh foreign lock: with the mechanism on this would refuse the launch,
+      // so a proceeding launch also proves the lock was never read.
+      plantLock("off-foreign-1", process.pid + 1000, 100_000);
+      const before = readFileSync(lockPath(), "utf8");
+
+      process.env.PI_ORCHESTRATION_LOCK = "off";
+
+      const msgs: string[] = [];
+      ctx.ui.notify = ((msg: string) => {
+        msgs.push(msg);
+      }) as unknown as ExtensionContext["ui"]["notify"];
+
+      let settled!: Promise<OrchestratorResult>;
+      await runImplement("", pi, ctx, landingRunner, (background) => {
+        settled = background;
+      });
+
+      assert.ok(
+        msgs.some((m) => /Orchestration started in background/.test(m)),
+        `the launch proceeds while the mechanism is off, got: ${JSON.stringify(msgs)}`,
+      );
+      assert.ok(
+        !msgs.some((m) => /running for \d+ minute|Clearing stale orchestration lock/.test(m)),
+        "neither the live-refusal nor the stale-clear notification ever fires while off",
+      );
+      assert.equal(peekOrchestrationClaim(), undefined, "no registry claim while off");
+
+      const result = await settled;
+      assert.equal(result.complete, true, `the run completes, got: ${result.error ?? ""}`);
+      assert.equal(
+        readFileSync(lockPath(), "utf8"),
+        before,
+        "the lock file is never rewritten or deleted while off",
+      );
+    });
+
+    it("skips classification entirely when the registry claim was occupied (takeover path)", async () => {
+      // The orphan's lock is this pid's with a fresh-ish heartbeat; without the
+      // claim it would classify as stale (or refuse as live), so either stray
+      // notification proves classification ran when it must not.
+      const { orphanId } = plantOrphan();
+      const pi = piWithAdvancingHead();
+      const state = claimState();
+      const ctx = ctxWithState(state);
+      Object.assign(ctx, { cwd: claimCwd });
+      const msgs: string[] = [];
+      ctx.ui.notify = ((msg: string) => {
+        msgs.push(msg);
+      }) as unknown as ExtensionContext["ui"]["notify"];
+
+      let settled!: Promise<OrchestratorResult>;
+      await runImplement("", pi, ctx, landingRunner, (background) => {
+        settled = background;
+      });
+
+      assert.ok(
+        msgs.some((m) => m.includes(orphanId)),
+        "the takeover notification fires",
+      );
+      assert.ok(
+        !msgs.some((m) => /Clearing stale orchestration lock|running for \d+ minute/.test(m)),
+        `lock classification is skipped when the claim was occupied, got: ${JSON.stringify(msgs)}`,
+      );
+
+      const result = await settled;
+      assert.equal(result.complete, true, `the run completes after takeover, got: ${result.error ?? ""}`);
+    });
   });
 });

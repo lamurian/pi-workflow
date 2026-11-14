@@ -35,6 +35,7 @@ import {
   releaseOrchestration,
   peekOrchestrationClaim,
   readOrchestrationLock,
+  classifyOrchestrationLock,
 } from "./orchestration-lock.ts";
 
 // B2: contract-visible cancellation API (state lives in orchestration-cancel.ts).
@@ -90,7 +91,16 @@ const IN_FLIGHT_WARNING =
  * start notification, and the chain's finally releases it by id before
  * endOrchestration so an old chain can never clobber a later claim.
  * PI_ORCHESTRATION_LOCK=off disables the whole mechanism (no claim taken or
- * peeked).
+ * peeked, no lock file read or written).
+ *
+ * T8 lock classification: in the same pre-transition block as the takeover
+ * and only after it (so a lock left by takeover is ours to overwrite), a
+ * leftover lock file is classified when no registry claim was occupied: a
+ * fresh heartbeat owned by another live pid refuses the launch with a
+ * warning naming the orchestration's age in minutes (state untouched); a
+ * stale lock is cleared via its stored id with an age notification and the
+ * launch continues; an absent lock continues. Both run after preflight and
+ * before transitionTo, so a refusal never advances the phase.
  *
  * @param args        - Optional `--solo` flag plus engineer's note.
  * @param pi          - ExtensionAPI reference.
@@ -158,6 +168,33 @@ export async function runImplement(
       await Promise.race([orphan.settle().then(() => undefined, () => undefined), timeout]);
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  } else {
+    // T8 lock classification: no registry claim was occupied, so a leftover
+    // lock file decides the launch — a fresh lock owned by another live pid
+    // refuses with the orchestration's age; a stale lock (expired heartbeat,
+    // or this pid's lock with no claim) is cleared by its stored id and the
+    // launch continues; an absent lock continues. Runs after the takeover
+    // above and before transitionTo, so a refusal never advances the phase.
+    const lockState = classifyOrchestrationLock(ctx.cwd, false);
+    if (lockState.kind === "live") {
+      const ageMin = Math.max(1, Math.round(lockState.ageMs / 60_000));
+      ctx.ui.notify(
+        `Refusing to start: another orchestration (pid ${lockState.pid}) has been ` +
+          `running for ${ageMin} minute(s). Wait for it to settle, then re-run /implement.`,
+        "warning",
+      );
+      return;
+    }
+    if (lockState.kind === "stale") {
+      const ageMin = Math.max(1, Math.round(lockState.ageMs / 60_000));
+      ctx.ui.notify(
+        `Clearing stale orchestration lock (age ${ageMin} minute(s)) ` +
+          `left by a previous run before starting a new one.`,
+        "info",
+      );
+      const storedId = readOrchestrationLock(ctx.cwd)?.id;
+      if (storedId !== undefined) releaseOrchestration(ctx.cwd, storedId);
     }
   }
   const resuming = state.phase === "implementing";
