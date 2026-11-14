@@ -12,6 +12,7 @@ import { readTreeState } from "./git-ops.ts";
 import { buildDirtyTreeAdvisoryText, buildDirtyTreeHaltText, dirtyTreePreflight } from "./dirty-tree-check.ts";
 import { TEST_EXTENSION_CHORE_SUBJECT } from "./test-extension-chore.ts";
 import { ensureTestExtensionAtStart } from "./test-tool-ensure.ts";
+import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
 import { refreshTestExtensionAfterLanding } from "./test-extension-refresh.ts";
 import { buildEngineerNoteSection } from "./unit-task-text.ts";
 import { createDefaultUnitRunner } from "./unit-runner-default.ts";
@@ -158,6 +159,18 @@ export async function runOrchestratedImplement(
 
   // T9: land the test-extension chore commit before any unit spawns; failure halts.
   const startEnsure = await ensureTestExtensionAtStart(pi, cwd, state);
+  // T9(b): cancellation checkpoint — a cancel observed during the start
+  // ensure wins over the chore-fail halt below: no halt() call, no lastHalt
+  // write, no notification, and no dirty-tree preflight git work follows.
+  if (isOrchestrationCancelled()) {
+    return {
+      complete: false,
+      cancelled: true,
+      unitsRun: 0,
+      landedCommits: [],
+      satisfiedWithoutCommit: [],
+    };
+  }
   if (startEnsure.kind === "failed") {
     return halt(
       units[0]!.id,
