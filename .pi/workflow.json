@@ -31,5 +31,10 @@
         ]
       ]
     }
+  },
+  "timeouts": {
+    "commitMs": 600000,
+    "suiteMs": 600000,
+    "implementMs": 600000
   }
 }
