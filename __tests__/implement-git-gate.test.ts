@@ -686,6 +686,45 @@ describe("T2: HEAD-gate hook-rejection path", () => {
     const report = notifyCalls[notifyCalls.length - 1]!;
     assert.match(report, /timed out after 300000ms/, "handoff names the timeout");
   });
+
+  it("commitAndGate uses configured commitMs and the halt message reports it", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const cwd = mkdtempSync(join(tmpdir(), "to3-gate-"));
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(join(cwd, ".pi", "workflow.json"), JSON.stringify({ timeouts: { commitMs: 654321 } }));
+    const saved = process.env.PI_COMMIT_TIMEOUT_MS;
+    delete process.env.PI_COMMIT_TIMEOUT_MS;
+    try {
+      const pi = mockPi();
+      let commitTimeout: number | undefined;
+      pi.exec = (async (cmd: string, args: string[], opts?: { timeout?: number }) => {
+        if (cmd === "git" && args[0] === "rev-parse") {
+          return { stdout: "headA\n", stderr: "", code: 0, killed: false };
+        }
+        if (cmd === "git" && args[0] === "commit") {
+          commitTimeout = opts?.timeout;
+          throw new Error("Command timed out after 654321ms: git commit");
+        }
+        return { stdout: "", stderr: "", code: 0, killed: false };
+      }) as ExtensionAPI["exec"];
+      const state: WorkflowState = { phase: "finalizing", specText: "topic", task: oneBehaviorTask() };
+      const ctx = ctxWithState(state);
+      (ctx as { cwd: string }).cwd = cwd;
+      await runOrchestratedViaSeam(pi, ctx, async () => ({
+        summary: "implemented T1",
+        suggestedCommit: "feat(core): add first behavior",
+      }));
+      assert.equal(commitTimeout, 654321, "commit exec gets the configured budget");
+      const append = pi.calls["appendEntry"] ?? [];
+      const halt = (append[append.length - 1] as [string, WorkflowState])[1].lastHalt;
+      assert.match(halt?.error ?? "", /timed out after 654321ms/);
+      assert.match(halt?.error ?? "", /PI_COMMIT_TIMEOUT_MS/);
+    } finally {
+      if (saved !== undefined) process.env.PI_COMMIT_TIMEOUT_MS = saved;
+    }
+  });
 });
 
 // ═══ T11: resume safety — dirty-tree context on resumed units ═══

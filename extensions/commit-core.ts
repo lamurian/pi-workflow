@@ -3,6 +3,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getCommitTimeoutMs } from "./git-ops.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 
 /** Maximum conventional-subject length (changelog/tooling convention). */
 const SUBJECT_MAX = 75;
@@ -62,8 +63,9 @@ export async function runCommit(
   body?: string,
   paths?: readonly string[],
 ): Promise<Awaited<ReturnType<ExtensionAPI["exec"]>>> {
+  const config = await loadWorkflowConfig(cwd);
   return pi.exec("git", buildCommitArgs(subject, body, paths), {
     cwd,
-    timeout: getCommitTimeoutMs(),
+    timeout: getCommitTimeoutMs(process.env, config?.timeouts?.commitMs),
   });
 }

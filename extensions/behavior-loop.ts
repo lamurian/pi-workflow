@@ -9,7 +9,7 @@ import { RETRY_BUDGET, buildFixTask, retryExhaustedDetail } from "./commit-gate.
 import { relayImplementerEvent } from "./implementer-activity.ts";
 import type { PauseOutcome } from "./hitl-pause.ts";
 import { isOrchestrationCancelled } from "./orchestration-cancel.ts";
-import { getCommitTimeoutMs, isOutOfRepoBehavior, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
+import { isOutOfRepoBehavior, readGitHead, readTreeFingerprint, readTreeState } from "./git-ops.ts";
 import { commitAndGate, pickCommitSubject } from "./git-commit-gate.ts";
 import { resolveSlopGate } from "./slop-gate.ts";
 import { buildRetryTask, buildUnitTask, type UnitTaskOptions } from "./unit-task-text.ts";
@@ -276,7 +276,7 @@ export async function runBehaviorLoop(behavior: Behavior, unitIndex: number, tot
 
     if (commit.outcome.kind === "commit-timeout") {
       return haltWithChild(behavior.id,
-        `Commit process for ${behavior.id} timed out after ${getCommitTimeoutMs()}ms (PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the project's pre-commit hooks.`);
+        `Commit process for ${behavior.id} timed out after ${commit.timeoutMs}ms (PI_COMMIT_TIMEOUT_MS) — infrastructure failure, not a hook verdict. Raise the budget or scope the project's pre-commit hooks.`);
     }
 
     if (commit.outcome.kind === "hook-rejected") { // T1: scan only the raw hook evidence (never the investigation), verify named foreign paths against the true index — a staged foreign path halts now, no fix-forward round, no retry charge.

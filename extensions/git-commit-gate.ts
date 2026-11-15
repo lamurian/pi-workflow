@@ -9,6 +9,7 @@ import {
   filterOrchestratorOwned, NameStatusReadError, ownerlessHalt, readGuardNameStatus, runHeadStagedNameStatus, unstageContamination, withRemediation,
 } from "./git-guard-diff.ts";
 import { getCommitTimeoutMs, readChangedPaths, readDiffStat, readGitHead, readTreeState } from "./git-ops.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 import type { SlopGateRunner } from "./slop-gate.ts";
 import type { ImplementerReport } from "./implementer-report.ts";
 import type { Behavior, ContractV2, TaskContract } from "./state.ts";
@@ -24,6 +25,8 @@ export interface CommitAttempt {
   remediation?: string[];
   /** Slop-gate advisory notes (T5) from a landed commit, appended to the findings ledger. */
   slopNotes?: string[];
+  /** Commit budget (ms) the attempt actually used. */
+  timeoutMs?: number;
 }
 
 /**
@@ -102,7 +105,8 @@ export async function commitAndGate(
   contract?: ContractV2,
   slopRunner?: SlopGateRunner,
 ): Promise<CommitAttempt> {
-  const timeoutMs = getCommitTimeoutMs();
+  const config = await loadWorkflowConfig(cwd);
+  const timeoutMs = getCommitTimeoutMs(process.env, config?.timeouts?.commitMs);
   const headBefore = await readGitHead(pi, cwd);
   let commitOutput = "";
   let commitExitCode = 1;
@@ -245,5 +249,5 @@ export async function commitAndGate(
     timeoutMs,
   });
   if (outcome.kind === "landed") return { outcome: null, subject, ...carried };
-  return { outcome: { ...outcome, investigation: withRemediation(outcome.investigation, remediation) }, ...carried };
+  return { outcome: { ...outcome, investigation: withRemediation(outcome.investigation, remediation) }, timeoutMs, ...carried };
 }

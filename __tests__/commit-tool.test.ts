@@ -5,6 +5,29 @@ import { buildCommitArgs } from "../extensions/commit-core.ts";
 import { getCommitTimeoutMs } from "../extensions/git-ops.ts";
 import type { ContractV2, WorkflowState } from "../extensions/state.ts";
 
+// ═══ TO3: configured commit budget ═══
+describe("runCommit configured budget (TO3)", () => {
+  it("uses timeouts.commitMs when PI_COMMIT_TIMEOUT_MS is absent", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { runCommit } = await import("../extensions/commit-core.ts");
+    const cwd = mkdtempSync(join(tmpdir(), "to3-"));
+    mkdirSync(join(cwd, ".pi"));
+    writeFileSync(join(cwd, ".pi", "workflow.json"), JSON.stringify({ timeouts: { commitMs: 123456 } }));
+    const saved = process.env.PI_COMMIT_TIMEOUT_MS;
+    delete process.env.PI_COMMIT_TIMEOUT_MS;
+    try {
+      const pi = mockPi({});
+      await runCommit(pi, cwd, "feat: x");
+      const commit = pi.execLog.find((c) => c.args[0] === "commit");
+      assert.equal(commit?.options?.timeout, 123456);
+    } finally {
+      if (saved !== undefined) process.env.PI_COMMIT_TIMEOUT_MS = saved;
+    }
+  });
+});
+
 // ═══ T7: workflow-owned commit_changes tool ═══
 
 interface ExecCall {
