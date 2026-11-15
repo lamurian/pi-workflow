@@ -13,7 +13,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mockPi, ctxWithState, finalizingState } from "./helpers/implement-harness.ts";
@@ -342,6 +342,57 @@ describe("T2: escalation floor reaches the spawned child argv", () => {
     assert.notEqual(idx, -1, "the spawned child receives --thinking");
     assert.equal(argv[idx + 1], "medium", "the unit's escalation floor reaches the child argv");
     assert.notEqual(argv[idx + 1], "minimal", "the old minimal pin is gone");
+  });
+});
+
+describe("suiteMs config reaches the spawned unit env", () => {
+  it("sets PI_TEST_TIMEOUT_MS from timeouts.suiteMs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-suite-env-"));
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "workflow.json"), JSON.stringify({ timeouts: { suiteMs: 123456 } }));
+    const envFile = join(dir, "env.txt");
+    const reportFile = join(dir, "report.jsonl");
+    const fake = join(dir, "fake-pi.sh");
+    const reportText = 'done.\n```json\n{"summary": "implemented"}\n```';
+    writeFileSync(
+      reportFile,
+      JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: reportText }] },
+      }) + "\n",
+    );
+    writeFileSync(
+      fake,
+      "#!/bin/sh\n" +
+        'printf "%s" "$PI_TEST_TIMEOUT_MS" > "$PI_ENV_FILE"\n' +
+        "while IFS= read -r line; do\n" +
+        "  case \"$line\" in\n" +
+        "    *'\"type\":\"prompt\"'*) cat \"$PI_REPORT_FILE\" ;;\n" +
+        "    *'\"type\":\"abort\"'*) exit 0 ;;\n" +
+        "  esac\n" +
+        "done\nexit 0\n",
+    );
+    chmodSync(fake, 0o755);
+    const keys = ["PI_BIN", "PI_ENV_FILE", "PI_REPORT_FILE", "PI_TEST_TIMEOUT_MS"] as const;
+    const prev: Record<string, string | undefined> = {};
+    for (const k of keys) prev[k] = process.env[k];
+    process.env.PI_BIN = fake;
+    process.env.PI_ENV_FILE = envFile;
+    process.env.PI_REPORT_FILE = reportFile;
+    delete process.env.PI_TEST_TIMEOUT_MS;
+    try {
+      const state = finalizingState();
+      const { createDefaultUnitRunner } = await import("../extensions/unit-runner-default.ts");
+      const runner = createDefaultUnitRunner(mockPi(), state, state.task!);
+      const report = await runner({ behaviorId: "T1", taskText: "x" }, dir, undefined, () => {});
+      await report.client?.shutdown();
+    } finally {
+      for (const k of keys) {
+        if (prev[k] === undefined) delete process.env[k];
+        else process.env[k] = prev[k];
+      }
+    }
+    assert.equal(readFileSync(envFile, "utf8"), "123456");
   });
 });
 

@@ -109,11 +109,15 @@ const DEFAULT_IMPLEMENT_TIMEOUT_MS = 600_000;
  */
 export function getImplementerTimeoutMs(
   env: Record<string, string | undefined> = process.env,
+  configuredMs?: number,
 ): number {
   const raw = env.PI_IMPLEMENT_TIMEOUT_MS;
   if (raw) {
     const parsed = Number(raw);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  if (configuredMs !== undefined && Number.isFinite(configuredMs) && configuredMs > 0) {
+    return configuredMs;
   }
   return DEFAULT_IMPLEMENT_TIMEOUT_MS;
 }

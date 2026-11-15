@@ -269,6 +269,13 @@ describe("getImplementerTimeoutMs (T8)", () => {
     );
   });
 
+  it("env wins over configured; configured wins over default", async () => {
+    const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "90000" }, 1234), 90_000);
+    assert.equal(getImplementerTimeoutMs({}, 1234), 1234);
+    assert.equal(getImplementerTimeoutMs({ PI_IMPLEMENT_TIMEOUT_MS: "abc" }, 1234), 1234);
+  });
+
   it("is independent of PI_EXPLORE_TIMEOUT_MS (T8)", async () => {
     const { getImplementerTimeoutMs } = await import("../extensions/process-utils.ts");
     assert.equal(

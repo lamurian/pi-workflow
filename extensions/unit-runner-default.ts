@@ -8,6 +8,7 @@ import type { UnitRunner } from "./implement-loop.ts";
 import { writeContractGuardFile, taskCommands } from "./contract-guard-file.ts";
 import { FULL_GATE_UNIT_ID } from "./full-gate-fix.ts";
 import { runImplementerUnit } from "./implementer-runner.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 import { loadUnitPrompt } from "./unit-task-text.ts";
 
 /**
@@ -58,6 +59,12 @@ export function createDefaultUnitRunner(
     // T5: keep the child alive after every report — test-kind children absorb
     // hook-rejected/no-changes fixes as warm steers; the behavior loop shuts
     // them down on landing, halt, cancel and completion paths.
+    const suiteMs = (await loadWorkflowConfig(cwd)).timeouts?.suiteMs;
+    const hostSuite = Number(process.env.PI_TEST_TIMEOUT_MS);
+    const suiteEnv: Record<string, string> =
+      suiteMs && !(Number.isFinite(hostSuite) && hostSuite > 0)
+        ? { PI_TEST_TIMEOUT_MS: String(suiteMs) }
+        : {};
     return runImplementerUnit(
       loadUnitPrompt(), unit.taskText, cwd, signal, undefined,
       onEvent, true,
@@ -65,6 +72,7 @@ export function createDefaultUnitRunner(
         PI_UNIT_FILE: guardPath,
         // Legacy read-fallback for one release (T5).
         PI_CONTRACT_GUARD_FILE: guardPath,
+        ...suiteEnv,
       },
       modelRef,
       unit.thinking,

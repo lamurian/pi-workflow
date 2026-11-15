@@ -1,4 +1,5 @@
 import { getImplementerTimeoutMs } from "./process-utils.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 import { runDeadlineHandover, type DeadlineHandoverResult } from "./deadline-handover.ts";
 import { hasParseableReport, lastAssistantText, parseImplementerReport, shouldAbortDeadRun, buildDeadRunError, type ImplementerReport } from "./implementer-report.ts";
 import { getActiveUnitClient, setActiveUnitClient } from "./unit-client-registry.ts";
@@ -97,7 +98,7 @@ export async function runImplementerUnit(
   taskText: string,
   cwd: string,
   signal?: AbortSignal,
-  timeoutMs: number = getImplementerTimeoutMs(),
+  timeoutMsArg?: number,
   onEvent?: (event: Record<string, unknown>) => void,
   keepAlive = false,
   env?: Record<string, string>,
@@ -106,6 +107,8 @@ export async function runImplementerUnit(
   runCommands: readonly string[] = [],
   session?: UnitSessionSpec,
 ): Promise<ImplementerReport & { error?: string; timedOut?: boolean; missingReport?: boolean; modelError?: boolean; client?: RpcUnitClient; contextPercent?: number }> {
+  const timeoutMs = timeoutMsArg ??
+    getImplementerTimeoutMs(process.env, (await loadWorkflowConfig(cwd)).timeouts?.implementMs);
   // Per-spawn resolution: the generated test extension is loaded via a second
   // -e flag (and the `test` tool granted) only when the project has one.
   const client = spawnRpcUnitClient({
