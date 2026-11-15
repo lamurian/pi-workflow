@@ -13,6 +13,7 @@ import { deriveUnitScope } from "./contract-derive.ts";
 import { DEFAULT_SUITE_TIMEOUT_MS, OUTPUT_TAIL_CHARS } from "./test-extension-constants.ts";
 import { isFilterableSuite } from "./test-extension-template.ts";
 import { retryRedSuite } from "./gate-retry.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 
 /** Result of one orchestrator-run gate: per-suite verdicts plus overall pass. */
 export interface TestGateRun {
@@ -26,13 +27,18 @@ export interface TestGateRun {
  * Resolve the per-suite wall-clock budget for gate runs.
  *
  * @param env - Environment map (defaults to process.env); injectable for tests.
+ * @param configuredMs - Optional timeouts.suiteMs from workflow config.
  * @returns The timeout in ms (> 0).
  */
 export function gateTimeoutMs(
   env: Record<string, string | undefined> = process.env,
+  configuredMs?: number,
 ): number {
   const raw = Number(env.PI_TEST_TIMEOUT_MS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_SUITE_TIMEOUT_MS;
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return configuredMs !== undefined && Number.isFinite(configuredMs) && configuredMs > 0
+    ? configuredMs
+    : DEFAULT_SUITE_TIMEOUT_MS;
 }
 
 /**
@@ -89,7 +95,7 @@ export async function runTestGate(
   suites: readonly TestSuite[],
   scope?: readonly string[],
 ): Promise<TestGateRun> {
-  const timeout = gateTimeoutMs();
+  const timeout = gateTimeoutMs(process.env, (await loadWorkflowConfig(cwd)).timeouts?.suiteMs);
   const results: GateSuiteResult[] = [];
   for (const suite of suites) {
     results.push(await execGateSuite(pi, cwd, suite, gateSuiteArgv(suite, scope), timeout));
@@ -163,7 +169,7 @@ export async function runTaskScopeGate(
   const scope = deriveUnitScope(contract, behaviorId);
   if (scope.testFiles.length === 0) return null;
   const runs = routeSuites([...suites], scope.testFiles.map((path) => ({ path })));
-  const timeout = gateTimeoutMs();
+  const timeout = gateTimeoutMs(process.env, (await loadWorkflowConfig(cwd)).timeouts?.suiteMs);
   const results: GateSuiteResult[] = [];
   const notes: string[] = [];
   for (const run of runs) {

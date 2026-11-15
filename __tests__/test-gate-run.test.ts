@@ -1,7 +1,10 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { runTaskScopeGate } from "../extensions/test-gate-run.ts";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gateTimeoutMs, runTestGate, runTaskScopeGate } from "../extensions/test-gate-run.ts";
 import { renderGateReport, SKIPPED_TAIL, isSkippedSuite } from "../extensions/test-gate-report.ts";
 import type { ContractV2 } from "../extensions/state.ts";
 import type { TestSuite } from "../extensions/test-tool-detect.ts";
@@ -52,6 +55,59 @@ function contract(): ContractV2 {
     ],
   };
 }
+
+/** Temp cwd, optionally with a suiteMs config. */
+function tempCwd(suiteMs?: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "gate-to4-"));
+  if (suiteMs !== undefined) {
+    mkdirSync(join(dir, ".pi"));
+    writeFileSync(join(dir, ".pi", "workflow.json"), JSON.stringify({ timeouts: { suiteMs } }));
+  }
+  return dir;
+}
+
+/** Mock pi recording exec timeouts. */
+function timeoutPi(): ExtensionAPI & { timeouts: unknown[] } {
+  const timeouts: unknown[] = [];
+  return {
+    exec: (async (_c: string, _a: string[], o: { timeout?: number }) => {
+      timeouts.push(o.timeout);
+      return { stdout: "ok", stderr: "", code: 0, killed: false };
+    }) as ExtensionAPI["exec"],
+    timeouts,
+  } as unknown as ExtensionAPI & { timeouts: unknown[] };
+}
+
+describe("gate timeouts", () => {
+  it("gateTimeoutMs returns a positive PI_TEST_TIMEOUT_MS even when a configured suiteMs is supplied", () => {
+    assert.equal(gateTimeoutMs({ PI_TEST_TIMEOUT_MS: "1234" }, 999), 1234);
+    assert.equal(gateTimeoutMs({}, 999), 999);
+  });
+
+  it("runTaskScopeGate executes each routed suite with the configured timeouts.suiteMs as exec timeout when PI_TEST_TIMEOUT_MS is absent", async () => {
+    const saved = process.env.PI_TEST_TIMEOUT_MS;
+    delete process.env.PI_TEST_TIMEOUT_MS;
+    try {
+      const pi = timeoutPi();
+      await runTaskScopeGate(pi, tempCwd(777000), contract(), [GO_SUITE], "T1");
+      assert.deepEqual(pi.timeouts, [777000]);
+    } finally {
+      if (saved !== undefined) process.env.PI_TEST_TIMEOUT_MS = saved;
+    }
+  });
+
+  it("runTestGate falls back to the 300000 default when neither the env var nor the config sets a suite budget", async () => {
+    const saved = process.env.PI_TEST_TIMEOUT_MS;
+    delete process.env.PI_TEST_TIMEOUT_MS;
+    try {
+      const pi = timeoutPi();
+      await runTestGate(pi, tempCwd(), [GO_SUITE]);
+      assert.deepEqual(pi.timeouts, [300000]);
+    } finally {
+      if (saved !== undefined) process.env.PI_TEST_TIMEOUT_MS = saved;
+    }
+  });
+});
 
 describe("runTaskScopeGate", () => {
   it("runs each scoped suite with the routed argv in that suite's cwd", async () => {
