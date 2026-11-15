@@ -1,6 +1,6 @@
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { readCommitsSinceBaseline } from "../extensions/git-ops.ts";
+import { getCommitTimeoutMs, readCommitsSinceBaseline } from "../extensions/git-ops.ts";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface ExecCall {
@@ -21,6 +21,17 @@ function execSpy(
   } as unknown as ExtensionAPI;
   return { pi, calls };
 }
+
+describe("getCommitTimeoutMs precedence", () => {
+  it("env wins over configured", () => {
+    assert.equal(getCommitTimeoutMs({ PI_COMMIT_TIMEOUT_MS: "5" }, 9), 5);
+  });
+  it("configured wins when env absent or invalid", () => {
+    assert.equal(getCommitTimeoutMs({}, 9), 9);
+    assert.equal(getCommitTimeoutMs({ PI_COMMIT_TIMEOUT_MS: "-1" }, 9), 9);
+    assert.equal(getCommitTimeoutMs({}), 300_000);
+  });
+});
 
 describe("readCommitsSinceBaseline (T4)", () => {
   it("returns null and never calls exec when baselineHead starts with '-'", async () => {

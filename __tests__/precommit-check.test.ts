@@ -173,6 +173,20 @@ describe("runPrecommitCheck", () => {
     assert.equal(hookCall!.options?.timeout, 300_000);
   });
 
+  it("uses configured timeouts.commitMs when env is absent", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pc-cfg-"));
+    try {
+      mkdirSync(join(dir, ".pi"), { recursive: true });
+      writeFileSync(join(dir, ".pi", "workflow.json"), JSON.stringify({ timeouts: { commitMs: 777_001 } }));
+      const pi = mockPi(async () => ({ stdout: "", stderr: "", code: 0, killed: false }));
+      await runPrecommitCheck(pi, dir, {});
+      const hookCall = pi.execLog.find((c) => c.args[0] === "hook");
+      assert.equal(hookCall!.options?.timeout, 777_001);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("caps the output tail at PRECOMMIT_OUTPUT_TAIL (4000) chars, keeping the tail", async () => {
     const long = "x".repeat(5000) + "TAIL-MARKER";
     const pi = mockPi(async (cmd, args) => {

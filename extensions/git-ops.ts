@@ -182,15 +182,20 @@ export const DEFAULT_COMMIT_TIMEOUT_MS = 300_000;
  * Resolve the git-commit timeout budget, honoring PI_COMMIT_TIMEOUT_MS.
  *
  * @param env - Environment map (defaults to `process.env`); injectable for tests.
+ * @param configuredMs - Optional timeouts.commitMs from workflow config.
  * @returns The timeout in milliseconds (&gt; 0).
  */
 export function getCommitTimeoutMs(
   env: Record<string, string | undefined> = process.env,
+  configuredMs?: number,
 ): number {
   const raw = env.PI_COMMIT_TIMEOUT_MS;
   if (raw) {
     const parsed = Number(raw);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  if (configuredMs !== undefined && Number.isFinite(configuredMs) && configuredMs > 0) {
+    return configuredMs;
   }
   return DEFAULT_COMMIT_TIMEOUT_MS;
 }

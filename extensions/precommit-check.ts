@@ -4,6 +4,7 @@ import { accessSync, constants, existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { loadState } from "./state.ts";
 import { getCommitTimeoutMs } from "./git-ops.ts";
+import { loadWorkflowConfig } from "./paths.ts";
 
 /** Maximum characters of hook output kept in the result tail. */
 export const PRECOMMIT_OUTPUT_TAIL = 4000;
@@ -69,7 +70,8 @@ export async function runPrecommitCheck(
   cwd: string,
   env: Record<string, string | undefined> = process.env,
 ): Promise<PrecommitCheckResult> {
-  const timeoutMs = getCommitTimeoutMs(env);
+  const config = await loadWorkflowConfig(cwd).catch(() => undefined);
+  const timeoutMs = getCommitTimeoutMs(env, config?.timeouts?.commitMs);
   const hookPresent = await isPrecommitHookPresent(pi, cwd);
   try {
     await pi.exec("git", ["add", "--all"], { cwd });
