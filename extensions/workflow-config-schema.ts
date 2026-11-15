@@ -49,8 +49,19 @@ export interface FinalizeConfig {
   maxTaskBytes?: number;
 }
 
+/** Timeout budgets in milliseconds (positive integers only). */
+export interface TimeoutsConfig {
+  commitMs?: number;
+  suiteMs?: number;
+  implementMs?: number;
+}
+
+/** Timeouts keys that must be positive integers. */
+export const TIMEOUT_KEYS = ["commitMs", "suiteMs", "implementMs"] as const;
+
 /** Top-level workflow configuration from workflow.json. */
 export interface WorkflowConfig {
+  timeouts?: TimeoutsConfig;
   brainstorm?: BrainstormConfig;
   implement?: ImplementConfig;
   finalize?: FinalizeConfig;
@@ -137,6 +148,19 @@ export function validateWorkflowConfig(config: unknown): string[] {
         if (v === undefined) continue;
         if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
           errors.push(`finalize.${k}: expected positive integer`);
+        }
+      }
+    }
+  }
+  const to = config.timeouts;
+  if (to !== undefined) {
+    if (!isObj(to)) errors.push("timeouts: expected object");
+    else {
+      for (const k of TIMEOUT_KEYS) {
+        const v = to[k];
+        if (v === undefined) continue;
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
+          errors.push(`timeouts.${k}: expected positive integer`);
         }
       }
     }

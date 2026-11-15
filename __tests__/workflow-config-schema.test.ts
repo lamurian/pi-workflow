@@ -48,6 +48,15 @@ describe("validateWorkflowConfig", () => {
     }
   });
 
+  it("validates timeouts block", () => {
+    assert.deepEqual(validateWorkflowConfig({ timeouts: { commitMs: 1, suiteMs: 2, implementMs: 3 } }), []);
+    assert.deepEqual(validateWorkflowConfig({ timeouts: { suiteMs: 5 } }), []);
+    for (const bad of [0, -1, 1.5, "9"]) {
+      const errs = validateWorkflowConfig({ timeouts: { commitMs: bad } });
+      assert.ok(errs.some((e) => e.startsWith("timeouts.commitMs")), String(bad));
+    }
+  });
+
   it("keeps paths.ts at or below 300 lines", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "extensions", "paths.ts"), "utf-8");
     assert.ok(src.split("\n").length <= 300);
