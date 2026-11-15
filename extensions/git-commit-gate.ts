@@ -132,9 +132,7 @@ export async function commitAndGate(
         pendingVsHead: changed,
       });
       if (allowlist.violations.length > 0) return guardHalt(allowlist);
-      // T3 A1: stage only owned paths (sources then tests) via `git add -- <paths>`;
-      // `git add --all` never runs in v2; `changed` comes from `git status --short
-      // --untracked-files=all` so brand-new-directory files still match their path.
+      // T3 A1: stage only owned paths via `git add -- <paths>` (never --all in v2).
       const ownedPaths = declared
         .filter((e) => e.refs?.includes(behavior.id))
         .map((e) => e.path)
@@ -149,10 +147,7 @@ export async function commitAndGate(
           `No changes detected for ${behavior.id}: the unit's owned staged set is empty — git commit was never invoked. ` +
           "Land actual file changes in the unit's owned paths; git status shows only foreign or undeclared work." } };
       }
-      // T6/T2: auto-unstage cross-task contamination BEFORE gating — only a path in
-      // `git diff --cached --name-status HEAD` is genuinely staged, so a file committed
-      // since the baseline is never contamination. Paths declared but owned by OTHER
-      // tasks leave the index via `git restore --staged -- <path>` (work stays on disk);
+      // T6/T2: auto-unstage cross-task contamination BEFORE gating (work stays on disk);
       // undeclared or ownerless staged paths halt and are never unstaged.
       const headNameStatus = await runHeadStagedNameStatus(pi, cwd);
       const plan = planUnstage(declared, headNameStatus, behavior.id);
