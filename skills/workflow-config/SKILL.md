@@ -36,6 +36,16 @@ Positive integers only:
 - `finalize.maxManualAssertions`
 - `finalize.maxTaskBytes`
 
+## timeouts
+
+Top-level `timeouts` block, optional positive integers (milliseconds) only:
+
+- `timeouts.commitMs` (default 300000, env `PI_COMMIT_TIMEOUT_MS`)
+- `timeouts.suiteMs` (default 300000, env `PI_TEST_TIMEOUT_MS`)
+- `timeouts.implementMs` (default 600000, env `PI_IMPLEMENT_TIMEOUT_MS`)
+
+Precedence: positive env var > configured value > default.
+
 ## Pixi example
 
 ```json

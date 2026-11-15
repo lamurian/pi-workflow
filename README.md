@@ -22,7 +22,7 @@ Two deterministic gates protect the atomic green-commit invariant: a **test scan
 |------|-------------|
 | `explore` | Runs parallel codebase searches via scout subagents and returns a synthesized summary with relative file paths. |
 | `save_task` | Persists the normalized contract (v2): `sources` and `tests` path lists plus `tasks[]` with a per-assertion `expectedOutput` array. Hard-validates every invariant (dangling taskRef, duplicate path, a path in both lists, a `D` entry without an owning task, empty `expectedOutput`, duplicate task id) and renders a per-task summary (id → sources → tests → assertion count). Then runs the test-suite detection step: when suites are detected and no session `test` tool exists, it generates `.pi/extensions/test.ts` — orchestrator-owned, never declared in the contract (see below). Then runs the deterministic **test scan**: per-entry evidence lines with confidence tags plus advisory warnings surface in the tool result. Transitions the workflow to the `finalizing` phase. Two operations: `replace` (default) saves the whole contract; `split` (`{ operation: "split", parentId, tasks: [{ description, expectedOutput, paths, commands? }] }`) replaces one task with children `<parentId>.1..k` — the agent may split in `finalizing`, the orchestrator in `implementing`. Both run the same commands, breadth and sizing checks. |
-| `update_workflow_config` | Edits `.pi/workflow.json` (`implement.tests`, `implement.commands`, `finalize` limits) after schema validation. Allowed only in the `discussing` and `finalizing` phases; the guard points units and later phases back to `/discuss`. |
+| `update_workflow_config` | Edits `.pi/workflow.json` (`implement.tests`, `implement.commands`, `finalize` limits, `timeouts`) after schema validation. Allowed only in the `discussing` and `finalizing` phases; the guard points units and later phases back to `/discuss`. |
 | `mark_task_done` | Marks one task done after implementing it. For a task with `tests` refs the evidence carries the orchestrator's gate result line (scope + pass/fail) from the per-task scope gate, replacing the unit's self-report. Soft-warns (does not block) when no commit landed since the previous task. |
 | `complete_implementation` | Ends the `implementing` phase and returns the workflow to idle. Refuses while any task is active, then runs the FULL GATE — every detected suite unfiltered, orchestrator-run — and blocks completion on red, naming the failing suite and its output tail. The orchestrator completes on its own and does not call this tool. |
 | `commit_changes` | The workflow's own commit tool (registered by this extension — no external commit extension required). With `taskId`: stage only that contract task's owned changed paths (never `git add --all`) and commit with the task's contract `commit` message, path-limited via `--only -- <paths>`. Without `taskId`: stage everything and commit the given `message`. Either way the commit goes through the shared commit core: always `--signoff`, never `--no-verify`. Returns the landed short sha and subject; a hook rejection comes back as an error with the hook output tail. Reports `nothing to commit` when the staged set is empty. |
@@ -114,12 +114,24 @@ Bulk wording such as "every file" or "all rows" is rejected too. Split the task 
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PI_COMMIT_TIMEOUT_MS` | `300000` | Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
-| `PI_IMPLEMENT_TIMEOUT_MS` | `600000` | Per-implementer-unit subprocess budget (600 s), independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 40% the unit gets a write-check steer when nothing has been written yet; at 50% a progress-check steer; at 70% the wrap-up steer. |
+| `PI_COMMIT_TIMEOUT_MS` | `300000` | Overrides `timeouts.commitMs`. Budget for `git commit` — hooks run lint+format+test, which can exceed a minute on cold caches. Exceeding it halts as an infrastructure failure. |
+| `PI_IMPLEMENT_TIMEOUT_MS` | `600000` | Overrides `timeouts.implementMs`. Per-implementer-unit subprocess budget (600 s), independent of the scout timeout (`PI_EXPLORE_TIMEOUT_MS`). At 40% the unit gets a write-check steer when nothing has been written yet; at 50% a progress-check steer; at 70% the wrap-up steer. |
 | `PI_IMPLEMENTER_TOOLS` | `read,write,edit,grep,find,ls,delete_file` | Full override of the tool allowlist granted to implementer subprocesses. Units never receive a shell through this override — the child contract-guard blocks it either way. |
 | `PI_SLOP_GATE` | (unset) | Overrides `implement.slop.mode` for the run when it holds a valid mode (`off`, `advisory`, `baseline`, `hard`); any other value is ignored and the configured mode stands. Read fresh when each task's gate resolves, so `PI_SLOP_GATE=off` disables the slop gate for a run (see [Slop gate](#slop-gate)). |
 | `PI_UNIT_FILE` | `.pi/workflow/contract-guard.json` | Internal: path of the per-spawn payload the orchestrator writes before each unit spawn — `repoRoot`, `baselineHead`, the derived allowlist and the unit's slice `unit { id, sources, tests, packages, testSuites }`. Read by the child contract-guard (per-task ownership) and by the generated `test` tool (default scope). Not meant to be set by hand. |
 | `PI_CONTRACT_GUARD_FILE` | `.pi/workflow/contract-guard.json` | Legacy read-fallback for `PI_UNIT_FILE`, kept for one release: the guard reads it when `PI_UNIT_FILE` is absent. Not meant to be set by hand. |
+
+### Timeouts config
+
+The top-level `timeouts` block in workflow.json sets the budgets. `PI_TEST_TIMEOUT_MS` overrides `timeouts.suiteMs` (per-suite budget for the scope gate and unit `test` tool).
+
+| Key | Default | Env override |
+|-----|---------|--------------|
+| `commitMs` | `300000` | `PI_COMMIT_TIMEOUT_MS` |
+| `suiteMs` | `300000` | `PI_TEST_TIMEOUT_MS` |
+| `implementMs` | `600000` | `PI_IMPLEMENT_TIMEOUT_MS` |
+
+Keys are optional positive integers. Precedence: positive env var > `workflow.json` `timeouts.*` > built-in default.
 
 ### Files-allowlist contract rule
 
